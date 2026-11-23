@@ -14,16 +14,23 @@
     <p class="mm-category">{{ node.app_area ~ ' · ' ~ ('Backend process' if node.feature_type == 'backend' else 'User-facing feature') if node.area == 'feature' else node.group ~ ' · ' ~ node.kind }}</p>
     <h2 id="mm-detail-title">{{ node.title }}</h2>
     <p class="mm-detail-summary">{{ node.summary }}</p>
+    {% if node.area == 'feature' %}
+    <dl class="mm-location">
+      <dt>Where to find it</dt><dd>{{ node.ui_location }}</dd>
+    </dl>
+    {% endif %}
     <div class="mm-detail-periods">
       {% for period in graph.periods if period.id in node.layers %}<span class="mm-period" data-period="{{ period.id }}">{{ period.title }}</span>{% endfor %}
     </div>
   </div>
+  {% if node.area != 'feature' %}
   <dl class="mm-definition">
-    <dt>{{ 'How it is derived' if node.area == 'feature' else 'Predicts or represents' }}</dt><dd>{{ node.output }}</dd>
+    <dt>Predicts or represents</dt><dd>{{ node.output }}</dd>
     <dt>Data & evidence</dt><dd>{{ node.inputs }}</dd>
     <dt>Maintenance & grooming</dt><dd>{{ node.maintenance }}</dd>
     <dt>Time horizon</dt><dd>{{ node.temporal }}</dd>
   </dl>
+  {% endif %}
   {% if node.caution %}<p class="mm-caveat">{{ node.caution }}</p>{% endif %}
   {% for direction, label in [('incoming', 'Inputs from'), ('outgoing', 'Used by')] %}
     {% if node[direction] %}
@@ -68,12 +75,22 @@
     <button type="button" id="mm-fit">Fit graph</button>
   </div>
   <div class="mm-legend">
-    <span class="mm-key-model">Model / policy</span><span class="mm-key-feature">User-facing feature</span><span class="mm-key-backend">Backend</span>
-    <details class="mm-color-key"><summary>Model colors</summary><div>{% for group in graph.groups %}<span data-mm-group="{{ group }}">{{ group }}</span>{% endfor %}</div></details>
-    <span><i class="mm-line-key"></i> Feeds</span><span><i class="mm-line-key mm-line-conditional"></i> Conditional</span>
-    <output id="mm-visible-count"></output>
+    <div class="mm-node-key">
+      <span class="mm-key-model">Model / policy</span><span class="mm-key-feature">User-facing feature</span><span class="mm-key-backend">Backend</span>
+      <details class="mm-color-key"><summary>Model colors</summary><div>{% for group in graph.groups %}<span data-mm-group="{{ group }}">{{ group }}</span>{% endfor %}</div></details>
+      <span><i class="mm-line-key"></i> Feeds</span><span><i class="mm-line-key mm-line-conditional"></i> Conditional</span>
+      <span><i class="mm-line-key mm-line-feedback"></i> Observed feedback</span>
+      <span><svg class="mm-horizon-key" width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M4 2l4 4-4 4" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/></svg> Taste horizon</span>
+      <output id="mm-visible-count"></output>
+    </div>
+    <div class="mm-trace-key" aria-label="Distance from selected node">
+      <span><i class="mm-hop-direct" aria-hidden="true"></i> Direct</span>
+      <span><i class="mm-hop-two" aria-hidden="true"></i> 2 hops</span>
+      <span><i class="mm-hop-three" aria-hidden="true"></i> 3 hops</span>
+      <span><i class="mm-hop-farther" aria-hidden="true"></i> 4+ hops</span>
+    </div>
+    <p class="mm-hint">Scroll to zoom · Drag to pan · Hover to trace · Click for details</p>
   </div>
-  <p class="mm-hint">Dependencies run left to right · Scroll to zoom · Drag to pan · Hover to trace · Click for details</p>
   <div class="mm-hover" hidden><strong></strong><span></span></div>
   <p class="mm-empty" hidden>No matching models or features.</p>
   <dialog id="mm-dialog" aria-labelledby="mm-detail-title">

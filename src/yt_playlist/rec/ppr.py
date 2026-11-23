@@ -92,7 +92,7 @@ def mode_rankings(store, alpha=None, iters=None, tol=None, depth=None, *, snapsh
 
 
 def rankings_from_inputs(modes, graph, content, *, alpha, iters, tol, depth):
-    keys, W, idx = graph
+    _, W, _ = graph
     lkeys, LV, _ = content
     if not modes or W is None or LV is None or not lkeys:
         return {}
@@ -103,14 +103,22 @@ def rankings_from_inputs(modes, graph, content, *, alpha, iters, tol, depth):
         # a shape-error crash in the rec worker.
         return {}
     near = (LV.astype(np.float64) @ C.T).argmax(axis=1)          # each library track -> nearest mode
+    members = {mode['mode_id']: [lkeys[i] for i in np.where(near == j)[0]] for j, mode in enumerate(modes)}
+    return rankings_from_members(members, graph, alpha=alpha, iters=iters, tol=tol, depth=depth)
+
+
+def rankings_from_members(members, graph, *, alpha, iters, tol, depth):
+    """Restart each walk from that published group's members present in the graph."""
+    keys, W, idx = graph
+    if W is None:
+        return {}
     out = {}
-    for j, m in enumerate(modes):
+    for group, recordings in members.items():
         check_stopping()
-        members = [lkeys[i] for i in np.where(near == j)[0]]
-        seed = [idx[k] for k in members if k in idx]             # members present in the co-listen vocab
+        seed = [idx[key] for key in recordings if key in idx]
         if not seed:
-            out[m["mode_id"]] = []
+            out[group] = []
             continue
         r = ppr_rank(W, seed, alpha=alpha, iters=iters, tol=tol)
-        out[m["mode_id"]] = [keys[i] for i in np.argsort(-r)[:depth]]
+        out[group] = [keys[i] for i in np.argsort(-r)[:depth]]
     return out

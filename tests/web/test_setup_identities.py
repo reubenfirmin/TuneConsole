@@ -10,7 +10,6 @@ from tests.web_consumer_support import install_routes, route_schema, route_store
 from yt_playlist.core.bridge import BridgeError
 from yt_playlist.core.runtime import Runtime
 from yt_playlist.web.app import create_app
-from yt_playlist.web.context import AUTH_EXPIRED_KEY
 
 
 class CheckedClient(FakeClient):
@@ -33,7 +32,7 @@ class CheckedClient(FakeClient):
 
 @pytest.fixture
 def identity_setup(store, tmp_path, monkeypatch):
-    runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
+    runtime = Runtime(store, tmp_path / "config.toml")
     clients = {"main": CheckedClient("Main account"),
                "Brand": CheckedClient("My brand", handle="@mybrand")}
     monkeypatch.setattr("yt_playlist.core.runtime.build_client", lambda cfg, bridge: clients[cfg.label])
@@ -106,8 +105,7 @@ def test_disconnected_extension_is_unverified_and_does_not_clear_expired_state(i
     assert "Open Pairing" not in checked.text
     assert "automatically" in checked.text
     assert t.app.state.ctx.auth_expired == {iid: "main"}
-    from yt_playlist.core import account_auth_state
-    assert account_auth_state.read(t.store.conn) == {iid: "main"}
+    assert t.store.accounts.auth_expirations() == {iid: "main"}
 
 
 def test_only_live_success_clears_its_expired_flag(identity_setup):
@@ -123,7 +121,7 @@ def test_only_live_success_clears_its_expired_flag(identity_setup):
     t.clients["Brand"].library_error = None
     checked = t.client.get("/setup/identities/check")
     assert t.app.state.ctx.auth_expired == {}
-    assert t.store.settings.get_setting(AUTH_EXPIRED_KEY) is None
+    assert t.store.settings.get_setting('auth_expired_identities') is None
     assert checked.json()["auth_labels"] == []
 
 
@@ -219,13 +217,12 @@ def test_remove_main_promotes_a_remaining_identity(identity_setup):
     assert t.store.accounts.get_master_account().id == ids["Brand"]
 
 
-def test_remove_unknown_or_only_identity_leaves_config_unchanged(identity_setup):
+def test_remove_unknown_or_only_identity_leaves_bindings_unchanged(identity_setup):
     t = identity_setup
-    original = t.runtime.config_path.read_text()
     only = t.store.accounts.get_accounts()[0]
     assert t.client.post("/setup/identities/999999/remove").status_code == 404
     assert t.client.post(f"/setup/identities/{only.id}/remove").status_code == 409
-    assert t.runtime.config_path.read_text() == original
+    assert not t.runtime.config_path.exists()
     assert t.store.accounts.get_accounts() == [only]
 
 
@@ -252,7 +249,7 @@ def test_live_checks_use_each_identity_through_the_browser_bridge(store, tmp_pat
                     "content": {"sectionListRenderer": {"contents": [{"gridRenderer": {"items": []}}]}}}}]}}}
             return 200, json.dumps(data)
 
-    runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
+    runtime = Runtime(store, tmp_path / "config.toml")
     runtime.bridge = AccountBridge()
     runtime.apply_setup([
         {"label": "main", "credential_ref": "browser.json", "is_master": True},
@@ -274,7 +271,7 @@ def test_live_checks_use_each_identity_through_the_browser_bridge(store, tmp_pat
 def test_removing_identity_updates_setup_menu_and_move_choices(route_store, tmp_path, monkeypatch):
     store = route_store
     install_routes(monkeypatch, 'setup', 'playlists', 'move')
-    runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
+    runtime = Runtime(store, tmp_path / "config.toml")
     runtime.apply_setup([
         {"label": "main", "credential_ref": "browser.json", "is_master": True},
         {"label": "Second identity", "credential_ref": "browser.json", "brand_account_id": "UC9"},

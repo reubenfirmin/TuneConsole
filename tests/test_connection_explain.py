@@ -13,6 +13,7 @@ from tests.enrichment_support import seed_enrichment
 from tests.repository_mock_support import no_database
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.rec import embed
@@ -25,7 +26,7 @@ from tests.web_consumer_support import install_routes, route_schema, route_store
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -47,7 +48,7 @@ def _track(store, title, artist, *, album="", album_browse_id=None, genre="", ye
 
 def _playlist(store, iid, title, keys, ytm=None):
     pid = store.playlists.upsert_playlist(iid, ytm or ("PL_" + title), title, len(keys), title, 1.0)
-    tids = [store.conn.execute("SELECT id FROM tracks WHERE identity_key=? LIMIT 1", (k,)).fetchone()["id"]
+    tids = [store.conn.execute("SELECT id FROM catalog_tracks WHERE identity_key=? LIMIT 1", (k,)).fetchone()["id"]
             for k in keys]
     store.playlists.set_playlist_tracks(pid, tids)
     return pid
@@ -84,7 +85,7 @@ def test_no_direct_basket_returns_empty(no_database):
 
 
 def test_child_excluded_from_its_own_path(store):
-    store.accounts.upsert_account("m", "c", None, True)
+    store.accounts.upsert_account("m", None, True)
     a = _track(store, "Solo", "Solo Artist")
     # path is just the child itself -> nothing to compare against
     assert connection_reasons(store.cluster_evidence.connection(a, [a])) == []
@@ -151,20 +152,49 @@ def test_explain_route_returns_headline_from_shared_playlist(store):
     assert res["title"] == "Train"
 
 
-def test_explain_route_falls_back_to_bridge(route_store, monkeypatch):
+@pytest.mark.parametrize('artist_id, collaborator, expected_credit', [
+    ('echo-a', False, True),
+    ('echo-b', False, False),
+    ('echo-a', True, True),
+])
+def test_explain_route_matches_individual_artist_credits(store, artist_id, collaborator,
+                                                        expected_credit):
+    client, _ = _client(store)
+    store.tracks.upsert_track('root-video', 'Root', 'Echo & Anchor', None, 200, credits=[
+        {'name': 'Echo', 'id': 'echo-a'}, {'name': 'Anchor', 'id': 'anchor'},
+    ])
+    credits = [{'name': 'Echo', 'id': artist_id}]
+    if collaborator:
+        credits.append({'name': 'Guest', 'id': 'guest'})
+    store.tracks.upsert_track('child-video', 'Child', 'Echo & Guest' if collaborator else 'Echo',
+                              None, 180, credits=credits)
+    root = store.tracks.identity_key_for_video('root-video')
+    child = store.tracks.identity_key_for_video('child-video')
+
+    response = client.post('/clusters/explain', json={'key': child, 'path_keys': [root]})
+    assert response.status_code == 200
+    reasons = [r['text'] for r in response.json()['reasons'] if r['kind'] == 'same_artist']
+    assert reasons == (['Shares an artist credit with this branch (Echo).'] if expected_credit else [])
+
+
+@pytest.mark.parametrize('angle, expected_bridge', [(40, True), (130, False), (200, False)])
+def test_explain_route_falls_back_to_bridge_only_with_two_positive_similarities(
+        route_store, monkeypatch, angle, expected_bridge):
     store = route_store
     install_routes(monkeypatch, 'clusters')
-    c, iid = _client(store)
+    c, _ = _client(store)
     child = _track(store, "Edge", "A")
     seed = _track(store, "Root", "B")
     bridge = _track(store, "Middle", "C")
-    # no shared playlist -> facts empty -> bridge fallback
-    _put(store, {child: _unit(80), seed: _unit(0), bridge: _unit(40)})
+    _put(store, {child: _unit(80), seed: _unit(0), bridge: _unit(angle)})
 
     res = c.post("/clusters/explain", json={"key": child, "path_keys": [seed]}).json()
-    assert res["reasons"], "should fall back to a bridge reason"
-    assert res["reasons"][0]["kind"] == "bridge"
-    assert "Middle" in res["headline"]
+    assert res["score"] == pytest.approx(0.1736)
+    if expected_bridge:
+        assert [reason["kind"] for reason in res["reasons"]] == ["bridge"]
+        assert "Middle" in res["headline"]
+    else:
+        assert res["reasons"] == []
 
 
 def test_explain_route_empty_key(store):

@@ -1,10 +1,9 @@
-"""Exercise leased compact builds, interruption and shared-content ownership."""
+"""Exercise leased group builds, interruption and generation ownership."""
 from contextlib import ExitStack, closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 import json
 from pathlib import Path
-import sqlite3
 from tempfile import TemporaryDirectory
 from threading import Event
 
@@ -15,7 +14,7 @@ from tests.store_fixture_support import initialize_consumer, bounded_consumer_sc
 from tests.genre_catalog_support import bound_catalog
 from tests.prepared_fixture_support import capture_template, roots
 from yt_playlist.core.activity import WorkClosing
-from yt_playlist.core import group_content, group_documents, group_plan, group_reads as group_queries, group_storage
+from yt_playlist.core import group_documents, group_reads as group_queries
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
 from yt_playlist.repos import compact_group_publication as compact, group_publication as publication
@@ -65,10 +64,9 @@ def restored_groups(template, path):
     store = Store(path)
     try:
         prepared = template.restore(store)
-        from yt_playlist.repos import group_file_writes, policy_file_writes
+        from yt_playlist.core.file_receipts import policy
         with store.conn:
-            group_file_writes.install(store.conn)
-            policy_file_writes.install(store.conn)
+            policy.install(store.conn)
         bind_compact_store(store)
         assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0] == 'wal'
         assert store._snapshot_revisions.conn is store.conn
@@ -108,22 +106,23 @@ def finish(store, prepared, owner):
         compact.finish(store.conn, prepared['generation'], owner)
 
 
-def test_unchanged_leased_preparation_reuses_content_and_preserves_each_generation(database):
+def test_unchanged_leased_preparation_preserves_each_generations_membership(database):
     store, prepared = database
-    original = [tuple(row) for row in store.conn.execute('SELECT * FROM group_members')]
+    original = store.taste_groups.head(members=True)
     owner = store.taste_groups.stage(prepared)
     assert group_queries.head_generation(store.conn) == 'second'
     assert group_queries.definitions(store.conn, 'third') == []
-    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM group_members')] == original
+    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 6
+    assert store.taste_groups.head(members=True) == original
     finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'
     assert group_queries.definition(store.conn, 'second-leaf', generation='second')['parent_version'] == 'second-parent'
     assert group_queries.definition(store.conn, 'third-leaf', generation='third')['parent_version'] == 'third-parent'
     assert group_queries.definition(store.conn, 'second-leaf', generation='third') is None
-    assert group_queries.canonical_version(store.conn, 'second-leaf') == group_queries.canonical_version(store.conn, 'third-leaf')
-    assert not store.conn.execute('SELECT 1 FROM group_builds').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM group_build_versions').fetchone()
+    assert group_queries.canonical_version(store.conn, 'second-leaf') != group_queries.canonical_version(store.conn, 'third-leaf')
+    assert store.taste_groups.head()['payload']['recording_inputs'] == json.loads(prepared['payload'])['recording_inputs']
+    assert not store.conn.execute('SELECT 1 FROM group_generations WHERE build_owner IS NOT NULL').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM group_versions WHERE complete=0').fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -135,8 +134,8 @@ def interrupt_after_member_batch(monkeypatch):
         nonlocal interrupted
         with original(repo) as conn:
             yield conn
-        if not interrupted and repo.conn.execute('SELECT 1 FROM group_build_versions b JOIN group_members m '
-                'ON m.group_version_id=b.group_version_id LIMIT 1').fetchone():
+        if not interrupted and repo.conn.execute('SELECT 1 FROM group_versions v JOIN group_members m '
+                'ON m.group_version_id=v.id WHERE v.complete=0 LIMIT 1').fetchone():
             interrupted = True
             raise WorkClosing('controlled interruption after committed member batch')
     monkeypatch.setattr(publication, '_write', write)
@@ -146,29 +145,33 @@ def interrupt_after_member_batch(monkeypatch):
 def test_committed_prefix_resumes_without_duplicate_members_or_early_visibility(database, monkeypatch):
     store, prepared = database
     prepared = changed(prepared)
+    keys = ['unresolved-representative', 'two', 'one']
+    leaf = prepared['groups'][1]
+    leaf['payload'] = json.dumps(json.loads(leaf['payload']) | {'rep_keys': keys})
     original = interrupt_after_member_batch(monkeypatch)
     with pytest.raises(WorkClosing, match='controlled interruption'):
         store.taste_groups.stage(prepared)
     assert group_queries.head_generation(store.conn) == 'second'
     assert group_queries.definition(store.conn, 'third-leaf') is None
-    assert store.conn.execute('SELECT count(*) FROM group_build_versions').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM group_versions WHERE complete=0').fetchone()[0] == 2
     with pytest.raises(RuntimeError, match='incomplete or no longer owned'):
         finish(store, prepared, prepared['_stage_owner'])
     monkeypatch.setattr(publication, '_write', original)
     owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
-    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 3
-    assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 4
+    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 6
+    assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 9
     assert group_queries.head(store.conn, members=True)['groups'][1]['members'] == {'one': (.5, .8)}
+    assert group_queries.definition(store.conn, 'third-leaf', generation='third')['rep_keys'] == keys
 
 
 def test_committed_groups_resume_read_only_after_store_restart_with_ownership_checks(database, monkeypatch):
     store, prepared = database
-    original = CompactTasteGroupsRepo.link_group
+    original = CompactTasteGroupsRepo.seal
     def interrupt(repo, *args):
         original(repo, *args)
         raise WorkClosing('interrupted after committed group')
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'link_group', interrupt)
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'seal', interrupt)
     with pytest.raises(WorkClosing, match='committed group'):
         store.taste_groups.stage(prepared)
     store.conn.close()
@@ -176,31 +179,24 @@ def test_committed_groups_resume_read_only_after_store_restart_with_ownership_ch
     with closing(restarted.conn):
         bind_compact_store(restarted)
         repository = restarted.taste_groups.repository
-        identities = repository.recording_ids(group_plan.recording_keys(prepared))
-        _inputs, plans, _policy, _metadata = group_plan.prepare(prepared, identities)
         generation = restarted.conn.execute("SELECT id FROM group_generations WHERE external_key='third'").fetchone()[0]
         owner = prepared['_stage_owner']
         before = restarted.conn.total_changes
-        assert repository.group_state(generation, owner, plans[0]) is None
-        assert repository.selected_groups(generation, owner) == {
-            prepared['groups'][0]['group_id']: prepared['groups'][0]['version']}
+        stages = repository.stages(generation, owner)
+        first = prepared['groups'][0]
+        assert stages[first['group_id']]['complete'] == 1
+        assert stages[first['group_id']]['external_version'] == first['version']
         assert restarted.conn.total_changes == before
         with pytest.raises(RuntimeError, match='no longer owned'):
-            repository.group_state(generation, 'another-worker', plans[0])
-        with pytest.raises(RuntimeError, match='no longer owned'):
-            repository.selected_groups(generation, 'another-worker')
-        conflicting = deepcopy(plans[0])
-        conflicting[1]['version'] = 'different-alias'
-        with pytest.raises(ValueError, match='staged selection changed'):
-            repository.group_state(generation, owner, conflicting)
+            repository.stages(generation, 'another-worker')
         assert group_queries.head_generation(restarted.conn) == 'second'
         resumed = deepcopy(prepared)
         resumed.pop('_stage_owner')
         with pytest.raises(publication.BuildUnavailable, match='leased by another worker'):
             restarted.taste_groups.stage(resumed)
         with restarted.conn:
-            restarted.conn.execute('UPDATE group_builds SET expires_at=0 WHERE generation_id=?', (generation,))
-        monkeypatch.setattr(CompactTasteGroupsRepo, 'link_group', original)
+            restarted.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE id=?', (generation,))
+        monkeypatch.setattr(CompactTasteGroupsRepo, 'seal', original)
         next_owner = restarted.taste_groups.stage(resumed)
         assert next_owner != owner
         finish(restarted, resumed, next_owner)
@@ -219,7 +215,7 @@ def test_live_lease_blocks_takeover_and_expired_lease_fences_the_old_owner(datab
     with pytest.raises(publication.BuildUnavailable, match='leased by another worker'):
         store.taste_groups.stage(other)
     with store.conn:
-        store.conn.execute('UPDATE group_builds SET expires_at=0')
+        store.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     new_owner = store.taste_groups.stage(other)
     assert new_owner != old_owner
     with pytest.raises(RuntimeError, match='incomplete or no longer owned'):
@@ -228,21 +224,21 @@ def test_live_lease_blocks_takeover_and_expired_lease_fences_the_old_owner(datab
     assert group_queries.head_generation(store.conn) == 'third'
 
 
-def test_graph_retry_skips_committed_group_batches(database, monkeypatch):
+def test_retry_before_marking_ready_skips_committed_group_batches(database, monkeypatch):
     store, prepared = database
-    original = CompactTasteGroupsRepo.install_caches
+    original = CompactTasteGroupsRepo.mark_ready
     def interrupt(*args):
-        raise WorkClosing('interrupted before graph publication')
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_caches', interrupt)
-    with pytest.raises(WorkClosing, match='before graph publication'):
+        raise WorkClosing('interrupted before marking ready')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'mark_ready', interrupt)
+    with pytest.raises(WorkClosing, match='before marking ready'):
         store.taste_groups.stage(prepared)
-    assert store.conn.execute("SELECT count(*) FROM generation_groups x JOIN group_generations g "
-                              "ON g.id=x.generation_id WHERE g.external_key='third'").fetchone()[0] == len(prepared['groups'])
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_caches', original)
+    assert store.conn.execute("SELECT count(*) FROM group_versions v JOIN group_generations g "
+                              "ON g.id=v.generation_id WHERE g.external_key='third' AND v.complete=1").fetchone()[0] == len(prepared['groups'])
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'mark_ready', original)
     def revisit(*args):
-        pytest.fail('Graph retry revisited a committed group batch')
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'definition_candidates', revisit)
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'group_state', revisit)
+        pytest.fail('Retry revisited a committed group batch')
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_definitions', revisit)
+    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_members', revisit)
     owner = store.taste_groups.stage(prepared)
     assert group_queries.head_generation(store.conn) == 'second'
     finish(store, prepared, owner)
@@ -258,7 +254,7 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
     monkeypatch.setattr(publication, '_write', original)
     assert not store.taste_groups.cleanup_builds()
     with store.conn:
-        store.conn.execute('UPDATE group_builds SET expires_at=0')
+        store.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     monkeypatch.setattr(publication, 'BATCH_ROWS', 1)
     for _ in range(100):
         if not store.taste_groups.cleanup_builds():
@@ -267,118 +263,9 @@ def test_expired_cleanup_removes_only_the_abandoned_build_and_can_rebuild(databa
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     else:
         pytest.fail('Compact cleanup did not finish its bounded deletions')
-    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
-    assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 3
+    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 4
+    assert store.conn.execute('SELECT count(*) FROM group_members').fetchone()[0] == 6
     assert not store.conn.execute("SELECT 1 FROM group_generations WHERE external_key='third'").fetchone()
-    owner = store.taste_groups.stage(prepared)
-    finish(store, prepared, owner)
-    assert group_queries.head_generation(store.conn) == 'third'
-
-
-@pytest.mark.parametrize('complete', [False, True])
-@pytest.mark.parametrize('interrupted', [False, True])
-def test_publication_during_partial_orphan_manifest_cleanup(database, monkeypatch, interrupted, complete):
-    store, prepared = database
-    payload = json.loads(prepared['payload'])
-    payload['recording_inputs']['one'] = '4' * 64
-    prepared['payload'] = json.dumps(payload)
-    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        if complete:
-            manifest = group_storage.install_manifest(store.conn, payload['recording_inputs'], identities.get)
-        else:
-            rows = group_storage.normalized_inputs(payload['recording_inputs'], identities.get)
-            digest = group_content.digest(group_content.canonical([owner, value]) for owner, value in rows)
-            manifest = store.conn.execute('INSERT INTO group_input_manifests(content_digest) VALUES (?) '
-                                          'RETURNING id', (digest,)).fetchone()[0]
-            group_storage.insert_inputs(store.conn, manifest, rows)
-    exact = list(group_storage.manifest_rows(store.conn, manifest))
-    historical = group_queries.head(store.conn, members=True)
-    monkeypatch.setattr(publication, 'BATCH_ROWS', 1)
-    assert store.taste_groups.cleanup_builds()
-    assert 0 < len(list(group_storage.manifest_rows(store.conn, manifest))) < len(exact)
-    if interrupted:
-        original = compact.cleanup
-        def cleanup(repo, **kwargs):
-            original(repo, **kwargs)
-            raise WorkClosing('interrupted orphan manifest retirement')
-        monkeypatch.setattr(compact, 'cleanup', cleanup)
-        with pytest.raises(WorkClosing, match='orphan manifest retirement'):
-            store.taste_groups.stage(prepared)
-        assert group_queries.head(store.conn, members=True) == historical
-        monkeypatch.setattr(compact, 'cleanup', original)
-    owner = store.taste_groups.stage(prepared)
-    assert group_queries.head(store.conn, members=True) == historical
-    finish(store, prepared, owner)
-    selected = store.conn.execute("SELECT input_manifest_id FROM group_generations WHERE external_key='third'").fetchone()[0]
-    assert list(group_storage.manifest_rows(store.conn, selected)) == exact
-    assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-
-
-def test_unchanged_complete_orphan_manifest_is_reused(database):
-    store, prepared = database
-    payload = json.loads(prepared['payload'])
-    payload['recording_inputs']['one'] = '4' * 64
-    prepared['payload'] = json.dumps(payload)
-    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        manifest = group_storage.install_manifest(store.conn, payload['recording_inputs'], identities.get)
-    exact = list(group_storage.manifest_rows(store.conn, manifest))
-    owner = store.taste_groups.stage(prepared)
-    selected = store.conn.execute("SELECT input_manifest_id FROM group_generations WHERE external_key='third'").fetchone()[0]
-    assert selected == manifest
-    assert list(group_storage.manifest_rows(store.conn, selected)) == exact
-    finish(store, prepared, owner)
-
-
-@pytest.mark.parametrize('unowned', [False, True])
-def test_input_manifest_digest_match_still_rejects_conflicting_content(database, monkeypatch, unowned):
-    store, prepared = database
-    payload = json.loads(prepared['payload'])
-    payload['recording_inputs']['one'] = '4' * 64
-    prepared['payload'] = json.dumps(payload)
-    identities = dict(store.conn.execute('SELECT identity_key,id FROM recordings'))
-    expected = [group_content.canonical([owner, value]) for owner, value in
-                group_storage.normalized_inputs(payload['recording_inputs'], identities.get)]
-    if unowned:
-        with store.conn:
-            store.conn.execute('BEGIN IMMEDIATE')
-            manifest = group_storage.install_manifest(store.conn, {'one': '5' * 64}, identities.get)
-        digest = store.conn.execute('SELECT content_digest FROM group_input_manifests WHERE id=?', (manifest,)).fetchone()[0]
-    else:
-        digest = store.conn.execute('SELECT content_digest FROM group_input_manifests').fetchone()[0]
-    real_digest = group_content.digest
-    def collide(rows):
-        rows = list(rows)
-        return digest if rows == expected else real_digest(rows)
-    monkeypatch.setattr(group_content, 'digest', collide)
-    before = list(store.conn.iterdump())
-    with pytest.raises(ValueError, match='Musical group input digest collision'):
-        store.taste_groups.stage(prepared)
-    assert list(store.conn.iterdump()) == before
-
-
-def test_referenced_incomplete_input_manifest_cannot_be_reused(database, monkeypatch):
-    store, prepared = database
-    payload = json.loads(prepared['payload'])
-    payload['recording_inputs']['one'] = '4' * 64
-    prepared['payload'] = json.dumps(payload)
-    original = CompactTasteGroupsRepo.install_inputs
-    def interrupt(*args):
-        raise WorkClosing('interrupted before manifest inputs')
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_inputs', interrupt)
-    with pytest.raises(WorkClosing, match='before manifest inputs'):
-        store.taste_groups.stage(prepared)
-    other = deepcopy(prepared)
-    other.update(generation='fourth', at=4, serial=4)
-    other.pop('_stage_owner')
-    before = list(store.conn.iterdump())
-    with pytest.raises(publication.BuildUnavailable, match='inputs are leased'):
-        store.taste_groups.stage(other)
-    assert list(store.conn.iterdump()) == before
-    monkeypatch.setattr(CompactTasteGroupsRepo, 'install_inputs', original)
     owner = store.taste_groups.stage(prepared)
     finish(store, prepared, owner)
     assert group_queries.head_generation(store.conn) == 'third'
@@ -394,7 +281,7 @@ def test_new_plan_clears_expired_foreign_aliases_with_bounded_restartable_cleanu
     next_plan.update(generation='fourth', at=4, serial=4)
     next_plan.pop('_stage_owner')
     with store.conn:
-        store.conn.execute('UPDATE group_builds SET expires_at=0')
+        store.conn.execute('UPDATE group_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     monkeypatch.setattr(publication, 'BATCH_ROWS', 1)
     original = compact.cleanup
     calls = []
@@ -441,8 +328,8 @@ def test_new_plan_preserves_live_foreign_alias_owner(database):
 @pytest.mark.parametrize('change', ['none', 'recording', 'external', 'head'])
 def test_hidden_append_preserves_the_original_publication_guard(database, change):
     store, prepared = database
-    with store.read_snapshot() as snapshot:
-        assert group_queries.head(snapshot.store.conn, members=True)['generation'] == 'second'
+    with store.read_snapshot(allow_stale_keys={('group_generations', '')}) as snapshot:
+        assert snapshot.store.taste_groups.head(members=True)['generation'] == 'second'
         snapshot.release_reader()
         owner = store.taste_groups.stage(prepared)
         if change == 'recording':
@@ -456,8 +343,8 @@ def test_hidden_append_preserves_the_original_publication_guard(database, change
                 external.execute("INSERT INTO settings VALUES ('external-change','1')")
         elif change == 'head':
             with store.conn:
-                store.conn.execute('UPDATE group_head SET generation_id=(SELECT id FROM group_generations '
-                                   "WHERE external_key='first')")
+                store.conn.execute('UPDATE group_generations SET is_active=0 WHERE is_active=1')
+                store.conn.execute("UPDATE group_generations SET is_active=1 WHERE external_key='first'")
         published = snapshot.publish(lambda: compact.finish(store.conn, prepared['generation'], owner),
                                      allow_stale_tables=compact.STAGED_TABLES)
         assert published == (change == 'none')
@@ -494,8 +381,8 @@ def test_foreground_can_read_and_write_between_compact_member_batches(database, 
         nonlocal stopped
         with original(repo) as conn:
             yield conn
-        if not stopped and repo.conn.execute('SELECT 1 FROM group_build_versions b JOIN group_members m '
-                'ON m.group_version_id=b.group_version_id LIMIT 1').fetchone():
+        if not stopped and repo.conn.execute('SELECT 1 FROM group_versions v JOIN group_members m '
+                'ON m.group_version_id=v.id WHERE v.complete=0 LIMIT 1').fetchone():
             stopped = True
             paused.set()
             assert release.wait(5)
@@ -608,56 +495,55 @@ def test_group_publication_file_io_runs_outside_the_sql_transaction(database, mo
             return original(*args, **kwargs)
         return outside
 
-    for method in ('describe', 'write_reserved', 'read', 'policy'):
+    for method in ('publish', 'read', 'policy'):
         monkeypatch.setattr(files, method, checked(getattr(files, method)))
     store.taste_groups.publish(prepared)
     assert store.taste_groups.head_generation() == 'third'
     assert not store.conn.in_transaction
 
 
-@pytest.mark.parametrize('boundary', ['file', 'status'])
-def test_native_file_interruption_retains_the_previous_head_and_resumes_committed_prefix(database, monkeypatch, boundary):
-    from yt_playlist.core import fao
-    from yt_playlist.core.group_paths import record_id
-    from yt_playlist.repos import group_file_writes
+@pytest.mark.parametrize('boundary', ['file', 'sql'])
+def test_file_interruption_retains_the_previous_head_and_resumes_committed_prefix(database, monkeypatch, boundary):
     store, prepared = database
     prepared = changed(prepared)
     with monkeypatch.context() as patch:
         if boundary == 'file':
-            def interrupted(records):
+            def interrupted(documents):
                 assert not store.conn.in_transaction
-                with closing(sqlite3.connect(store._db_path)) as observer:
-                    assert observer.execute("SELECT count(*) FROM group_file_writes WHERE file_status='pending'").fetchone()[0] == 1
                 raise OSError('interrupted group file')
-            patch.setattr(store.taste_groups.files, 'write_reserved', interrupted)
+            patch.setattr(store.taste_groups.files, 'publish', interrupted)
         else:
-            complete = group_file_writes.complete
-            def interrupted(conn, kind, reference):
-                complete(conn, kind, reference)
-                if kind == 'lineage':
-                    raise OSError('interrupted group status')
-            patch.setattr(group_file_writes, 'complete', interrupted)
+            mark_ready = CompactTasteGroupsRepo.mark_ready
+
+            def interrupted(repo, *args):
+                mark_ready(repo, *args)
+                raise OSError('interrupted group SQL')
+
+            patch.setattr(CompactTasteGroupsRepo, 'mark_ready', interrupted)
         with pytest.raises(OSError, match='interrupted group'):
             store.taste_groups.publish(prepared)
     assert store.taste_groups.head_generation() == 'second'
-    assert store.conn.execute("SELECT count(*) FROM group_file_writes WHERE file_status='pending'").fetchone()[0] == 1
     assert not store.conn.in_transaction
     store.taste_groups.publish(prepared)
     assert store.taste_groups.head_generation() == 'third'
     assert store.taste_groups.head(members=True)['groups'][1]['members'] == {'one': (.5, .8)}
-    for _table, _key, kind, filename, digest, size, offset in group_documents.references(store.conn):
-        identity = record_id(filename)
-        if identity is not None:
-            assert store.conn.execute('SELECT kind,content_digest,byte_size,file_status FROM group_file_writes WHERE id=?',
-                (identity,)).fetchone()[:] == (kind, digest, size, 'ready')
-            assert fao.read(filename).bytes.startswith(group_documents.HEADER)
 
 
 def test_native_backup_restore_preserves_file_ids_and_original_age(database, tmp_path):
     from yt_playlist.core import fao
-    from yt_playlist.core.group_paths import record_id
+    from yt_playlist.core.group_paths import record_id, record_path
     store, prepared = database
     store.taste_groups.publish(changed(prepared))
+    # An installed group version can still own a numeric path from before the cutover.
+    for table, key, kind, filename, digest, size, offset in group_documents.references(store.conn):
+        if table == 'group_versions':
+            raw = group_documents.encode(kind, group_documents.read(filename, digest, size, offset, kind))
+            path = record_path(group_documents.directory(store.conn), key[0])
+            fao.write(path, group_documents.HEADER + raw)
+            with store.conn:
+                store.conn.execute('UPDATE group_versions SET definition_filename=?,definition_offset=? WHERE id=?',
+                                   (str(path), len(group_documents.HEADER), key[0]))
+            break
     originals = {record_id(filename): (fao.read(filename).bytes, fao.read(filename).info.ctime_ns)
                  for _table, _key, _kind, filename, _digest, _size, _offset in group_documents.references(store.conn)
                  if record_id(filename) is not None}
@@ -702,7 +588,7 @@ def test_real_offer_learning_reuses_the_same_external_alias_in_two_generations(d
     state, rows = compiled(store, current, 1103 + 86400)
     assert rows['leaf']['positive'] == .5 and rows['leaf']['days'] == 2
     assert not any(state['excluded'].values())
-    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 2
+    assert store.conn.execute('SELECT count(*) FROM group_versions').fetchone()[0] == 6
 
 
 def test_group_repository_detaches_file_references_without_io_or_a_reporting_transaction(database, monkeypatch):
@@ -726,8 +612,6 @@ def test_group_repository_detaches_file_references_without_io_or_a_reporting_tra
             assert repository.definitions('second')[0]['definition_filename']
             assert repository.definition('second-leaf')['external_version'] == 'second-leaf'
             assert repository.learning_head()['groups'][0]['definition_filename']
-            assert repository.lineage()[0]['evidence_filename']
-            assert repository.successors('first-leaf')[0]['evidence_filename']
         assert not view.conn.in_transaction
         assert not any(statement.strip().upper().startswith('BEGIN') for statement in statements)
 

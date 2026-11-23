@@ -7,7 +7,6 @@ from unittest.mock import Mock
 import pytest
 from starlette.requests import Request
 
-from yt_playlist.rec import home_prepared
 from yt_playlist.rec.home_cards import CardsResult
 from yt_playlist.web.routes.home_views import HomeViews
 
@@ -21,15 +20,19 @@ def test_pending_polling_is_bounded_and_ready_offers_stop_it(
         pytest.fail('Polling policy opened a database')
 
     monkeypatch.setattr(sqlite3, 'connect', forbidden)
-    context = SimpleNamespace(store=SimpleNamespace(_read_only=True, rec_ledger=SimpleNamespace()), templates=None,
-                              logger=logging.getLogger(__name__), rec_worker=None, vibe_requests=None)
+    store = SimpleNamespace(_read_only=True, rec_ledger=SimpleNamespace(),
+                            taste_groups=SimpleNamespace(has_adaptive_head=lambda: False))
+    context = SimpleNamespace(store=store, templates=None,
+                              logger=logging.getLogger(__name__), rec_worker=None)
     view = HomeViews(context)
-    result = CardsResult(protos=[{'label': 'Usable offer'}], slots=[], genre_notice=None,
+    result = CardsResult(protos=[{'label': 'Usable offer'}], slots=[{'proto': None}], genre_notice=None,
                          genre_warning=None, genre_options=[], requested_genres=[],
                          epoch=0, vibe=None, preparing=True)
     cards = Mock(return_value=result)
-    monkeypatch.setattr(home_prepared, 'load', Mock(return_value=None))
-    monkeypatch.setattr(home_prepared, 'cards', cards)
+    monkeypatch.setattr(view.commands, 'load', Mock(return_value=None))
+    monkeypatch.setattr(view.commands, 'calculate', cards)
+    monkeypatch.setattr(view.commands, 'starter', lambda result, now: result)
+    monkeypatch.setattr(view.commands, 'audit', Mock())
     request = Request({'type': 'http', 'method': 'GET', 'path': '/home/cards',
                        'headers': [],
                        'query_string': f'prepare_attempt={attempt}'.encode()})
@@ -38,8 +41,8 @@ def test_pending_polling_is_bounded_and_ready_offers_stop_it(
     assert waiting['prepare_interval'] == interval
     assert waiting['protos'] == result.protos
 
-    result.preparing = False
+    result.protos *= 4
     ready = view.card_context(request, 1001)
-    assert ready['prepare_attempt'] is None
+    assert 'prepare_attempt' not in ready
     assert ready['protos'] == result.protos
     assert cards.call_count == 2

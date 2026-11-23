@@ -5,7 +5,7 @@ import json
 def test_backup_v2_still_encodes_account_and_remote_using_historical_fields(store,tmp_path,monkeypatch):
     from yt_playlist.library.playlist_backups import backup_remote_playlist
     from yt_playlist.core import paths
-    account = store.accounts.upsert_account('Main','credential',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     path = backup_remote_playlist(store,account,'PL','Playlist',1,
                                  {'title':'Playlist','tracks':[],'trackCount':0})
     from yt_playlist.core import fao

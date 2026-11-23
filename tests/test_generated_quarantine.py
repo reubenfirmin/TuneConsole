@@ -9,7 +9,7 @@ comes back as evidence that you like it.
 
 MODE-LEVEL selection signal is exempt by design. Each generated playlist is built from one taste mode,
 so choosing to play it is weak evidence for that MODE at the top of the model stack. It says nothing
-about the tracks. rec_mode_picks / rec_mode_impressions / ledger_mode_plays live in that tier and must
+about the tracks. Playlist mode picks, Home rotation offers and ledger_mode_plays live in that tier and must
 keep their generated-playlist provenance.
 """
 import pathlib
@@ -48,7 +48,7 @@ def test_taste_signal_modules_exclude_generated(rel):
 
 
 def test_mode_level_signal_documents_why_it_is_exempt():
-    """rec_mode_picks intentionally retains generated-playlist provenance. Pin the rationale in place so
+    """Mode picks intentionally retain generated-playlist provenance. Pin the rationale in place so
     a future cleanup does not "fix" the exemption by deleting the signal it exists to capture."""
     src = (SRC / "repos" / "modes.py").read_text().lower()
     assert "mode-level" in src or "weak signal" in src, (

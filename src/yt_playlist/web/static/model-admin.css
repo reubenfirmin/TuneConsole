@@ -41,8 +41,17 @@ body:not(:has(.page-clusters)) main.page-model-admin {
 #mm-results small { color: var(--dim); font-size: .66rem; margin-top: .25rem; }
 .mm-zoom { right: 1rem; bottom: 1rem; padding: .35rem; gap: .25rem; }
 #mm-zoom-in, #mm-zoom-out { font-size: 1.15rem; min-width: 2rem; line-height: 1; }
-.mm-legend { bottom: 1rem; left: 1rem; padding: .6rem .8rem; gap: .8rem; font: .63rem var(--font-sans); color: var(--dim); pointer-events: none; }
-.mm-legend > span { display: inline-flex; align-items: center; gap: .35rem; }
+.mm-legend { display: grid; bottom: 1rem; left: 1rem; width: max-content; max-width: calc(100% - 12rem); padding: .6rem .8rem; gap: .45rem; font: .63rem var(--font-sans); color: var(--dim); pointer-events: none; }
+.mm-node-key, .mm-trace-key { display: flex; flex-wrap: wrap; align-items: center; gap: .4rem .8rem; }
+.mm-legend span { display: inline-flex; align-items: center; gap: .35rem; }
+.mm-trace-key { display: none; border-top: 1px solid var(--border); padding-top: .45rem; color: var(--text); }
+#model-map[data-selected]:not([data-selected=""]) .mm-trace-key { display: flex; }
+#model-map[data-selected]:not([data-selected=""]) .mm-hint { display: none; }
+.mm-trace-key i { width: 1.1rem; border-top: 2px solid currentColor; }
+.mm-trace-key .mm-hop-direct { color: var(--text); border-top-width: 3px; }
+.mm-hop-two { color: var(--mint-bright); }
+.mm-hop-three { color: var(--model-map-third-hop); }
+.mm-trace-key .mm-hop-farther { color: var(--dim); opacity: .55; border-top-width: 1px; }
 .mm-key-model::before, .mm-key-feature::before, .mm-key-backend::before { content: ''; width: .8rem; height: .55rem; border: 1px solid var(--mm-model); border-radius: 2px; }
 .mm-key-feature { color: var(--mm-feature); font-weight: 700; }
 .mm-key-feature::before { border-color: var(--mm-feature); border-radius: 1rem; }
@@ -59,11 +68,14 @@ body:not(:has(.page-clusters)) main.page-model-admin {
 [data-mm-group="Audio & musical character"] { color: var(--immersive-accent-2); }
 [data-mm-group="Metadata & external services"] { color: var(--accent-2); }
 [data-mm-group="Maintenance & evaluation"] { color: var(--text); }
+[data-mm-group="Recommendation preparation"] { color: var(--mm-backend); }
 [data-mm-group="Provider audio models"] { color: var(--flow-odyssey); }
 .mm-line-key { display: inline-block; width: 1.1rem; border-top: 2px solid var(--dim); }
 .mm-line-conditional { border-top-style: dashed; }
+.mm-line-feedback { border-top: 2px dotted var(--teal); }
+.mm-horizon-key { color: var(--mint-bright); }
 #mm-visible-count { color: var(--faint); }
-.mm-hint { position: absolute; bottom: 3.9rem; left: 1.1rem; margin: 0; font: .65rem var(--font-sans); color: var(--dim); pointer-events: none; }
+.mm-hint { position: absolute; bottom: calc(100% + .6rem); left: .1rem; margin: 0; font: .65rem var(--font-sans); color: var(--dim); pointer-events: none; }
 .mm-hover { position: absolute; z-index: 3; max-width: 19rem; padding: .7rem .9rem; border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface-card); box-shadow: 0 6px 24px color-mix(in srgb, var(--shadow-ink) 30%, transparent); pointer-events: none; }
 .mm-hover strong, .mm-hover span { display: block; }
 .mm-hover strong { font-size: .83rem; color: var(--text); }
@@ -77,6 +89,9 @@ body:not(:has(.page-clusters)) main.page-model-admin {
 .mm-category { margin: 0 0 .55rem; font: .7rem var(--font-mono); color: var(--dim); }
 .mm-detail-heading h2 { margin: .5rem 0 .8rem; font-size: 2rem; letter-spacing: -.035em; line-height: 1.15; }
 .mm-detail-summary { font-size: .95rem; line-height: 1.6; color: var(--dim); }
+.mm-location { margin: 1rem 0; font-size: .95rem; line-height: 1.6; }
+.mm-location dt { font-weight: 650; }
+.mm-location dd { margin: .2rem 0 0; color: var(--dim); }
 .mm-detail-periods { display: flex; flex-wrap: wrap; gap: .4rem; margin: 1rem 0 1.5rem; }
 .mm-period { --period-color: var(--dim); color: var(--period-color); background: color-mix(in srgb, var(--period-color) 8%, transparent); border: 1px solid color-mix(in srgb, var(--period-color) 35%, transparent); padding: .3rem .5rem; font: .65rem var(--font-mono); border-radius: var(--radius-sm); }
 [data-period="durable"] { --period-color: var(--immersive-accent-2); }

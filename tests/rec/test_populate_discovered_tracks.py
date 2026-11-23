@@ -23,7 +23,7 @@ def test_populate_discovered_tracks_builds_candidates_and_vectors(store):
     # a library track gives the content model a genre token (techno) to encode candidates into
     tid = store.tracks.upsert_track("vL", "LibT", "LibArtist", None, None)
     store.tracks.set_track_genre(tid, "Techno")
-    model_support.build_content_model(store)         # persists rec_content_model
+    model_support.build_content_model(store)
     # a discovered techno album waiting to be populated into tracks
     store.discovery.upsert_discovered_album("alb1", "New Artist", "Some Album", "2024", None, 1.0, genre="Techno")
 

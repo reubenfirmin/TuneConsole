@@ -31,11 +31,11 @@ def _pristine_current_schema():
 def provenance_routes(monkeypatch, home_pages_only):
     """Keep actual creation/detail routes and rendering below saved provenance."""
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home_generation, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, home_generation, playlists
 
     monkeypatch.setattr(webapp, 'build_all',
                         lambda ctx: [module.build(ctx)
-                                     for module in (app_update, audio_preview, home_generation, playlists)])
+                                     for module in (app_update, audio_vibes, home_generation, playlists)])
     # Setup readiness controls other playlist actions. It does not supply the
     # title, saved recipe, badge, adoption or rename checked here.
     monkeypatch.setattr(onboarding, 'initial_setup_pending', lambda *args: False)
@@ -67,7 +67,7 @@ def mix_input(store, preset):
 def test_created_mix_provenance_survives_restart_adoption_and_rename(
         file_backed_store, provenance_routes, without_metadata_providers, monkeypatch):
     store = file_backed_store
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     provider = FakeClient()
     tracks = [{'key': 'song|artist', 'video_id': 'song', 'title': 'Song', 'artist': 'Artist', 'genre': 'house'}]
     provider._catalog.update(remote_catalog(tracks))

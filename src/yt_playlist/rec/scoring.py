@@ -1,7 +1,5 @@
-"""Taste-model scoring: build the per-playlist taste model and turn it into per-track scores,
-re-weighted by genre/era/artist preferences, the breadth steer, and the transient mood/facet overlay.
-
-Consumers import scoring directly; surface assembly depends on this layer."""
+"""Compose the NOW reading used by recommendation ranking and allocation."""
+from dataclasses import dataclass
 import json
 import math
 import time
@@ -10,7 +8,7 @@ import numpy as np
 
 from yt_playlist.util import genre_map
 from yt_playlist.library import listening_composition as layers
-from yt_playlist.rec import album_feedback_state, embedding_vectors as vectors, mix_tuning, negative, rec_params, transient, vector_math
+from yt_playlist.rec import album_feedback_state, embedding_vectors as vectors, mix_tuning, rec_params, transient, vector_math
 from yt_playlist.rec.taste_analysis import taste_breadth
 from yt_playlist.rec.taste_context import PlaylistTaste
 
@@ -322,6 +320,169 @@ def _axis_mult(weights, kind, token, standing, leans, fparams):
     return weights.get(token, 1.0) * standing.get(full, 1.0) * transient_mult
 
 
+@dataclass(frozen=True)
+class FacetPreferences:
+    weights: dict
+    standing: dict
+    recent: dict
+    parameters: tuple
+
+
+def facet_preferences(store, now, *, recent=None, prepared=False):
+    """Read the baseline with live steering, alongside the decaying facet adjustment."""
+    weights = store.rec_model.get_weights(now=now,
+        revert_halflife_d=rec_params.get_param(store, 'weight_revert_halflife_d'))
+    if recent is None:
+        read_recent = transient.prepared_facet_leans if prepared else transient.facet_leans
+        recent = read_recent(store, now) if now is not None else {}
+    standing = store.rec_model.get_leans()
+    params = tuple(rec_params.get_param(store, name) for name in ('facet_gain', 'facet_mult_min', 'facet_mult_max'))
+    return FacetPreferences(weights, standing, recent, params)
+
+
+def facet_breakdown(store, now):
+    """Expose the individual contributions behind the current facet preferences."""
+    return dict(weights=store.rec_model.baseline_weights(now=now,
+                    revert_halflife_d=rec_params.get_param(store, 'weight_revert_halflife_d')),
+                session=store.rec_model.get_session_weights(now), standing=store.rec_model.get_leans(),
+                leans=transient.facet_leans(store, now),
+                fparams=tuple(rec_params.get_param(store, name) for name in
+                              ('facet_gain', 'facet_mult_min', 'facet_mult_max')))
+
+
+def mode_breakdown(store, now):
+    evidence = layers.recent_evidence(store, now)
+    commands = layers.listening(store)
+    return (commands.now_mode_mix(now, evidence=evidence), commands.session_mode_mix(now, evidence=evidence),
+            commands.evidence_coverage(now, evidence=evidence))
+
+
+def _family_preferences(facets, groups):
+    genres = {axis[6:]: value for axis, value in facets.weights.items() if axis.startswith('genre:')}
+    result = {}
+    for identity, group in groups:
+        families = group.get('families', ())
+        mass = sum(count for _, count in families)
+        result[identity] = (sum(count * _axis_mult(genres, 'genre', name, facets.standing,
+                                                 facets.recent, facets.parameters)
+                                for name, count in families) / mass) if mass else 1.
+    return result
+
+
+def mode_prior(store, now):
+    """Use active-session mode balance, with TODAY as the prior before it has support."""
+    evidence = layers.recent_evidence(store, now)
+    commands = layers.listening(store)
+    shares, _, _ = commands.now_mode_mix(now, evidence=evidence)
+    gain = rec_params.get_param(store, 'now_gain')
+    if shares and gain:
+        return shares, gain
+    shares, _, _ = commands.session_mode_mix(now, evidence=evidence)
+    return shares, rec_params.get_param(store, 'session_alpha')
+
+
+def mode_preferences(store, modes, now, facets, *, prior=None):
+    """Supply one effective multiplier per mode to fallback allocation."""
+    weights = _family_preferences(facets, ((mode['mode_id'], mode) for mode in modes))
+    posterior, gain = mode_prior(store, now) if prior is None else prior
+    return {identity: weight * (1. + gain * posterior.get(identity, 0.)) if posterior else weight
+            for identity, weight in weights.items()}
+
+
+def album_group_scores(store, now, scores, albums, release_vectors, content_matrix, content_index, genre_axes):
+    """Use exact membership or a supported match to published leaf representatives."""
+    from yt_playlist.rec import group_viz
+
+    head = group_viz.prepared(store)
+    posterior, gain = group_prior(store, head, now) if head else ({}, 0.)
+    if not posterior or not gain:
+        return scores
+    leaves = [group for group in head['groups'] if group['leaf']]
+    by_version = {group['version']: group['group_id'] for group in leaves}
+    members = store.taste_groups.leaf_members(head['generation'], keys=(
+        key for album in albums for key in album.get('keys') or ()))
+    masses, unassigned = np.zeros(len(albums)), []
+    for i, album in enumerate(albums):
+        keys = set(album.get('keys') or ())
+        identities = [by_version[members[key]] for key in keys if members.get(key) in by_version]
+        if identities:
+            masses[i] = sum(posterior.get(group, 0.) for group in identities) / len(keys)
+        elif (any(genre_axes.get(album.get('genre'), (None, None)))
+              or any(key in content_index for key in keys)) and content_matrix is not None:
+            unassigned.append(i)
+    if unassigned:
+        # A bounded set of actual member recordings represents each leaf in
+        # the same content generation used to encode the release.
+        groups, centroids = [], []
+        for leaf in leaves:
+            rows = [content_index[key] for key in leaf.get('rep_keys', ()) if key in content_index]
+            if rows:
+                center = content_matrix[rows].mean(0)
+                norm = np.linalg.norm(center)
+                if norm:
+                    groups.append(leaf)
+                    centroids.append(center / norm)
+        if centroids:
+            member_axes = store.genres.feature_axes(label for group in groups for label, _ in group.get('genres', ()))
+            signatures = [(set(member_axes[label][1] for label, _ in group.get('genres', ()) if member_axes[label][1]),
+                           {label for label, _ in group.get('families', ())}) for group in groups]
+            similarities = release_vectors[unassigned] @ np.stack(centroids).T
+            for i, matches in zip(unassigned, similarities, strict=True):
+                album = albums[i]
+                if not any(key in content_index for key in album.get('keys') or ()):
+                    family, genre = genre_axes.get(album.get('genre'), (None, None))
+                    # A matching release year is insufficient style evidence.
+                    matches = np.where([genre in group_genres or family in group_families
+                                        for group_genres, group_families in signatures], matches, 0.)
+                best = int(matches.argmax())
+                fit = matches[best]
+                if fit > 0 and np.count_nonzero(np.isclose(matches, fit)) == 1:
+                    masses[i] = posterior.get(groups[best]['group_id'], 0.) * min(1., float(fit))
+    return scores * (1. + gain * masses)
+
+
+def group_readings(store, head, now):
+    """Project the two listening windows onto the same exact leaf partition."""
+    from yt_playlist.rec import group_viz
+
+    plays = layers.layer_plays(store, now)
+    minimum = int(rec_params.get_param(store, 'now_min_events'))
+    assignments = {}
+    if head:
+        members = store.taste_groups.leaf_members(head['generation'], keys=plays.current.keys() | plays.today.keys())
+        ids = {group['version']: group['group_id'] for group in head['groups']}
+        assignments = {key: ids[version] for key, version in members.items() if version in ids}
+    return (group_viz.reading(now, plays.current, assignments, minimum),
+            group_viz.reading(now, plays.today, assignments, minimum,
+                              half=rec_params.get_param(store, 'session_halflife_h')))
+
+
+def group_prior(store, head, now):
+    """Use exact leaf membership for NOW, falling back to the decayed TODAY share."""
+    (current, _, _), (today, _, _) = group_readings(store, head, now)
+    gain = rec_params.get_param(store, 'now_gain')
+    if current and gain:
+        return current, gain
+    return today, rec_params.get_param(store, 'session_alpha')
+
+
+def group_preferences(store, head, now, *, prior=None, recent=None):
+    """Combine the durable/recent facet fit with the supported NOW or TODAY group share."""
+    facets = facet_preferences(store, now, prepared=True, recent=recent)
+    weights = _family_preferences(facets, ((group['group_id'], group) for group in head['groups']))
+    shares, gain = prior if prior is not None else group_prior(store, head, now)
+    groups = {group['group_id']: group for group in head['groups']}
+    by_version = {group['version']: group for group in head['groups']}
+    mass = dict(shares)
+    for identity, share in shares.items():
+        group = groups.get(identity)
+        while group and (parent := by_version.get(group['parent_version'])):
+            key = parent['group_id']
+            mass[key] = mass.get(key, 0.) + share
+            group = parent
+    return {identity: weight * (1. + gain * mass.get(identity, 0.)) for identity, weight in weights.items()}
+
+
 def _pop_band(popularity, threshold):
     """The popularity-axis token for a track (#43), or None (neutral) when it has no popularity or sits
     below the mainstream cut. One band today ('mainstream', what the 'too mainstream' dismiss steers);
@@ -345,18 +506,18 @@ def center_known_weights(weights, present):
             for k, v in weights.items()}
 
 
-def _axis_inputs(store, keys, now=None, *, metadata=None):
+def _axis_inputs(store, keys, now=None, *, metadata=None, recent=None):
     """Acquisition: every store-derived input `_compute_axis_weights` needs to score `keys`.
     None when every factor is neutral (permanent weights, leans and breadth all no-op), so the
     caller can skip scoring entirely."""
     mix_tuning.expire(store, time.time() if now is None else now)
-    w = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
+    facets = facet_preferences(store, now, recent=recent)
+    w = facets.weights
     gw = {a[len("genre:"):]: v for a, v in w.items() if a.startswith("genre:")}
     ew = {a[len("era:"):]: v for a, v in w.items() if a.startswith("era:")}
     aw = {a[len("artist:"):]: v for a, v in w.items() if a.startswith("artist:")}
     pw = {a[len("pop:"):]: v for a, v in w.items() if a.startswith("pop:")}
-    leans = transient.facet_leans(store, now) if now is not None else {}
-    standing = store.rec_model.get_leans()
+    leans, standing = facets.recent, facets.standing
     # Breadth steer (#7): a per-family tilt derived from your current genre spread. Only computed when
     # the bias is off-center (the taste_breadth query isn't worth running at the neutral default), and
     # it must keep the overlay alive below even when every genre/era/artist weight is neutral.
@@ -376,13 +537,10 @@ def _axis_inputs(store, keys, now=None, *, metadata=None):
         genres, decades, artists, pops = ({k: row[name] for k, row in metadata.items() if row.get(name) is not None}
                                          for name in ('genre', 'decade', 'artist', 'popularity'))
     pop_min = rec_params.get_param(store, "pop_mainstream_min")
-    fparams = (rec_params.get_param(store, "facet_gain"),
-               rec_params.get_param(store, "facet_mult_min"),
-               rec_params.get_param(store, "facet_mult_max"))
     genre_axes = store.genres.feature_axes(genres.values())
     return dict(keys=keys, gw=gw, ew=ew, aw=aw, pw=pw, leans=leans, standing=standing, bfac=bfac,
                genres=genres, decades=decades, artists=artists, pops=pops, pop_min=pop_min,
-               fparams=fparams, genre_axes=genre_axes)
+               fparams=facets.parameters, genre_axes=genre_axes)
 
 
 def _compute_axis_weights(inputs, with_details=False):
@@ -434,19 +592,19 @@ def _compute_axis_weights(inputs, with_details=False):
     return (mult, details) if with_details else mult
 
 
-def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=None):
+def _axis_weights_for(store, keys, now=None, with_details=False, *, metadata=None, recent=None):
     """{key: genre_w * era_w * artist_w * pop_w}, where each axis weight is permanent x standing lean x
     the transient facet multiplier (live 'more/less this facet'). None if every factor is neutral."""
-    inputs = _axis_inputs(store, keys, now=now, metadata=metadata)
+    inputs = _axis_inputs(store, keys, now=now, metadata=metadata, recent=recent)
     if inputs is None:
         return None
     return _compute_axis_weights(inputs, with_details=with_details)
 
 
-def _apply_axis_weights(store, sims, now=None):
+def _apply_axis_weights(store, sims, now=None, *, recent=None):
     """Re-weight a {key: taste-score} map by permanent preferences × the live transient facet leans,
     bounded by the axis_weight_cap knob (a strong 1.4x tilt by default; explicit mutes remain zero)."""
-    mult = _axis_weights_for(store, list(sims), now=now)
+    mult = _axis_weights_for(store, list(sims), now=now, recent=recent)
     if mult is None:
         return sims
     return axis_adjusted_scores(sims, mult, cap=rec_params.get_param(store, "axis_weight_cap"))
@@ -462,7 +620,7 @@ def metadata_axis_weights(store, metadata, now):
 
 
 def discovery_facet_weight(store, family, now, *, leans=None):
-    """#18: the facet overlay for OUTWARD discovery (new artists/albums), at genre-family granularity.
+    """Apply effective genre weights and the direct RECENT lean to new artists.
 
     Returns a positive multiplier to scale a candidate's surfacing score by, or None to HARD-EXCLUDE
     it (when the family's permanent `genre:` weight is exactly 0: muting techno on the Taste tab
@@ -482,6 +640,21 @@ def discovery_facet_weight(store, family, now, *, leans=None):
     return discovery_multiplier(perm, standing, lean)
 
 
+def discovery_album_facet_weights(store, families, now, *, recent=None):
+    """Read NOW's composed discovery preferences once for the album pool."""
+    mix_tuning.expire(store, now)
+    facets = facet_preferences(store, now, recent=recent)
+    weights = {}
+    for family in families:
+        if not family:
+            weights[family] = 1.0
+            continue
+        axis = f'genre:{family}'
+        weights[family] = discovery_multiplier(facets.weights.get(axis, 1.),
+            facets.standing.get(axis, 1.), facets.recent.get(axis, 0.))
+    return weights
+
+
 def discovery_multiplier(permanent, standing, lean):
     if permanent == 0:
         return None
@@ -495,7 +668,7 @@ def discovery_multiplier(permanent, standing, lean):
 MOOD_ALPHA = 0.35   # how hard a mood event tilts the lanes, relative to the taste score
 
 
-def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None):
+def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None, consumed_plays=None):
     """Per-row alignment to the recent-listening audio tilt, including its fading magnitude
     (#45), aligned to V rows via `idx` (key -> row). None when there is no audio tilt or no content
     vectors built. A candidate without a content vector contributes 0, so the term degrades gracefully
@@ -504,13 +677,14 @@ def _audio_tilt_boost(store, now, idx, content_vecs=None, content_snapshot=None)
     `content_vecs` (a (keys, CV, cidx) triple) overrides the source: warm callers leave it None and get
     the library content vectors; the cold path passes the discovered-content vectors, whose keys are
     out-of-corpus and so absent from the library store."""
+    exclude = {'consumed_plays': consumed_plays} if consumed_plays else {}
     if content_vecs is None or content_snapshot is not None:
         snapshot = content_snapshot if content_snapshot is not None else store.rec_model.content_generation()
         library = vectors.load_content_vectors(store, snapshot=snapshot)
-        atilt = transient.audio_centroid_tilt(store, now, content_vecs=library)
+        atilt = transient.audio_centroid_tilt(store, now, content_vecs=library, **exclude)
         content_vecs = library if content_vecs is None else content_vecs
     else:
-        atilt = transient.audio_centroid_tilt(store, now)
+        atilt = transient.audio_centroid_tilt(store, now, **exclude)
     if atilt is None:
         return None
     return audio_alignment(idx, content_vecs, atilt)
@@ -529,49 +703,59 @@ def audio_alignment(idx, content_vecs, tilt):
 
 
 def _mood_components(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None,
-                     content_snapshot=None):
+                     content_snapshot=None, *, include_audio=True):
     """Return the exact additive vector-score components used by `_apply_mood`.
 
     `evidence_vecs` optionally supplies (V, idx) for producing collaborative/session tilts,
     independently of the candidates being scored. Both must use the same embedding space.
     """
-    penalties = negative.penalties(store, V, idx, evidence_vecs=evidence_vecs)
     evidence_V, evidence_idx = (V, idx) if evidence_vecs is None else evidence_vecs
-    tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx)
-    st = layers.session_tilt(store, now, evidence_V, evidence_idx)
+    current, st = layers.track_tilts(store, now, evidence_V, evidence_idx)
+    consumed = set()
+    if (current is not None or st is not None) and hasattr(store, 'history'):
+        observations = layers.layer_plays(store, now)
+        if current is not None:
+            consumed.update(observations.current.items())
+        if st is not None:
+            consumed.update((observations.earlier_today() if current is not None else observations.today).items())
+        consumed = {(key, at) for key, at in consumed if key in evidence_idx}
+    exclude = {'consumed_plays': consumed} if consumed else {}
+    tilt = transient.centroid_tilt(store, now, evidence_V, evidence_idx, **exclude)
     session_alpha = rec_params.get_param(store, "session_alpha") if st is not None else 0.
     # TODO: normalize this legacy 0–2 strength alongside play/like weights in transient.py.
     # 0 disables this boost; 1 is not neutral (default 0.30). The UI maps it to 0–100%
     # influence strength, not a share of picks; any range cleanup must migrate saved values.
-    w = rec_params.get_param(store, "audio_transient_w")
+    w = rec_params.get_param(store, "audio_transient_w") if include_audio else 0.
     boost = _audio_tilt_boost(store, now, idx, content_vecs=content_vecs,
-                             content_snapshot=content_snapshot) if w > 0 else None
-    return mood_components_from_inputs(scores, V, penalties, tilt, st,
-        session_alpha=session_alpha, audio_boost=boost, audio_weight=w)
+                             content_snapshot=content_snapshot, **exclude) if w > 0 else None
+    return mood_components_from_inputs(scores, V, tilt, st,
+        session_alpha=session_alpha, audio_boost=boost, audio_weight=w, now_tilt=current,
+        now_gain=rec_params.get_param(store, 'now_gain') if current is not None else 0.)
 
 
-def mood_components_from_inputs(scores, V, penalties, tilt, session_tilt, *,
-                                session_alpha, audio_boost, audio_weight):
+def mood_components_from_inputs(scores, V, tilt, session_tilt, *,
+                                session_alpha, audio_boost, audio_weight, now_tilt=None, now_gain=0.):
     base = np.asarray(scores, dtype=np.float64)
     components = {'durable': base.copy(), 'transient': np.zeros(len(base)),
-                  'session': np.zeros(len(base)), 'audio': np.zeros(len(base)), 'negative': penalties}
-    if tilt is not None or session_tilt is not None:
+                  'session': np.zeros(len(base)), 'now': np.zeros(len(base)),
+                  'audio': np.zeros(len(base))}
+    if tilt is not None or session_tilt is not None or now_tilt is not None:
         normalized = V / (np.linalg.norm(V, axis=1, keepdims=True) + _NORM_EPS)
         if tilt is not None:
             components['transient'] = MOOD_ALPHA * (normalized @ tilt)
         if session_tilt is not None:
             components['session'] = session_alpha * (normalized @ session_tilt)
+        if now_tilt is not None:
+            components['now'] = now_gain * (normalized @ now_tilt)
     if audio_boost is not None:
         components['audio'] = audio_weight * audio_boost
-    components["combined"] = sum(components[name] for name in
-                                  ("durable", "negative", "transient", "session", "audio"))
+    components["combined"] = sum(components.values())
     return components
 
 
 def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=None,
                 content_snapshot=None):
-    """Blend durable dislike evidence and transient tilts into per-track scores.
-    Explicit dislike vectors persist independently of age, transient pruning, and ban expiry.
+    """Blend listening and transient tilts into per-track scores.
     #85: each transient tilt decays internally, per event, on
     its own wall clock (see transient.decay_weight); there is no separate external staleness relax here
     any more, so this just adds the (already-decayed) tilts straight in.
@@ -593,6 +777,34 @@ def _apply_mood(scores, store, now, V, idx, content_vecs=None, evidence_vecs=Non
                             content_snapshot)["combined"]
 
 
+def personalized_track_components(store, taste, matrix, index, now, *, content_only=False,
+                                  content_listening=False, evidence_vecs=None, content_vecs=None,
+                                  content_snapshot=None, mix_listening=None):
+    """Score recordings with the available taste and listening inputs."""
+    base = taste.allocated_scores(matrix) if taste else np.zeros(len(matrix))
+    if mix_listening is not None:
+        space = 'content' if content_only else 'collaborative'
+        tilt = mix_listening.direction(space, now, matrix.shape[1])
+        weight = 0. if content_only else rec_params.get_param(store, 'audio_transient_w')
+        boost = None
+        if weight and 'content' in mix_listening.spaces:
+            if content_vecs is None:
+                content_vecs = vectors.load_content_vectors(store, snapshot=content_snapshot)
+            content_matrix = content_vecs[1]
+            if content_matrix is not None:
+                direction = mix_listening.direction('content', now, content_matrix.shape[1])
+                if direction is not None:
+                    boost = audio_alignment(index, content_vecs, direction)
+        return mood_components_from_inputs(base, matrix, None, None, session_alpha=0.,
+            audio_boost=boost, audio_weight=weight, now_tilt=tilt, now_gain=1.)
+    if not content_only or content_listening:
+        # The content-space listening tilts already align against these rows.
+        # The cross-space audio term is only used for collaborative scores.
+        return _mood_components(base, store, now, matrix, index, content_vecs, evidence_vecs,
+                                content_snapshot, include_audio=not content_only)
+    return {'combined': base}
+
+
 def score_with_traces(store, taste, keys, V, idx, now):
     """Production warm-track scorer plus an exact, per-key decision trace.
 
@@ -600,7 +812,7 @@ def score_with_traces(store, taste, keys, V, idx, now):
     multipliers as normal serving; the returned final scores are contract-tested against the lean
     production path so transparency cannot become a parallel scoring implementation.
     """
-    components = _mood_components(taste.allocated_scores(V), store, now, V, idx)
+    components = personalized_track_components(store, taste, V, idx, now)
     combined = {keys[i]: float(components["combined"][i]) for i in range(len(keys))}
     weighted = _axis_weights_for(store, keys, now=now, with_details=True)
     if weighted is None:
@@ -617,10 +829,10 @@ def score_with_traces(store, taste, keys, V, idx, now):
         axis = axis_details.get(key, {"axes": {}, "raw_product": 1.0, "breadth": 1.0})
         traces[key] = {
             "durable": float(components["durable"][i]),
-            "negative_delta": float(components["negative"][i]),
             "contexts": [],
             "transient_delta": float(components["transient"][i]),
             "session_delta": float(components["session"][i]),
+            "now_delta": float(components["now"][i]),
             "audio_delta": float(components["audio"][i]),
             "combined": float(components["combined"][i]),
             "rank_base": float(ranked_base[key]),

@@ -1,5 +1,4 @@
 """One queue-processing command, independent of thread and application context."""
-from yt_playlist.providers import enrichment
 from yt_playlist.providers.waterfall import REGISTRY
 
 RADIO_RETRY_SECONDS = 3600
@@ -32,34 +31,43 @@ class EnrichmentDrain:
         if should_stop():
             return 0, set()
         self.state.expire_provider_alternatives(self.now())
-        limit = limit or positive_integer(self.settings.get_setting('enrich_batch_size', '40'), 40)
-        days = resweep_days(self.settings.get_setting('enrich_resweep_days', '30'))
         config = self.configuration(registry or REGISTRY)
         self.state.reconcile_provider_configuration(config)
         providers = [name for name, value in config.items() if value['status'] == 'available']
-        stale_before = self.now() - days * 86400
-        radio_before = max(stale_before, self.now() - RADIO_RETRY_SECONDS)
-        batch = (self.queue.priority_enrich_batch(priority, min(limit, 24), radio_before,
-                 providers=providers, now=self.now()) if priority else [])
-        scope, artwork = 'radio' if batch else 'queue', 0
+        batch, scope, artwork = [], 'radio', 0
+        if providers:
+            limit = limit or positive_integer(self.settings.get_setting('enrich_batch_size', '40'), 40)
+            days = resweep_days(self.settings.get_setting('enrich_resweep_days', '30'))
+            stale_before = self.now() - days * 86400
+            if priority:
+                radio_before = max(stale_before, self.now() - RADIO_RETRY_SECONDS)
+                batch = self.queue.priority_enrich_batch(priority, min(limit, 24), radio_before,
+                    providers=providers, now=self.now())
         if not batch:
+            scope = 'queue'
             artwork = self.retry_artwork(should_stop=should_stop,
                 on_progress=lambda event: activity(warning=event['text']))
-            batch = self.queue.next_enrich_batch(limit, providers=providers, now=self.now())
+            if providers:
+                batch = self.queue.next_enrich_batch(limit, providers=providers, now=self.now())
         if batch:
             self.had_work = True
         else:
-            if self.had_work and not self.reports.queue_remaining():
-                self.settings.set_setting('enrich_caught_up_at', str(self.now()))
-                self.had_work = False
-            batch = self.queue.resweep_batch(limit, stale_before, providers=providers, now=self.now())
+            pending = None
+            if self.had_work:
+                pending = self.reports.has_pending_tracks()
+                if not pending:
+                    self.queue.save_caught_up_at(self.now())
+                    self.had_work = False
+            if providers:
+                batch = self.queue.resweep_batch(limit, stale_before, providers=providers, now=self.now())
             scope = 'refresh'
-        if not batch:
-            pending = self.reports.queue_remaining()
-            activity(clear=not pending, state='waiting' if providers else 'blocked',
-                text=('Waiting for usable metadata or pending provider retries; other eligible work continues.'
-                      if providers else 'No enrichment providers are available. Check Setup.'))
-            return artwork, set()
+            if not batch:
+                if pending is None:
+                    pending = self.reports.has_pending_tracks()
+                activity(clear=not pending, state='waiting' if providers else 'blocked',
+                    text=('Waiting for usable metadata or pending provider retries; other eligible work continues.'
+                          if providers else 'No enrichment providers are available. Check Setup.'))
+                return artwork, set()
         if scope == 'queue':
             for track in batch:
                 if track.get('last_enriched_at') is not None:

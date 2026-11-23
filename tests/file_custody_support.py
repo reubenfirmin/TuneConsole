@@ -1,22 +1,34 @@
 """Independent disposable library fixtures using the current domain exporters.
 
 No schema upgrade, retention policy, compaction or installation runs here.
-Production rebuilds keep installed file roots in place instead.
 """
-from contextlib import closing
+from contextlib import closing, contextmanager, ExitStack
 from dataclasses import replace
 import json
 from pathlib import Path
 import sqlite3
 import tempfile
 
-from yt_playlist.core import (action_backup_files, album_description_files, audio_annotation_files,
+from yt_playlist.core import (action_backup_files, album_description_files,
     choice_evidence_files, collection_recovery, fao, file_map, file_owners, group_documents,
     legacy_evidence, metadata_delivery_files, metadata_runtime,
-    metadata_runtime_files, policy_documents, recommendation_outputs,
+    metadata_runtime_files, policy_bodies, policy_documents, policy_history_read, recommendation_chunks, recommendation_outputs,
     sample_files, served_facts)
-from yt_playlist.core.db_rebuild import job
-from yt_playlist.core.db_rebuild.sqlite_checks import tables, verify
+from yt_playlist.core.policy_paths import record_path
+from tests.library_image.file_references import installed_policy_history, reader_roots, tables
+
+
+@contextmanager
+def retained_readers(conn):
+    with ExitStack() as readers:
+        for root in sorted(set(reader_roots(conn))):
+            readers.enter_context(policy_documents.retained_reader(root))
+        yield
+
+
+def verify(conn):
+    assert [row[0] for row in conn.execute('PRAGMA integrity_check')] == ['ok']
+    assert conn.execute('PRAGMA foreign_key_check').fetchone() is None
 
 
 def expire_file(path):
@@ -73,7 +85,15 @@ class FileInventory:
 
 
 def export_owner(conn, module, root):
-    return FileInventory.export(module.directory(conn), module.references(conn), root)
+    source = module.directory(conn)
+    references = (_policy_history_files(conn, source) if module is policy_history_read else module.references(conn))
+    return FileInventory.export(source, references, root)
+
+
+def _policy_history_files(conn, root):
+    head, identities = installed_policy_history(conn)
+    yield from file_map.pages(root, head)
+    yield from (record_path(root, identity) for identity in identities)
 
 
 def restore_owner(conn, name, module, manifest):
@@ -83,7 +103,7 @@ def restore_owner(conn, name, module, manifest):
                     for domain, publication in conn.execute('SELECT domain,publication FROM legacy_archive_heads')
                     for path in file_map.pages(saved / domain, publication.hex()))
     elif name == 'policy-history':
-        expected = (root / path.relative_to(saved) for path in module.references(conn, root=saved))
+        expected = (root / path.relative_to(saved) for path in _policy_history_files(conn, saved))
     else:
         expected = module.references(conn)
     FileInventory.restore(root, manifest, expected=expected)
@@ -91,6 +111,12 @@ def restore_owner(conn, name, module, manifest):
 
 class PolicyFiles:
     """Policy relocation used only while constructing disposable test libraries."""
+
+    @staticmethod
+    def _owners(conn):
+        if 'recommendation_policy_bodies' in tables(conn):
+            return ('recommendation_policy_bodies', 'recommendation_policies')
+        return policy_documents.OWNERS
 
     @staticmethod
     def export(conn, root):
@@ -117,7 +143,7 @@ class PolicyFiles:
                     chunks.append(policy_documents.publish(root, {'type': 'backup-chunk', 'policies': entries})[1])
                     entries.clear()
 
-        for owner in policy_documents.OWNERS:
+        for owner in PolicyFiles._owners(conn):
             for version, filename, digest, offset, size in conn.execute(
                     f'SELECT version,configuration_filename,content_digest,configuration_offset,byte_size '
                     f'FROM {owner} ORDER BY configuration_filename,configuration_offset,version'):
@@ -135,6 +161,7 @@ class PolicyFiles:
 
     @staticmethod
     def restore(conn, manifest, *, memory_key=None):
+        owners = PolicyFiles._owners(conn)
         path = Path(manifest)
         document = policy_documents.read(path, path.stem)
         if (set(document) != {'type', 'chunks'} or document['type'] != 'backup-manifest'
@@ -152,7 +179,7 @@ class PolicyFiles:
         for entry in entries:
             if (not isinstance(entry, dict) or set(entry) != {
                     'owner', 'version', 'digest', 'relative_filename', 'offset', 'byte_size'}
-                    or entry['owner'] not in policy_documents.OWNERS or not isinstance(entry['version'], str)
+                    or entry['owner'] not in owners or not isinstance(entry['version'], str)
                     or not entry['version'] or not isinstance(entry['digest'], str)
                     or len(entry['digest']) != 64 or any(c not in '0123456789abcdef' for c in entry['digest'])
                     or type(entry['offset']) is not int or entry['offset'] < len(policy_documents.PACK_HEADER)
@@ -171,7 +198,7 @@ class PolicyFiles:
             raise ValueError('Policy restore requires its own writer reservation')
         conn.execute('BEGIN IMMEDIATE')
         try:
-            expected = {(owner, version): (digest, size) for owner in policy_documents.OWNERS
+            expected = {(owner, version): (digest, size) for owner in owners
                         for version, digest, size in conn.execute(f'SELECT version,content_digest,byte_size FROM {owner}')}
             if expected != {(entry['owner'], entry['version']): (entry['digest'], entry['byte_size'])
                             for entry in entries}:
@@ -184,10 +211,15 @@ class PolicyFiles:
                 if (copied, size) != (entry['digest'], entry['byte_size']):
                     raise ValueError('Policy restore changed a configuration')
                 targets.append((entry['owner'], filename, offset, entry['version']))
-            with policy_documents.coordinate_updates(conn, policy_documents.OWNERS):
-                for owner in policy_documents.OWNERS:
-                    conn.executemany(f'UPDATE {owner} SET configuration_filename=?,configuration_offset=? WHERE version=?',
-                                     [(filename, offset, version) for table, filename, offset, version in targets if table == owner])
+            with policy_documents.coordinate_updates(conn, set(owners) - {policy_bodies.VIEW}):
+                for owner, filename, offset, version in targets:
+                    if owner == policy_bodies.VIEW:
+                        body = policy_bodies.read(conn, version)
+                        policy_bodies.save(conn, version, filename, body['content_digest'], body['byte_size'],
+                                           offset, body['created_at'])
+                    else:
+                        conn.execute(f'UPDATE {owner} SET configuration_filename=?,configuration_offset=? '
+                                     'WHERE version=?', (filename, offset, version))
             conn.commit()
         except BaseException:
             conn.rollback()
@@ -204,18 +236,18 @@ def domains(conn):
         yield 'runtime_metadata', metadata_runtime_files
     for table, name, module in (
         ('sample_attributes', 'samples', sample_files),
-        ('action_backups', 'actions', action_backup_files),
+        ('actions', 'actions', action_backup_files),
         ('album_feedback', 'collections', collection_recovery),
-        ('audio_annotations', 'annotations', audio_annotation_files),
         ('recommendation_policies', 'policies', PolicyFiles),
         ('album_description_requests', 'descriptions', album_description_files),
         ('group_versions', 'groups', group_documents),
-        ('prepared_outputs', 'recommendations', recommendation_outputs),
+        (recommendation_chunks.OWNER, 'recommendations', recommendation_outputs),
         ('metadata_deliveries', 'metadata', metadata_delivery_files),
     ):
-        if table in schema:
+        if table in schema or (table == recommendation_chunks.OWNER and
+                               recommendation_outputs._has_relation(conn, recommendation_chunks.VIEW)):
             yield name, module
-    if 'legacy_catalog_evidence' in schema:
+    if schema.intersection(legacy_evidence.DOMAINS.values()):
         yield 'archives', legacy_evidence
 
 
@@ -224,8 +256,9 @@ def export_files(conn, target, *, backup_root=None):
     def root(domain):
         return (Path(backup_root) / domain if backup_root is not None else
                 target.with_name(target.name + '.' + domain))
-    manifests = {name: export_owner(conn, module, root(name))
-                 for name, module in file_owners.owners().items() if module.available(conn)}
+    installed = tables(conn)
+    manifests = {name: export_owner(conn, module, root(name)) for name, module in file_owners.owners().items()
+                 if module.available(conn) or (name == 'policy-history' and 'recommendation_policy_history' in installed)}
     for name, module in domains(conn):
         manifests[name] = module.export(conn, root(name))
     return manifests
@@ -257,7 +290,7 @@ def snapshot_library(source, root, *, restore=True):
     snapshot, restored = root / 'snapshot.db', root / 'restored.db'
     with closing(sqlite3.connect(Path(source).resolve().as_uri() + '?mode=ro', uri=True)) as reader:
         reader.row_factory = sqlite3.Row
-        with job._files(reader):
+        with retained_readers(reader):
             reader.execute('BEGIN')
             try:
                 manifests = export_files(reader, snapshot)

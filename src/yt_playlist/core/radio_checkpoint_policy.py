@@ -1,5 +1,14 @@
 """Radio checkpoint planning and projection without storage access."""
+import json
+
 from . import radio_checkpoint
+
+
+OPERATION_FIELDS = (
+    'kind', 'sent', 'started_at', 'receipt_status', 'receipt_video_id_snapshot',
+    'receipt_handle_snapshot', 'allowed_count', 'waiting_present', 'play_prefix_present',
+    'adding_video_id_snapshot', 'slot', 'choice_id',
+)
 
 
 def queue(state):
@@ -38,8 +47,19 @@ def operation(state):
         lists = [('allowed', index, items) for index, items in enumerate(allowed)]
         lists.extend((role, 0, value.get(role) or []) for role in ('confirmed', 'waiting', 'play_prefix', 'excluded'))
         lists.append(('proposed', 0, [item['video_id'] for item in value.get('proposed', [])]))
-    return {'fields': fields, 'items': [(role, index, position, video)
-        for role, index, videos in lists for position, video in enumerate(videos)]}
+    return {**dict(zip(OPERATION_FIELDS, fields, strict=True)), 'lists': lists}
+
+
+def encode_operation(plan, revision):
+    if plan is not None:
+        return json.dumps({**plan, 'session_revision': revision}, ensure_ascii=False, separators=(',', ':'))
+
+
+def restore_operation(state, raw):
+    if raw is not None:
+        header = json.loads(raw)
+        roles = {(role, index): videos for role, index, videos in header['lists']}
+        project_operation(state, header, roles)
 
 
 def project_queue(state, header, rows):

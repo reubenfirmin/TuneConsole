@@ -11,7 +11,6 @@ import pytest
 from yt_playlist.core import fao, vibe_history, vibe_provenance as owner, vibe_versions
 from yt_playlist.core import vibe_models as vibe_model_files
 from yt_playlist.core.db_writes import atomic_write
-from tests.file_preparation_support import provenance as preparation
 from yt_playlist.core.store import Store
 
 DAY = 86400
@@ -68,12 +67,12 @@ def test_native_model_interruption_keeps_the_old_head_and_pending_record(file_co
     store = file_consumer_store
     _pid, mids, artist, _rid = evidence(store)
     receipt, previous = shared_receipt(store, mids, artist)
-    head = vibe_model_files.HEAD_PREFIX + 'relax'
-    store.settings.publish_values({head: receipt['generation']})
+    store.vibe_predictions.repository.install_joint_model('relax', receipt['generation'], {}, [], False)
     value = {**previous, 'diagnostics': {**previous['diagnostics'], 'replacement': True}}
     generation, staged = store.vibe_models.stage(value)
     with closing(sqlite3.connect(store._db_path)) as observer:
-        assert observer.execute('SELECT id,file_status FROM vibe_model_file_writes').fetchone() == (staged.file_id, 'pending')
+        assert observer.execute("SELECT CAST(owner_id AS INTEGER),file_status FROM collection_file_writes "
+                                "WHERE kind='vibe-model'").fetchone() == (staged.file_id, 'pending')
     assert store.vibe_models.repository.file_reference(generation) is None
     complete = vibe_model_file_writes.complete
 
@@ -91,9 +90,9 @@ def test_native_model_interruption_keeps_the_old_head_and_pending_record(file_co
                 store.vibe_predictions.publish_joint_model('relax', generation, {'outcome': 'ready'}, mids, staged, False)
     finally:
         staged.close()
-    assert store.settings.get_setting(head) == receipt['generation']
+    assert store.vibe_predictions.joint_state('relax')[0] == receipt['generation']
     assert store.vibe_models.read(receipt['generation']) == previous
-    assert store.conn.execute('SELECT file_status FROM vibe_model_file_writes').fetchone()[0] == 'pending'
+    assert store.conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='vibe-model'").fetchone()[0] == 'pending'
     with store.read_snapshot() as snapshot:
         generation, retry = snapshot.store.vibe_models.stage(value)
         try:
@@ -101,7 +100,7 @@ def test_native_model_interruption_keeps_the_old_head_and_pending_record(file_co
                 'relax', generation, {'outcome': 'ready'}, mids, retry, False))
         finally:
             retry.close()
-    assert store.settings.get_setting(head) == generation
+    assert store.vibe_predictions.joint_state('relax')[0] == generation
     assert store.vibe_models.read(generation) == value
 
 
@@ -138,47 +137,19 @@ def test_native_model_same_digest_replacement_keeps_pinned_ids_and_exact_backup(
     assert store.vibe_models.read(generation) == value
 
 
-def test_partial_conversion_exact_reuse_and_failed_publication(store, monkeypatch):
-    pid, mids, artist, rid = evidence(store)
-    with atomic_write(store):
-        store.conn.executemany('INSERT INTO prediction_inputs VALUES (?,?)', [(pid, mid) for mid in mids])
-        store.conn.execute('INSERT INTO prediction_artists VALUES (?,?)', (pid, artist))
-    expected = {'inputs': mids, 'artists': [artist]}
-    assert owner.read(store.conn, pid) == expected
-    with monkeypatch.context() as patch:
-        patch.setattr(fao, 'write', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
-        with pytest.raises(OSError, match='disk full'):
-            preparation.prepare(store, limit=1)
-    assert owner.read(store.conn, pid) == expected
-    assert store.conn.execute('SELECT count(*) FROM prediction_inputs').fetchone()[0] == 2
-    assert preparation.prepare(store, limit=1) == 1
-    assert preparation.prepare(store, limit=1) == 0
-    assert owner.read(store.conn, pid) == expected
-    assert owner.same_inputs(store.conn, pid, list(reversed(mids)))
-    assert not owner.same_inputs(store.conn, pid, mids[:1])
-    assert not store.conn.execute('SELECT 1 FROM prediction_inputs').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM prediction_artists').fetchone()
-    path = owner.directory(store.conn) / owner.relative(pid)
-    fao.write(path, b'corrupt format')
-    with pytest.raises(ValueError):
-        owner.read(store.conn, pid)
-
-
 def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(store, monkeypatch):
-    legacy, mids, artist, rid = evidence(store)
-    ready = legacy + 1
+    unarchived, mids, artist, rid = evidence(store)
+    ready = unarchived + 1
     other_chunk = (ready // owner.CHUNK_ROWS + 1) * owner.CHUNK_ROWS + 1
     expired = other_chunk + 1
     with atomic_write(store):
-        store.conn.executemany('INSERT INTO prediction_inputs VALUES (?,?)', [(legacy, mid) for mid in mids])
-        store.conn.execute('INSERT INTO prediction_artists VALUES (?,?)', (legacy, artist))
         basis = vibe_versions.stored(store.conn, 'basis')
         version = vibe_versions.column(store.conn, 'predictions')
         for pid in (ready, other_chunk, expired):
             store.conn.execute(f'INSERT INTO predictions(id,recording_id,vibe,score,support,kind,{version},predicted_at) '
                 "VALUES (?,?,'relax',.5,1,'artist',?,1)", (pid,rid,basis))
         owner.publish_many(store.conn, [(pid,mids,[artist]) for pid in (ready,other_chunk,expired)])
-        store.conn.execute("UPDATE prediction_provenance SET state='expired' WHERE prediction_id=?", (expired,))
+        store.conn.execute("UPDATE predictions SET provenance_state='expired' WHERE id=?", (expired,))
     available, chunk = owner.available, owner._chunk
     checks, reads = [], []
     def installed(conn):
@@ -191,9 +162,10 @@ def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(sto
     monkeypatch.setattr(owner, '_chunk', load)
     expected = {'inputs': mids, 'artists': [artist]}
     with store.read_view() as reader:
-        assert list(owner.read_many(reader.conn, [legacy,ready,other_chunk,expired,expired+1])) == [
-            (legacy,expected), (ready,expected), (other_chunk,expected), (expired,None), (expired+1,None)]
-    assert len(checks) == 1
+        assert list(owner.read_many(reader.conn, [unarchived, ready, other_chunk, expired, expired+1])) == [
+            (unarchived, {'inputs': [], 'artists': []}), (ready, expected), (other_chunk, expected),
+            (expired, None), (expired+1, None)]
+    assert not checks
     assert reads == [ready // owner.CHUNK_ROWS, other_chunk // owner.CHUNK_ROWS]
     fao.write(owner.directory(store.conn) / owner.relative(other_chunk), b'corrupt format')
     with store.read_view() as reader, pytest.raises(ValueError):
@@ -203,7 +175,7 @@ def test_batch_read_preserves_mixed_lineage_and_bounds_schema_and_file_reads(sto
 def test_staging_preserves_existing_roots_and_roots_allocated_by_the_planner(store):
     pid, mids, artist, _rid = evidence(store)
     with atomic_write(store):
-        store.conn.execute('INSERT INTO prediction_measurement_roots VALUES (?)', (mids[0],))
+        store.conn.execute('UPDATE measurements SET used_by_model=1 WHERE id=?', (mids[0],))
     # New measurements are allocated by the planner before either those rows
     # or their roots are committed. Keep both kinds across several SQL pages.
     allocated = list(range(max(mids) + 1, max(mids) + 260))
@@ -216,9 +188,9 @@ def test_staging_preserves_existing_roots_and_roots_allocated_by_the_planner(sto
             assert roots == inputs[1:]
             assert markers[0][:2] == (pid, owner.fingerprint(inputs))
             assert [row[0] for row in store.conn.execute(
-                'SELECT measurement_id FROM prediction_measurement_roots')] == mids[:1]
+                'SELECT id FROM measurements WHERE used_by_model=1')] == mids[:1]
             assert not (owner.directory(store.conn) / owner.relative(pid)).exists()
-            assert len([sql for sql in statements if sql.startswith('SELECT measurement_id FROM prediction_measurement_roots WHERE')]) == 3
+            assert len([sql for sql in statements if sql.startswith('SELECT id FROM measurements WHERE used_by_model=1 AND id IN')]) == 3
         finally:
             for publication in staged:
                 publication.close()
@@ -348,11 +320,16 @@ def test_changed_target_conditioning_gets_distinct_receipt_when_numeric_result_i
     assert owner.read(store.conn, first[0])['conditioning'] == conditioning(first_value)
     assert owner.read(store.conn, second[0])['conditioning'] == conditioning(second_value)
     assert owner.read(store.conn, legacy_pid) == {**legacy_receipt, 'inputs': mids}
-    assert store.conn.execute('SELECT count(*) FROM prediction_inputs').fetchone()[0] == 0
 
 
 def test_original_subject_validation_and_ids_survive_retirement(store):
     pid, mids, artist, rid = evidence(store)
+    with pytest.raises(ValueError, match='distinct original'), atomic_write(store):
+        wrong = store.conn.execute(
+            "INSERT INTO measurements(recording_id,vibe,score,support,source,model_version_id,input_digest) "
+            "SELECT recording_id,'release',score,support,source,model_version_id,input_digest FROM measurements WHERE id=?",
+            (mids[0],)).lastrowid
+        owner.publish_many(store.conn, [(pid, [wrong], [artist])])
     with pytest.raises(ValueError, match='distinct original'), atomic_write(store):
         version = vibe_versions.column(store.conn, 'measurements')
         duplicate = store.conn.execute(f'INSERT INTO measurements(recording_id,vibe,score,support,source,{version},input_digest) '

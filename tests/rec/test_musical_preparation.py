@@ -9,6 +9,7 @@ from tests.genre_catalog_support import bound_shipped_catalog
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader, without_query_timing
 from yt_playlist.core import catalog, metadata_runtime, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded
+from yt_playlist.core.metadata_contract import ACTIVE
 from yt_playlist.core.store import Store
 from yt_playlist.providers.base import MetadataObservation
 from yt_playlist.rec import musical_preparation, musical_profiles as profiles, vibe_preparation
@@ -30,7 +31,7 @@ def profile_schema():
     with bounded_consumer_schema(()) as schema:
         assert schema.execute('PRAGMA query_only').fetchone()[0] == 1
         assert schema._revision_script
-        assert not schema.execute('SELECT 1 FROM rec_musical_profiles').fetchone()
+        assert not schema.execute('SELECT 1 FROM recordings WHERE musical_profile_version IS NOT NULL').fetchone()
         assert not schema.execute('PRAGMA foreign_key_check').fetchone()
         yield schema
 
@@ -94,7 +95,7 @@ def test_shared_artist_fanout_is_paged_and_does_not_admit_content_refits(store):
     before = store.prepared_content.counters()
     observe(store, tids[0], [{'name': 'Ambient', 'count': 10}], run='changed')
     assert musical_preparation.source_step(store, 1001, batch=2)
-    assert store.conn.execute('SELECT cursor FROM rec_musical_pending').fetchone()[0] > 0
+    assert store.conn.execute('SELECT pending_cursor FROM rec_musical_sources WHERE pending_position IS NOT NULL').fetchone()[0] > 0
     assert len(store.prepared_content.pending(32)) == 2
     drain(store, batch=2)
     assert store.prepared_content.counters() == before
@@ -114,13 +115,13 @@ def test_source_slice_tracks_only_its_source_and_referenced_metadata(store, monk
     monkeypatch.setattr(store._snapshot_revisions, 'capture', capture)
     assert musical_preparation.source_step(store, 1000)
     expected = {(table, 'key:' + key) for table in (
-        'rec_musical_pending', 'rec_musical_sources', 'rec_musical_links', 'rec_musical_source_profiles',
-        'musical_source_observations')}
-    references = store.conn.execute('SELECT o.id,o.delivery_id FROM musical_source_observations s '
-        'JOIN native_metadata_observations o ON o.id=s.observation_id WHERE s.source_key=?', (key,)).fetchall()
+        'rec_musical_sources', 'rec_musical_links')}
+    references = store.conn.execute('SELECT o.id,o.delivery_id FROM rec_musical_sources s '
+        'JOIN json_each(s.selected_observations) f JOIN native_metadata_observations o ON o.id=f.atom '
+        'WHERE s.source_key=?', (key,)).fetchall()
     expected.update(('native_metadata_observations', 'key:' + str(row[0])) for row in references)
     expected.update(('metadata_deliveries', 'key:' + str(row[1])) for row in references)
-    expected.add(('metadata_runtime_state', 'group:format'))
+    expected.add(('settings', 'key:' + ACTIVE))
     # Pinning records a scalar serial; only publication seeks consumed inputs.
     assert captures == [expected]
 
@@ -138,7 +139,8 @@ def test_unrelated_metadata_arrival_does_not_discard_a_source_slice(store, monke
     with monkeypatch.context() as patch:
         patch.setattr(profiles, 'source_profile', change)
         assert musical_preparation.source_step(store, 1000)
-    assert store.conn.execute('SELECT 1 FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()
+    assert store.conn.execute('SELECT musical_profile_version FROM rec_musical_sources WHERE source_key=?',
+                              (key,)).fetchone()[0]
     drain(store)
     assert get(store, 'one|artist')['intensity']['value'] > .5
     assert get(store, 'two|other')['intensity']['value'] < .5
@@ -201,7 +203,8 @@ def test_native_source_receipts_support_profile_and_audio_inputs_during_unrelate
     with monkeypatch.context() as patch:
         patch.setattr(profiles, 'source_profile', unrelated)
         assert musical_preparation.source_step(store, 1000)
-    assert store.conn.execute('SELECT 1 FROM rec_musical_source_profiles WHERE source_key=?', (key,)).fetchone()
+    assert store.conn.execute('SELECT musical_profile_version FROM rec_musical_sources WHERE source_key=?',
+                              (key,)).fetchone()[0]
 
 
 def test_file_backed_delivery_relocation_preserves_last_good_and_retries(store, tmp_path, monkeypatch):
@@ -211,8 +214,8 @@ def test_file_backed_delivery_relocation_preserves_last_good_and_retries(store, 
         drain(store)
         previous = get(store)
         observe(store, tid, [{'name': 'Ambient'}], run='new')
-        delivery = store.conn.execute('SELECT d.id,d.raw_filename FROM musical_source_observations s '
-            'JOIN native_metadata_observations o ON o.id=s.observation_id '
+        delivery = store.conn.execute('SELECT d.id,d.raw_filename FROM rec_musical_sources s '
+            'JOIN json_each(s.selected_observations) f JOIN native_metadata_observations o ON o.id=f.atom '
             'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=?',
             (store.musical_profiles.pending(),)).fetchone()
         original = profiles.source_profile
@@ -270,7 +273,7 @@ def test_large_source_yields_to_recordings_between_pages(store):
         observe(store, tid, [{'name': 'Metal'}])
     p = Preparation(store, budget=replace(Budget(), batch=1))
     assert p.capture(1000)  # source page
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings WHERE musical_profile_version IS NOT NULL').fetchone()[0] == 0
     assert store.musical_profiles.pending()
     assert p.capture(1001)  # recording gets its turn before the source drains
     # Account reconciliation can put a retired-key tombstone first in the
@@ -301,16 +304,16 @@ def test_source_snapshot_rejects_changed_evidence_and_preserves_last_good(store,
 
 def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallback(store, monkeypatch):
     tid = store.tracks.upsert_track('v', 'Song', 'Artist', '', 200)
-    observe(store, tid, .9, field='mood_aggressive', scope='recording')
+    observe(store, tid, .1, field='mood_relaxed', scope='recording')
     drain(store)
     before = get(store)
     with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', .2)
+        catalog.choose_field(store.conn, tid, 'mood_relaxed', .8)
     original = MusicalProfiles.recording_inputs
     def change(repo, keys, **kwargs):
         result = original(repo, keys, **kwargs)
         with store.conn:
-            catalog.choose_field(store.conn, tid, 'energy', None)
+            catalog.choose_field(store.conn, tid, 'mood_relaxed', None)
         return result
     with monkeypatch.context() as patch:
         patch.setattr(MusicalProfiles, 'recording_inputs', change)
@@ -318,7 +321,7 @@ def test_recording_snapshot_rejects_override_race_and_explicit_null_blocks_fallb
     assert get(store) == before
     drain(store)
     assert get(store)['intensity']['value'] is None
-    assert get(store)['intensity']['override']
+    assert get(store)['relaxed']['override']
 
 
 def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(store, monkeypatch):
@@ -342,8 +345,9 @@ def test_restart_budget_exhaustion_empty_tag_retraction_and_version_rebuild(stor
             drain(store)
             assert get(store)['intensity']['value'] is None
             with store.conn:
-                store.conn.execute("UPDATE rec_musical_profiles SET version='old'")
-                store.conn.execute("UPDATE rec_musical_source_profiles SET version='old'")
+                store.conn.execute("UPDATE recordings SET musical_profile_version='old' WHERE musical_profile_version IS NOT NULL")
+                store.conn.execute("UPDATE rec_musical_sources SET musical_profile_version='old' "
+                                   "WHERE musical_profile_version IS NOT NULL")
             assert musical_preparation.due(store)
             drain(store, batch=1)
             assert not any(store.musical_profiles.stale(profiles.VERSION))
@@ -392,8 +396,8 @@ def test_profile_preparation_fanout_and_stale_version_index(store):
         tid = store.tracks.upsert_track(f'v{i}', f'Song {i}', 'Artist', '', 200)
         observe(store, tid, [{'name': 'Metal'}, {'name': 'Ambient'}])
     drain(store)
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 5
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings WHERE musical_profile_version IS NOT NULL').fetchone()[0] == 5
     # Stale-version probes must be indexed seeks, not full corpus scans.
-    plans = store.conn.execute('EXPLAIN QUERY PLAN SELECT identity_key FROM rec_musical_profiles '
-                               'WHERE version<? LIMIT 32', (profiles.VERSION,)).fetchall()
+    plans = store.conn.execute('EXPLAIN QUERY PLAN SELECT identity_key FROM recordings '
+                               'WHERE musical_profile_version<? LIMIT 32', (profiles.VERSION,)).fetchall()
     assert any('SEARCH' in row[3] and 'version' in row[3] for row in plans)

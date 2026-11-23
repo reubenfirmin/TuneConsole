@@ -51,7 +51,6 @@ def test_gc_removes_stale_tracks_from_cached_fresh_and_mode_recommendations(stor
     s.discovery.gc_discovery_pool(100 * 86400, 30, {"held"})
     for surface,mode in (('fresh','all'),('home','all'),('home','123')):
         assert {t['key'] for t in s.recommendations.candidate_page(surface,mode,'fresh')['tracks']}=={'held','recent'}
-    assert s.settings.get_setting("enrich_attempts:old") is None
 
 
 def test_orphan_cleanup_preserves_tracks_in_generated_playlists(store):

@@ -8,7 +8,7 @@ from yt_playlist.util.matching import identity_key
 
 @pytest.fixture
 def configured_store(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     return store
 
 
@@ -109,10 +109,17 @@ def test_rating_requires_confirmation_but_retains_raw_outcomes(action, outcome, 
     key = s.tracks.identity_key_for_video("v")
     assert (key in s.rec_model.recent_liked_keys()) == (confirmed and action == "like")
     assert (key in s.rec_model.disliked_identity_keys()) == (confirmed and action == "dislike")
-    rows = s.player_events.player_events_since(0)
-    assert len(rows) == 1
-    payload = json.loads(rows[0]["payload"])
+    raw, = s.player_events.player_events_since(0, kind="rate")
+    assert (raw["account_id"], raw["video_id"], raw["at"]) == (1, "v", 1000.0)
+    payload = json.loads(raw["payload"])
     assert all(payload[k] == v for k, v in outcome.items())
+    actions = s.player_events.player_events_since(0, kind="confirmed_rating")
+    assert len(actions) == int(confirmed)
+    if confirmed:
+        event, = actions
+        assert (event["account_id"], event["video_id"], event["at"]) == (1, "v", 1000.0)
+        action_payload = json.loads(event["payload"])
+        assert (action_payload["status"], action_payload["source"]) == (action.upper(), "api")
 
 
 @pytest.mark.parametrize('kind', sorted(player_events.CURATION_KINDS))

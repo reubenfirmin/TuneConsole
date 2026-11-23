@@ -1,15 +1,12 @@
 """The saved Radio offer and historical manual report have separate file owners."""
+import json
 import math
 
-from . import home_outputs, recommendation_outputs as files, policy_documents
+from . import home_outputs, recommendation_outputs as files, policy_documents, radio_policy_roots, worker_settings
 
 KEYS = frozenset({'radio_seed_offer', 'rec_autotune_result'})
-TABLES = {'radio_seed_offer': 'radio_seed_output', 'rec_autotune_result': 'model_autotune_output'}
+OWNERS = {surface: owner for owner, (_, surface) in files.SAVED_OUTPUTS.items()}
 MAX_RAW_BYTES = 512 * 1024
-
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='radio_seed_output'").fetchone() is not None
 
 
 def prepare(key, raw):
@@ -62,45 +59,46 @@ def put(conn, values):
 
 
 def register(conn, prepared, durable):
-    """Replace SQL rows using validated output fields and supplied file references."""
+    """Replace the current saved file references and their captured metadata."""
     for key, output in prepared.items():
-        if key == 'radio_seed_offer':
-            conn.execute('DELETE FROM radio_seed_policies')
-            conn.execute('DELETE FROM radio_seed_subjects')
-        conn.execute('DELETE FROM ' + TABLES[key])
+        setting = files.SAVED_OUTPUTS[OWNERS[key]][0]
         if output is None:
+            worker_settings.save(conn, setting, None)
             continue
         value, observed = output['value'], output['observed']
         filename, digest, size = durable[key]
+        document = dict(filename=filename, content_digest=digest, byte_size=size)
         if key == 'radio_seed_offer':
             menu = value.get('menu_id')
             run = (value.get('comparison') or {}).get('run_id')
             known = run is not None and conn.execute('SELECT 1 FROM rec_model_selection_runs WHERE id=?', (run,)).fetchone()
-            conn.execute('INSERT INTO radio_seed_output(id,menu_id,comparison_run_id,run_ref,run_resolution,filename,content_digest,byte_size) '
-                         'VALUES (1,?,?,?,?,?,?,?)', (menu, run, run if known else None,
-                         None if run is None or known else 'missing_run', filename, digest, size))
+            roots = radio_policy_roots.encode(conn, output['policies'])
+            subjects = []
             for position, track in enumerate(value.get('tracks', [])):
-                row = conn.execute('SELECT id FROM catalog_entries WHERE video_id=? ORDER BY id LIMIT 1',
-                                   (track['video_id'],)).fetchone()
-                conn.execute('INSERT INTO radio_seed_subjects VALUES (1,?,?,?,?)',
-                             (position, track['video_id'], row[0] if row else None,
-                              None if row else 'missing_entry'))
-            for policy in sorted(output['policies']):
-                known = conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?', (policy,)).fetchone()
-                conn.execute('INSERT INTO radio_seed_policies VALUES (1,?,?,?)',
-                             (policy, policy if known else None, None if known else 'missing_policy'))
+                video = track['video_id']
+                row = conn.execute('SELECT id FROM track_sources WHERE video_id=? ORDER BY id LIMIT 1', (video,)).fetchone()
+                subjects.append(dict(position=position, video_id=video, entry_id=row[0] if row else None,
+                                     resolution_reason=None if row else 'missing_entry'))
+            document.update(menu_id=menu, comparison_run_id=run, run_ref=run if known else None,
+                            run_resolution=None if run is None or known else 'missing_run',
+                            policy_roots=json.loads(roots), seed_subjects=subjects)
         else:
-            conn.execute('INSERT INTO model_autotune_output(id,observed_at,filename,content_digest,byte_size) VALUES (1,?,?,?,?)',
-                         (observed, filename, digest, size))
+            document['observed_at'] = observed
+        worker_settings.save(conn, setting, json.dumps(document, allow_nan=False))
+
+
+def reference(conn, key):
+    document = files.saved_reference(conn, OWNERS[key])
+    return {field: document[field] for field in ('filename', 'content_digest', 'byte_size')} if document else None
 
 
 def get(conn, key, default=None):
     with policy_documents.retained_reader(files.directory(conn)):
-        row = conn.execute('SELECT filename,content_digest,byte_size FROM ' + TABLES[key] + ' WHERE id=1').fetchone()
+        row = reference(conn, key)
         if row is None:
             return default
         try:
-            return files.read(*row, surface=key, chunk_key='')
+            return files.read(row['filename'], row['content_digest'], row['byte_size'], surface=key, chunk_key='')
         except (OSError, ValueError):
             return default
 

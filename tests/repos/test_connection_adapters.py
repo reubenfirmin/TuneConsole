@@ -7,23 +7,17 @@ import pytest
 from tests.store_fixture_support import file_consumer_store
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.repos.collection_recovery import CollectionRecovery
-from yt_playlist.repos.embedding_file_references import EmbeddingSources
-from yt_playlist.repos.profile_file_references import ProfileSources
 from yt_playlist.repos.workflow_preparation import WorkflowSources
 
 
-def operation(conn, name):
+def operation(store, name):
     if name.startswith('collection'):
-        repository = CollectionRecovery(conn)
+        repository = CollectionRecovery(store.conn)
         return (lambda: list(repository.references())) if name == 'collection-references' else lambda: repository.pinned
     if name == 'workflow':
-        repository = WorkflowSources(conn)
+        repository = WorkflowSources(store.conn)
         return lambda: tuple(repository.source('adapter-test', 100))
-    if name == 'embedding':
-        repository = EmbeddingSources(conn)
-        return lambda: repository.page('recording', 1)
-    repository = ProfileSources(conn)
-    return lambda: repository.page('recording', '', 1)
+    return lambda: store.musical_profiles.repository.file_required('source', 'a' * 64)
 
 
 def observe_waiter(monkeypatch, store):
@@ -39,11 +33,10 @@ def observe_waiter(monkeypatch, store):
     return attempted
 
 
-@pytest.mark.parametrize('name', ['collection-state', 'collection-references', 'workflow', 'embedding', 'profile'])
+@pytest.mark.parametrize('name', ['collection-state', 'collection-references', 'workflow', 'profile'])
 def test_adapter_waits_for_the_serving_transaction_to_rollback(store, monkeypatch, name):
     store.settings.set_setting('adapter-test', 'before')
-    with atomic_write(store):
-        query = operation(store.conn, name)
+    query = operation(store, name)
     expected = query()
     attempted = observe_waiter(monkeypatch, store)
     with ThreadPoolExecutor(1) as workers:

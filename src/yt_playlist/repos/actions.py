@@ -1,22 +1,18 @@
 """Action rows, detached recovery references, and conditional SQL claims."""
 from contextlib import contextmanager
+import json
 
-from yt_playlist.core import action_work, playlist_scopes
+from yt_playlist.core import action_backup_inventory, action_work, playlist_scopes
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.repos import action_backup_writes, collection_file_writes
+from yt_playlist.repos import collection_file_writes
 
 
 class ActionRepo(Repo):
     @synchronized
-    def reserve_backup_file(self, action, position, integrity):
-        with self.conn.atomic():
-            return action_backup_writes.reserve(self.conn, action, position, integrity)
-
-    @synchronized
     def reserve_file(self, kind, owner, integrity, *, new_owner=False):
-        with self.conn.atomic():
+        with self.conn.atomic(join=True):
             if new_owner:
-                table = 'actions' if kind == 'action' else 'action_steps'
+                table = 'action_steps' if kind == 'action-step' else 'actions'
                 if owner != self._next_identity(table):
                     raise ValueError('Action identity was reserved by another worker')
             return collection_file_writes.reserve(self.conn, kind, owner, integrity,
@@ -32,8 +28,12 @@ class ActionRepo(Repo):
         with self.conn.atomic():
             return self._publish_record(prepared)
 
-    def _publish_record(self, prepared):
-        prior = self.prior_intent(prepared['idempotency_key'])
+    @synchronized
+    def publish_radio_copy(self, prepared, *, scope, account):
+        return self._publish_record(prepared, copy_destination=(scope, account))
+
+    def _publish_record(self, prepared, *, copy_destination=None):
+        prior = self.prior_intent(prepared['idempotency_key']) if copy_destination is None else None
         if prior is not None:
             if prior['intent_digest'] != prepared['intent_digest']:
                 raise ValueError('Idempotency key belongs to another action intent')
@@ -44,16 +44,25 @@ class ActionRepo(Repo):
         if reviewed is not None:
             self.reviewed_draft(reviewed['id'], reviewed['revision'])
         identity = prepared['identity']
-        reference = self._complete_file('action', identity, prepared['publication'])
-        self.insert_action(prepared['kind'], None, None, prepared['status'], None, prepared['created_at'],
+        draft = prepared['kind'] == 'merge_draft'
+        reference = self._complete_file('action-draft' if draft else 'action', identity, prepared['publication'])
+        self.insert_action(prepared['kind'], prepared['status'], prepared['created_at'],
             identity=identity, revision=prepared['revision'], idempotency_key=prepared['idempotency_key'],
             intent_digest=prepared['intent_digest'], undo_of=prepared['undo_of'], mode=prepared['mode'],
-            reference=reference, reviewed=reviewed)
-        if prepared['draft'] is not None:
-            reference = self._complete_file('action-draft', identity, prepared['draft'])
-            self.store_draft(identity, prepared['signature'], prepared['revision'], prepared['created_at'], reference)
-        else:
+            reference=reference, reviewed=reviewed, signature=prepared['signature'])
+        if draft:
+            return identity
+        if copy_destination is None:
             self._store_progress(identity, prepared['progress'])
+        else:
+            scope, account = copy_destination
+            targets = prepared['progress']['targets']
+            if targets != [('destination', 0, {'account': account, 'remote': scope})]:
+                raise ValueError('Radio Undo does not match the confirmed destination')
+            self.conn.execute(
+                'INSERT INTO action_targets(action_id,role,position,account_id,playlist_scope_id,'
+                "provider_playlist_id_snapshot) VALUES (?,'destination',0,?,?,?)",
+                (identity, account, scope, scope))
         return identity
 
     @synchronized
@@ -83,7 +92,7 @@ class ActionRepo(Repo):
                     or row['status'] != 'draft' or row['kind'] != 'merge_draft'):
                 raise ValueError('Merge draft is no longer editable')
             reference = self._complete_file('action-draft', identity, publication)
-            self.update_draft(identity, None, revision, None, reference)
+            self.update_draft(identity, revision, None, reference)
 
     @synchronized
     def finish_undo(self, prepared, history, execution_token):
@@ -95,18 +104,10 @@ class ActionRepo(Repo):
     def _store_progress(self, identity, prepared):
         if self.backups(identity) != prepared['previous_backups']:
             raise ValueError('Action backups changed before progress was committed')
-        for position, reference, publication in prepared['backups']:
-            retained = None
-            if publication is not None:
-                file_id, durable = publication
-                action_backup_writes.complete(self.conn, file_id, identity, position, durable)
-                retained = durable[0]
+        for position, reference, retained in prepared['backups']:
             self.store_backup(identity, position, reference, retained)
         targets = {(role, position): self.store_target(identity, role, position, **request)
                    for role, position, request in prepared['targets']}
-        if prepared['placement'] is not None:
-            self.store_placement(identity, targets['placement', 0], *prepared['placement'])
-        self.store_resolutions(identity, prepared['resolutions'])
         for step in prepared['steps']:
             prior = self.conn.execute('SELECT * FROM action_steps WHERE action_id=? AND position=?',
                                       (identity, step['position'])).fetchone()
@@ -127,35 +128,42 @@ class ActionRepo(Repo):
         with self._lock, self.conn.atomic(join=True):
             yield
 
-    @synchronized
-    def has_durable_targets(self):
-        return action_work.available(self.conn)
-
     def _owned_records(self, where='', values=(), *, order='id DESC'):
-        rows = self.conn.execute('SELECT * FROM actions '+where+' ORDER BY '+order, values).fetchall()
-        result = []
-        for row in rows:
-            identity = row['id']
-            facts = {name: [dict(item) for item in self.conn.execute(
-                'SELECT * FROM action_'+table+' WHERE action_id=?'+order_by, (identity,))]
-                for name, table, order_by in (
-                    ('targets', 'targets', ' ORDER BY role,position'), ('steps', 'steps', ' ORDER BY position'),
-                    ('backups', 'backups', ' ORDER BY position'), ('resolutions', 'plan_resolutions', ' ORDER BY position'),
-                    ('items', 'placement_items', ' ORDER BY position'), ('handles', 'placement_handles', ''))}
-            draft = self.conn.execute('SELECT * FROM action_drafts WHERE id=?', (identity,)).fetchone()
-            placement = self.conn.execute('SELECT * FROM action_placement_intents WHERE action_id=?', (identity,)).fetchone()
-            result.append(dict(layout='owned', row=dict(row), **facts,
-                draft=dict(draft) if draft else None, placement=dict(placement) if placement else None))
-        return result
+        conn = self.conn
+        borrowed = conn.in_transaction
+        if not borrowed:
+            conn.execute('BEGIN')
+        try:
+            rows = conn.execute('SELECT * FROM actions '+where+' ORDER BY '+order, values).fetchall()
+            if not rows:
+                return []
+            records = {}
+            for row in rows:
+                owner = dict(row)
+                backups = action_backup_inventory.decode(row['id'], owner.pop(action_backup_inventory.COLUMN))
+                records[row['id']] = dict(row=owner, targets=[], steps=[], backups=backups)
+            # Reuse the selected IDs and read the associated rows on the same
+            # snapshot, even if another process updates the action's status.
+            selection = ' WHERE action_id IN (SELECT value FROM json_each(?))' if where else ''
+            ids = (json.dumps(list(records)),) if where else ()
+            for table, child_order in (('targets', 'role,position'), ('steps', 'position')):
+                for child in conn.execute(f'SELECT * FROM action_{table}{selection} ORDER BY action_id,{child_order}',
+                                          ids):
+                    if child['action_id'] in records:
+                        records[child['action_id']][table].append(dict(child))
+            return list(records.values())
+        finally:
+            if not borrowed:
+                conn.rollback()
 
     @synchronized
     def get_action(self, action_id):
-        rows = self._owned_records('WHERE id=?', (action_id,))
+        rows = self._owned_records("WHERE id=? AND kind<>'tv_launch'", (action_id,))
         return rows[0] if rows else None
 
     @synchronized
     def get_actions(self):
-        return self._owned_records()
+        return self._owned_records("WHERE kind<>'tv_launch'")
 
     @synchronized
     def versions(self, kind):
@@ -164,7 +172,7 @@ class ActionRepo(Repo):
 
     @synchronized
     def get_draft(self, signature):
-        rows = self._owned_records('WHERE id IN (SELECT id FROM action_drafts WHERE signature=?)', (signature,))
+        rows = self._owned_records('WHERE draft_signature IS NOT NULL AND draft_signature=?', (signature,))
         return rows[0] if rows else None
 
     @synchronized
@@ -206,7 +214,8 @@ class ActionRepo(Repo):
 
     @synchronized
     def reviewed_draft(self, identity, revision):
-        row = self.conn.execute('SELECT * FROM action_drafts WHERE id=? AND revision=?', (identity, revision)).fetchone()
+        row = self.conn.execute('SELECT * FROM actions WHERE id=? AND revision=? AND draft_signature IS NOT NULL',
+                                (identity, revision)).fetchone()
         if row is None:
             raise ValueError('The merge draft changed. Reload it before applying the merge.')
         if self.conn.execute('SELECT 1 FROM actions WHERE reviewed_draft_id=? AND reviewed_draft_revision=?', (identity, revision)).fetchone():
@@ -214,45 +223,27 @@ class ActionRepo(Repo):
         return dict(row)
 
     @synchronized
-    def insert_action(self, kind, params, plan, status, undo, created_at, *, identity=None, revision=None,
-                      idempotency_key=None, intent_digest=None, undo_of=None, mode=None, reference=None, reviewed=None):
-        if reference is None:
-            return self.conn.execute('INSERT INTO actions(kind,params_json,plan_json,undo_json,status,created_at) '
-                'VALUES (?,?,?,?,?,?)', (kind, params, plan, undo, status, created_at)).lastrowid
+    def insert_action(self, kind, status, created_at, *, identity, revision, idempotency_key, intent_digest,
+                      undo_of, mode, reference, reviewed=None, signature=None):
         self.conn.execute('INSERT INTO actions(id,kind,status,revision,idempotency_key,intent_digest,undo_of_action_id,'
-            'execution_mode,created_at,recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
-            (identity,kind,status,revision,idempotency_key,intent_digest,undo_of,mode,created_at,*reference))
+            'execution_mode,created_at,recovery_filename,recovery_digest,recovery_bytes,draft_signature,draft_updated_at) '
+            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+            (identity,kind,status,revision,idempotency_key,intent_digest,undo_of,mode,created_at,
+             *reference,signature,created_at if signature is not None else None))
         if reviewed is not None:
             self.conn.execute('UPDATE actions SET reviewed_draft_id=?,reviewed_draft_revision=?,reviewed_draft_signature=? WHERE id=?',
-                (reviewed['id'], reviewed['revision'], reviewed['signature'], identity))
+                (reviewed['id'], reviewed['revision'], reviewed['draft_signature'], identity))
         return identity
 
     @synchronized
-    def store_draft(self, identity, signature, revision, now, reference):
-        self.conn.execute('INSERT INTO action_drafts(id,signature,revision,updated_at,recovery_filename,recovery_digest,recovery_bytes) '
-            'VALUES (?,?,?,?,?,?,?)', (identity,signature,revision,now,*reference))
-
-    @synchronized
-    def update_draft(self, identity, params, revision, now, reference):
-        if reference is None:
-            self.conn.execute('UPDATE actions SET params_json=? WHERE id=?', (params, identity))
-            return
-        self.conn.execute('UPDATE action_drafts SET revision=?,updated_at=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=?',
+    def update_draft(self, identity, revision, now, reference):
+        self.conn.execute('UPDATE actions SET revision=?,draft_updated_at=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE id=?',
             (revision,now,*reference,identity))
-        self.conn.execute('UPDATE actions SET revision=? WHERE id=?', (revision, identity))
 
     @synchronized
-    def update_action(self, identity, status, now, *, undo=None, params=None, revision=None, reference=None):
-        if reference is not None:
-            self.conn.execute('UPDATE actions SET status=?,executed_at=?,revision=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? '
-                'WHERE id=?', (status,now,revision,*reference,identity))
-        else:
-            fields, values = ['status=?', 'executed_at=?'], [status, now]
-            for field, value in (('undo_json', undo), ('params_json', params)):
-                if value is not None:
-                    fields.append(field+'=?')
-                    values.append(value)
-            self.conn.execute('UPDATE actions SET '+','.join(fields)+' WHERE id=?', (*values, identity))
+    def update_action(self, identity, status, now, *, revision, reference):
+        self.conn.execute('UPDATE actions SET status=?,executed_at=?,revision=?,recovery_filename=?,recovery_digest=?,recovery_bytes=? '
+            'WHERE id=?', (status,now,revision,*reference,identity))
 
     @synchronized
     def delete_action(self, identity):
@@ -260,13 +251,9 @@ class ActionRepo(Repo):
             self.conn.execute('DELETE FROM actions WHERE id=?', (identity,))
 
     @synchronized
-    def claim_execution(self, identity, status, now, *, previous_status, previous_revision, token, revision):
-        if self.has_durable_targets():
-            changed = self.conn.execute('UPDATE actions SET status=?,executed_at=?,execution_token=?,revision=? WHERE id=? AND revision=?',
-                (status,now,token,revision,identity,previous_revision)).rowcount
-        else:
-            changed = self.conn.execute('UPDATE actions SET status=?,executed_at=? WHERE id=? AND status=?',
-                (status,now,identity,previous_status)).rowcount
+    def claim_execution(self, identity, status, now, *, previous_revision, token, revision):
+        changed = self.conn.execute('UPDATE actions SET status=?,executed_at=?,execution_token=?,revision=? WHERE id=? AND revision=?',
+            (status,now,token,revision,identity,previous_revision)).rowcount
         if changed != 1:
             raise ValueError('Undo was claimed by another request. Reload the Action Log.')
 
@@ -282,16 +269,15 @@ class ActionRepo(Repo):
 
     @synchronized
     def store_target(self, action, role, position, **values):
-        return action_work._target(self.conn, action, role, position, **values)
+        return action_work.target(self.conn, action, role, position, **values)
 
     @synchronized
     def backups(self, action):
-        return [dict(row) for row in self.conn.execute('SELECT * FROM action_backups WHERE action_id=? ORDER BY position', (action,))]
+        return action_backup_inventory.records(self.conn, action)
 
     @synchronized
     def store_backup(self, action, position, reference, retained):
-        self.conn.execute('INSERT INTO action_backups(action_id,position,filename,retained_filename,digest,bytes,availability) '
-            'VALUES (?,?,?,?,?,?,?)', (action,position,reference[0],retained,*reference[1:]))
+        action_backup_inventory.append(self.conn, action, position, reference, retained)
 
     @synchronized
     def step_input(self, action, position):
@@ -318,24 +304,6 @@ class ActionRepo(Repo):
              value.get('original_survived'),observed,*backup,now,*evidence))
 
     @synchronized
-    def store_placement(self, action, target, videos, handles, after, handles_present):
-        if self.conn.execute('SELECT 1 FROM action_placement_intents WHERE action_id=?', (action,)).fetchone():
-            return
-        self.conn.execute('INSERT INTO action_placement_intents VALUES (?,?,?,?)', (action,target,after,int(handles_present)))
-        self.conn.executemany('INSERT INTO action_placement_items VALUES (?,?,?)', [(action,index,video) for index,video in enumerate(videos)])
-        self.conn.executemany('INSERT INTO action_placement_handles VALUES (?,?,?)', [(action,video,handle) for video,handle in handles.items()])
-
-    @synchronized
-    def store_resolutions(self, action, resolutions):
-        if self.conn.execute('SELECT 1 FROM action_plan_resolutions WHERE action_id=?', (action,)).fetchone():
-            return
-        for list_kind, position, item in resolutions:
-            recording = self.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (item['identity_key'],)).fetchone()
-            self.conn.execute('INSERT INTO action_plan_resolutions VALUES (?,?,?,?,?,?,?,?,?)',
-                (action,list_kind,position,recording[0] if recording else None,None if recording else item['identity_key'],
-                 item['identity_key'],item['source_video_id'],item['target_video_id'],item['method']))
-
-    @synchronized
     def targets(self, action, role, *, incomplete=False):
         return [dict(row) for row in self.conn.execute('SELECT t.* FROM action_targets t WHERE t.action_id=? AND t.role=? '+
             ("AND EXISTS (SELECT 1 FROM action_steps s WHERE s.target_id=t.id AND s.phase<>'complete') " if incomplete else '')+
@@ -349,17 +317,11 @@ class ActionRepo(Repo):
     @synchronized
     def uncertain_owner(self, account, remote, finished):
         marks = ','.join('?' for _ in finished)
-        if self.has_durable_targets():
-            row = self.conn.execute('SELECT s.action_id FROM action_targets t JOIN action_steps s ON s.target_id=t.id '
-                'JOIN actions a ON a.id=s.action_id WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? '
-                f'AND a.status NOT IN ({marks}) '+
-                "AND (s.outcome='unknown' OR (s.operation='delete_playlist' AND s.phase='pending' "
-                "AND s.outcome='not_sent' AND a.idempotency_key='legacy-action:'||a.id)) LIMIT 1", (account,remote,*finished)).fetchone()
-        else:
-            row = self.conn.execute("SELECT a.id FROM actions a WHERE a.status='delete_pending' AND EXISTS ("
-                "SELECT 1 FROM json_each(a.undo_json,'$.deletions') d WHERE json_extract(d.value,'$.identity')=? "
-                "AND json_extract(d.value,'$.ytm')=? AND json_extract(d.value,'$.phase') IN ('pending','uncertain')) LIMIT 1",
-                (account,remote)).fetchone()
+        row = self.conn.execute('SELECT s.action_id FROM action_targets t JOIN action_steps s ON s.target_id=t.id '
+            'JOIN actions a ON a.id=s.action_id WHERE t.account_id=? AND t.provider_playlist_id_snapshot=? '
+            f'AND a.status NOT IN ({marks}) '
+            "AND (s.outcome='unknown' OR (s.operation='delete_playlist' AND s.phase='pending' "
+            "AND s.outcome='not_sent' AND a.idempotency_key='legacy-action:'||a.id)) LIMIT 1", (account,remote,*finished)).fetchone()
         return row[0] if row else None
 
     @synchronized
@@ -367,21 +329,22 @@ class ActionRepo(Repo):
         row = self.conn.execute('SELECT * FROM action_targets WHERE id=?', (target,)).fetchone()
         if row is None:
             return None, None, None
-        prior = self.conn.execute('SELECT * FROM action_target_claims WHERE account_id=? AND playlist_scope_id=?',
+        prior = self.conn.execute('SELECT id,claim_until FROM action_targets WHERE account_id=? AND playlist_scope_id=? '
+                                  'AND claim_token IS NOT NULL',
             (row['account_id'],row['playlist_scope_id'])).fetchone()
         uncertain = self.uncertain_owner(row['account_id'],row['provider_playlist_id_snapshot'],finished)
         return dict(row), dict(prior) if prior else None, uncertain
 
     @synchronized
-    def claim_target(self, target, account, scope, token, until):
-        self.conn.execute('INSERT INTO action_target_claims VALUES (?,?,?,?,?) ON CONFLICT(account_id,playlist_scope_id) '
-            'DO UPDATE SET action_target_id=excluded.action_target_id,claim_token=excluded.claim_token,lease_until=excluded.lease_until',
-            (account,scope,target,token,until))
-        self.conn.execute('UPDATE action_steps SET claim_token=? WHERE target_id=?', (token,target))
+    def claim_target(self, target, token, until, *, previous=None):
+        if previous is not None and previous != target:
+            self.conn.execute('UPDATE action_targets SET claim_token=NULL,claim_until=NULL WHERE id=?', (previous,))
+        self.conn.execute('UPDATE action_targets SET claim_token=?,claim_until=? WHERE id=?', (token, until, target))
 
     @synchronized
     def require_claim(self, target, token):
-        action_work.require_claim(self.conn,target,token)
+        if not self.conn.execute('SELECT 1 FROM action_targets WHERE id=? AND claim_token=?', (target, token)).fetchone():
+            raise ValueError('Action target completion belongs to a stale worker')
 
     @synchronized
     def deletion_step(self, action, account, remote):
@@ -397,4 +360,5 @@ class ActionRepo(Repo):
     @synchronized
     def release_deletion(self, claim):
         with self.conn.atomic(join=True):
-            self.conn.execute('DELETE FROM action_target_claims WHERE action_target_id=? AND claim_token=?', claim)
+            self.conn.execute('UPDATE action_targets SET claim_token=NULL,claim_until=NULL WHERE id=? AND claim_token=?',
+                              claim)

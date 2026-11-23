@@ -29,6 +29,7 @@ function clusterCanvas() {
     editingSeeds: false, seedBusy: false, randomSeed: Math.floor(Math.random() * 0x100000000),
     clusterError: '', retryAction: null, _seedChangeToken: null, _canvasRevision: 0,
     _searchToken: null, _deepLinkToken: null, _loadStateToken: null,
+    _uploadLookup: null, _uploadRetry: null,
     _centerHeight: 90,
     _pendingView: null,
     playlistName: '', saveMode: 'all',
@@ -115,6 +116,7 @@ function clusterCanvas() {
     },
     destroy() {
       this._flushState();
+      this._cancelUploadLookup();
       this._searchToken = this._deepLinkToken = this._loadStateToken = this._seedChangeToken = null;
       this._canvasRevision++;
       this._layoutObserver?.disconnect();
@@ -316,6 +318,7 @@ function clusterCanvas() {
       for (const n of this.nodes) { if (n.x != null) { n.fx = n.x; n.fy = n.y; } }
       const restored = this.nodes;
       this._feed();
+      this._refreshRestoredUploads();
       this.$nextTick(() => {
         if (this.nodes !== restored) return;
         setTimeout(() => {
@@ -326,12 +329,54 @@ function clusterCanvas() {
       });
       return true;
     },
+    _cancelUploadLookup() {
+      if (this._uploadRetry != null) clearTimeout(this._uploadRetry);
+      this._uploadRetry = null;
+      this._uploadLookup?.abort();
+      this._uploadLookup = null;
+    },
+    _refreshRestoredUploads() {
+      this._cancelUploadLookup();
+      const keys = new Set();
+      for (const node of this.nodes) {
+        if (!node.key) continue;
+        keys.add(node.key);
+        node.vid = null;
+      }
+      if (!keys.size) return;
+
+      const lookup = this._uploadLookup = new AbortController();
+      const refresh = async delay => {
+        this._uploadRetry = null;
+        try {
+          const response = await fetch('/clusters/uploads', {
+            method: 'POST', headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify([...keys]), signal: lookup.signal,
+          });
+          if (!response.ok) throw Object.assign(new Error('Upload lookup failed'), {status: response.status});
+          const uploads = await response.json();
+          if (lookup.signal.aborted) return;
+          for (const node of this.nodes) {
+            if (keys.has(node.key)) node.vid = Object.hasOwn(uploads, node.key) ? uploads[node.key] : null;
+          }
+          this._uploadLookup = null;
+        } catch (error) {
+          if (lookup.signal.aborted || error.name === 'AbortError') return;
+          console.debug('[Clusters] Could not refresh saved uploads', error);
+          if (!error.status || error.status >= 500 || error.status === 429) {
+            this._uploadRetry = setTimeout(() => refresh(Math.min(delay * 2, 30000)), delay);
+          } else this._uploadLookup = null;
+        }
+      };
+      refresh(1000);
+    },
     // --- multi-canvas storage (bottom-right switcher) ---------------------------------------------
     // localStorage layout: tc:canvases -> [{id,label}], tc:active -> id, tc:canvas:<id> -> state blob.
     _canvasKey(id) { return ClusterCanvases.key(id); },
     _setActive(id) { this.activeId = id; canvasStorage.setActive(id); },
     _refreshSwitcher() { this.canvases = canvasStorage.list(); this.activeId = canvasStorage.active(); },
     _resetMem() {
+      this._cancelUploadLookup();
       this._canvasRevision++;
       this.nodes = []; this.nextId = 1; this.rootId = null; this.trunk = [];
       this.subHues = {}; this._subHueN = 0; this.exhaustedIds = []; this.boosted = [];

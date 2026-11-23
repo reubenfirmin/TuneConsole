@@ -2,6 +2,7 @@
 <dialog class="album-listening" x-data="albumListening()" x-init="mount($el)"
         aria-labelledby="album-listening-title"
         @album-listening-requested.window="request($event.detail)"
+        @playback-requested.window="pending = candidate = null"
         @album-play-started.window="accept($event.detail)"
         @album-artwork-open.window="show()"
         @bridge-status.window="update($event.detail)"

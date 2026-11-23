@@ -1,4 +1,6 @@
 """SQLite facts used to prepare the monthly recap."""
+from yt_playlist.core.album_queries import FETCH_STATE
+from yt_playlist.core.catalog_query import LIBRARY_TRACKS_SQL
 from yt_playlist.repos.base import Repo, synchronized
 
 
@@ -49,13 +51,13 @@ class RecapRepo(Repo):
     @synchronized
     def track_metadata(self):
         return [dict(row) for row in self.conn.execute(
-            'SELECT identity_key,title,artist,genre,mb_year FROM tracks ORDER BY id')]
+            f'SELECT identity_key,title,artist,genre,mb_year FROM ({LIBRARY_TRACKS_SQL}) ORDER BY id')]
 
     @synchronized
     def track_albums(self):
         return [tuple(row) for row in self.conn.execute(
-                f"SELECT DISTINCT t.identity_key,p.provider_id FROM tracks t JOIN {self.album_tracks_table} at ON at.entry_id=t.id "
-                "JOIN album_primary_provider_ids p ON p.album_id=at.album_id AND p.provider='youtube'")]
+                f"SELECT DISTINCT t.identity_key,p.provider_id FROM ({LIBRARY_TRACKS_SQL}) t JOIN {self.album_tracks_table} at ON at.entry_id=t.id "
+                "JOIN album_provider_ids p ON p.album_id=at.album_id AND p.provider='youtube' AND p.is_primary=1")]
 
     @synchronized
     def artist_labels(self):
@@ -70,9 +72,9 @@ class RecapRepo(Repo):
     @synchronized
     def familiar_artists(self, *, quarantine_group):
         return {r[0] for r in self.conn.execute(
-            "SELECT DISTINCT a.artist_id FROM playlist_tracks pt JOIN catalog_entries t ON t.id=pt.track_id "
+            "SELECT DISTINCT a.artist_id FROM playlist_tracks pt JOIN track_sources t ON t.id=pt.track_id "
             "JOIN recording_listening_artists a ON a.recording_id=t.recording_id "
-            "JOIN playlists p ON p.id=pt.playlist_id WHERE p.playlist_scope_id NOT IN "
+            "JOIN active_playlists p ON p.id=pt.playlist_id WHERE p.playlist_scope_id NOT IN "
             "(SELECT playlist_scope_id FROM quarantined_playlists WHERE name=?) UNION SELECT a.artist_id FROM account_albums m "
             "JOIN album_artists a ON a.album_id=m.album_id", (quarantine_group,))}
 
@@ -80,30 +82,28 @@ class RecapRepo(Repo):
     def full_album_tracks(self):
         return [dict(row) for row in self.conn.execute(
                 "SELECT a.id,a.title,a.artist,a.thumbnail,p.provider_id browse_id, "
-                f"COALESCE(r.identity_key,at.legacy_track_key) track_key FROM {self.album_fetch_state_table} f "
-                "JOIN albums a ON a.id=f.album_id JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+                f"COALESCE(r.identity_key,at.legacy_track_key) track_key FROM {FETCH_STATE} f "
+                "JOIN albums a ON a.id=f.album_id JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' AND p.is_primary=1 "
                 f"JOIN {self.album_tracks_table} at ON at.album_id=a.id AND at.is_full=1 "
-                "LEFT JOIN catalog_entries e ON e.id=at.entry_id "
+                "LEFT JOIN track_sources e ON e.id=at.entry_id "
                 "LEFT JOIN recordings r ON r.id=COALESCE(e.recording_id,at.recording_id) WHERE f.complete=1")]
 
     @synchronized
     def created_playlists(self, since, until, *, quarantine_group, creation_sources):
-        from yt_playlist.core import playlist_recipe_state
-        recipe_scope = 'playlist_scope_id' if playlist_recipe_state.available(self.conn) else 'playlist_ytm'
         qs = ','.join('?' for _ in creation_sources)
         return [dict(r) for r in self.conn.execute(
             "WITH candidates AS (SELECT provider_playlist_id,created_at,account_id,"
             "MIN(title) OVER (PARTITION BY provider_playlist_id) title,"
             "MAX(track_count) OVER (PARTITION BY provider_playlist_id) track_count,"
             "ROW_NUMBER() OVER (PARTITION BY provider_playlist_id ORDER BY created_at,id) first_created "
-            "FROM playlists "
+            "FROM active_playlists "
             f"WHERE created_at>=? AND created_at<? AND created_at_source IN ({qs}) "
             "AND playlist_scope_id NOT IN (SELECT playlist_scope_id FROM quarantined_playlists WHERE name=?) "
-            f"AND playlist_scope_id NOT IN (SELECT {recipe_scope} FROM rec_recipes) "
+            "AND playlist_scope_id NOT IN (SELECT id FROM playlist_scopes WHERE recipe_revision IS NOT NULL) "
             ") SELECT provider_playlist_id,title,created_at,track_count,account_id "
             "FROM candidates WHERE first_created=1 ORDER BY created_at,provider_playlist_id",
             (since, until, *creation_sources, quarantine_group))]
 
     @synchronized
     def calendars(self):
-        return dict(self.conn.execute('SELECT account_id,timezone FROM listening_calendars'))
+        return dict(self.conn.execute('SELECT id,listening_timezone FROM accounts WHERE listening_timezone IS NOT NULL'))

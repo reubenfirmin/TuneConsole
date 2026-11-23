@@ -8,6 +8,7 @@ from unittest.mock import Mock
 import pytest
 
 from tests.repository_mock_support import no_database
+from tests.test_updatecheck import FakeReleaseState
 from yt_playlist.controllers.updates import UpdateChecks, UpdateCommands
 from yt_playlist.core.activity import Activity, WorkClosing
 from yt_playlist.core.update_lifecycle import PendingRestart, acquire_restart_locks
@@ -31,23 +32,23 @@ def test_due_uses_persisted_first_deadline_and_then_last_attempt(last, deadline,
 
 
 def test_failed_release_check_keeps_content_and_throttles_retry():
-    saved = settings({'latest_version_seen': '1.2.0'})
+    saved = FakeReleaseState(latest='1.2.0')
     fetch = Mock(side_effect=OSError('offline'))
-    owner = UpdateChecks(saved, fetch, current_version=lambda: '1.0', install_kind=lambda: 'release')
+    owner = UpdateChecks(saved, settings(), fetch, current_version=lambda: '1.0', install_kind=lambda: 'release')
     owner.check(100, interval_s=10)
     owner.check(109, interval_s=10)
     assert fetch.call_count == 1
-    assert saved.values == {'latest_version_seen': '1.2.0', 'latest_version_checked_at': '100'}
+    assert saved.release_check() == (100, None, '1.2.0')
     assert owner.offer() == {'current': '1.0', 'latest': '1.2.0', 'kind': 'release'}
 
 
 def test_cancelled_release_check_never_marks_attempt_complete():
-    saved = settings()
-    owner = UpdateChecks(saved, Mock(side_effect=WorkClosing()),
+    saved = FakeReleaseState()
+    owner = UpdateChecks(saved, settings(), Mock(side_effect=WorkClosing()),
                          current_version=Mock(), install_kind=Mock())
     with pytest.raises(WorkClosing):
         owner.check(100)
-    assert saved.values == {}
+    assert saved.release_check() == (None, None, None)
 
 
 def test_update_offer_suppresses_checkout_and_exact_dismissal_without_labels():

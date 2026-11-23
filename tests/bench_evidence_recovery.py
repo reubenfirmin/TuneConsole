@@ -2,12 +2,11 @@
 
 Set TUNECONSOLE_BENCH_DB to an existing isolated actual-library export. All
 writes, migrations, simulated listening, publication and restore affect a private
-library workspace. Menus/catalog/model inputs come from that export; times, responses,
-input perturbations and the identical-vector comparison arms are controlled.
+library workspace. Menus/catalog/model inputs come from that export; times,
+responses and input perturbations are controlled.
 This verifies storage and learning continuity, not recommendation superiority,
 cold startup, real fitting cost or future user behavior.
 """
-import base64
 from copy import deepcopy
 import hashlib
 import json
@@ -23,14 +22,13 @@ import numpy as np
 import pytest
 
 from tests.bench_choice_retention import inventory
-from tests.comparison_support import legacy_projection
 from tests.library_image.fixtures import benchmark_library, report_file
 from yt_playlist.core.activity import Activity, work_budget
 from yt_playlist.core.evidence_ledger import EvidenceBudgetExceeded, EvidenceLedger, _components, canonical
 from yt_playlist.core.store import Store
-from yt_playlist.rec import (choice_evidence as choices, choice_retention,
-                            comparison_storage, group_serving, home_prepared, model_setup,
-                            product_comparison as product)
+from yt_playlist.library.choice_composition import resolve_context
+from yt_playlist.rec import choice_evidence as choices
+from yt_playlist.rec import choice_retention, group_serving, home_prepared, model_setup
 from yt_playlist.rec.choice_context import checkpoint, learning_context
 from yt_playlist.rec.rec_worker import RecWorker
 
@@ -55,14 +53,12 @@ def _graph(ledger, roots):
     return found
 
 
-def _prepared(store, run_id):
-    surfaces = ('mode_bundles', 'fresh_pool', group_serving.SURFACE, home_prepared.SURFACE)
-    surfaces += tuple(product.pair_surface(run_id, arm, format)
-                      for arm in ('incumbent', 'challenger') for format in product.FORMATS)
+def _prepared(store):
+    surfaces = ('mode_bundles', 'fresh_pool', group_serving.SURFACE, home_prepared.SURFACE, 'album_prepared')
     return {name: _hash(canonical(store.rec_proposals.get_proposals(name))) for name in surfaces}
 
 
-def _accounting(store, protected_roots, run_id):
+def _accounting(store, protected_roots):
     """Separate retained responses/restore inputs from disposable diagnostic bytes.
 
     Graph categories may share components; report that overlap explicitly.
@@ -71,8 +67,7 @@ def _accounting(store, protected_roots, run_id):
     ledger = store.rec_ledger.evidence()
     offers, events = ledger.records('opportunity'), ledger.records('response')
     durable = {row['opportunity_id'] for row in events if row['kind'] not in {'open', 'visible'}}
-    held = durable | {row['id'] for row in offers
-                      if (row.get('comparison') or {}).get('run_id') == run_id}
+    held = set(durable)
     for format in choices.FORMATS:
         held.add((store.rec_proposals.get_proposals('choice_window:' + format) or {}).get('opportunity_id'))
     pinned = set(_graph(ledger, protected_roots))
@@ -152,7 +147,6 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                               'pressure_min_captures': 200,
                               'pressure_stop': 'at least two real capacity-retirement cycles',
                               'pressure_inputs': 'new real-sized matrix and unavailable definition per capture',
-                              'comparison': 'controlled identical real vectors; retained pairs seeded from existing outputs',
                               'audit_wall_budget_seconds': AUDIT_BUDGET_SECONDS,
                               'limits': 'unchanged production quota, retention, acknowledgement batch and menu limits'}}
     store = worker = None
@@ -214,8 +208,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         report.update(start=start, runtime_schema=store.conn.execute(
             'SELECT MAX(version) FROM schema_migrations').fetchone()[0], before=inventory(ledger))
         report['source_hashes'] = {module.__name__: _hash(Path(module.__file__).read_bytes())
-                                  for module in (choices, choice_retention, comparison_storage,
-                                                 sys.modules[legacy_projection.__module__],
+                                  for module in (choices, choice_retention, home_prepared,
                                                  sys.modules[EvidenceLedger.__module__])}
         templates = {format: max((row for row in offers if row['format'] == format
                                   and len(row['options'][0]) > 2),
@@ -228,7 +221,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                             for row in rows if kind == 'response' or row['id'] in durable}
         historical = choices.replay(store, start - 1)
 
-        report['phase'] = 'prepare-full-menus-and-retain-comparison'
+        report['phase'] = 'prepare-full-menus-and-save-restore-point'
         choices.compile_report(store, start)
         for _ in range(home_prepared.MAX_MENUS + 2):
             with work_budget(30):
@@ -244,80 +237,22 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         vector = np.frombuffer(changed[0][1], dtype=np.float32).copy()
         vector[0] += .001
         changed[0] = (changed[0][0], vector.tobytes())
-        restore = dict(kind='product', status='applied', ran_at=start - 1,
+        restore = dict(kind='daily', status='applied', ran_at=start - 1,
                        previous=setup, selected=setup, grid=[], reason='Controlled restore audit')
         restore_id = store.model_selection.start_selection(start - 1, restore)
         store.settings.set_setting('rec_selection_paused', '0')
         store.model_selection.save_selection(restore_id, restore, rows=changed)
-        # The copied export's old monitoring assignment is unrelated to this run.
-        store.rec_proposals.put_proposals(product.MONITOR, {}, start)
-        encoded_vectors = [(key, base64.b64encode(vector).decode('ascii')) for key, vector in changed]
-        vectors = ledger.artifact({'incumbent': encoded_vectors, 'challenger': encoded_vectors})
-        policy = dict(product.POLICY)
-        # Reconstruct a historical assignment, including retained attempt counts.
-        # The current daily selector no longer creates or prepares these trials.
-        with store._lock:
-            attempts = max(product.state(store).get('attempt', 0), store.conn.execute(
-                "SELECT COUNT(*) FROM rec_model_selection_runs "
-                "WHERE json_extract(result_json,'$.kind')='product'").fetchone()[0]) + 1
-        current = dict(phase='observing', attempt=attempts,
-                       alpha=policy['family_alpha'] / (attempts * (attempts + 1)),
-                       previous=setup, challenger=setup, policy=policy,
-                       seed='473-storage-audit', constraints=product.constraints(store),
-                       started_at=start, exposure_until=start + policy['horizon_days'] * DAY,
-                       decision_at=start + (policy['horizon_days'] * 24 + policy['followup_hours']) * 3600,
-                       vectors=vectors, generation=_hash(canonical([vectors, policy])))
-        run = dict(kind='product', status='running', ran_at=start, selected=setup, grid=[], **current)
-        current['run_id'] = store.model_selection.start_selection(start, run)
-        store.settings.set_setting('rec_selection_live_run', str(current['run_id']))
-        store.rec_proposals.put_proposals(product.SURFACE, current, start)
-        # Exercise all measurement/decision fields before simulated days, so an
-        # incomplete controlled historical state fails immediately.
-        preflight = product.measure(store, current, start)
-        assert preflight['alpha'] == current['alpha']
-        assert preflight['source_ids'] == []
-        assert product.decision(current, preflight, start)[0] == 'observing'
-        for format in product.FORMATS:
-            selected = product.assignment(store, format, 'preflight', start)
-            assert selected and selected['run_id'] == current['run_id']
-            assert selected['generation'] == current['generation']
-        report['comparison_preflight'] = {'attempt': attempts, 'alpha': current['alpha'],
-                                          'generation': current['generation'], 'formats': list(product.FORMATS)}
-        save()
-        # Seed retained historical pairs from real saved outputs. This audit
-        # checks their custody under pressure; it does not fit alternative models
-        # or claim that these controlled pairs measure recommendation quality.
-        context = choices.freeze_context(store, choices.model_context(store, start))
-        albums = store.rec_proposals.get_proposals('album_prepared') or {}
-        formats = {
-            'mixes': {**home, 'choice_context': context},
-            'albums': {**albums, 'items': albums.get('items') or templates['albums'], 'context': context},
-            'radio': {'bundles': store.rec_proposals.get_proposals('mode_bundles') or {},
-                      'context': context,
-                      'modes': [{**mode, 'centroid': mode['centroid'].tolist()}
-                                for mode in store.modes.list_modes()],
-                      'encoding_model': store.settings.get_setting('rec_content_model')},
-        }
-        for arm in ('incumbent', 'challenger'):
-            for format, data in formats.items():
-                store.rec_proposals.put_proposals(product.pair_surface(current['run_id'], arm, format),
-                    legacy_projection(current['run_id'], data), start)
-        assert current['attempt'] == attempts and current['alpha'] == preflight['alpha']
-        prepared = _prepared(store, current['run_id'])
-        assert sum(name.startswith(f"model_pair:{current['run_id']}:") for name in prepared) == 6
-        protected_roots = {current['vectors']}
-        for arm in ('incumbent', 'challenger'):
-            for format in product.FORMATS:
-                pair = comparison_storage.decode(store.rec_proposals.get_proposals(
-                    product.pair_surface(current['run_id'], arm, format)))
-                protected_roots.add((pair.get('context') or pair['choice_context'])['artifact'])
-                if format == 'mixes':
-                    assert len(pair['menus']) == home_prepared.MAX_MENUS
+        prepared = _prepared(store)
+        protected_roots = set()
+        for surface in ('album_prepared', 'home_prepared', 'home_tuned', 'home_choice'):
+            payload = store.rec_proposals.get_proposals(surface) or {}
+            for field in ('context', 'choice_context', 'album_choice_context'):
+                if artifact := (payload.get(field) or {}).get('artifact'):
+                    protected_roots.add(artifact)
         protected_graph = _graph(ledger, protected_roots)
         template = choices.model_context(store, start)
         matrix_path, matrix_bytes = _matrix_path(template)
-        report.update(context_component_bytes=matrix_bytes, restore_run=restore_id,
-                      comparison_run=current['run_id'], prepared=prepared)
+        report.update(context_component_bytes=matrix_bytes, restore_run=restore_id, prepared=prepared)
         maintain('before-listening')
         expected_choices = {format: 0 for format in choices.FORMATS}
         initial_counts = choices.compile_report(store, start)['formats']
@@ -341,7 +276,6 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                     format = sorted(choices.FORMATS)[capture_count % 3]
                     options = templates[format]
                     context = _context(template, matrix_path, at, day * 8 + offset // 3600)
-                    context['comparison'] = product.assignment(store, format, str(capture_count), at)
                     oid = f'sustained473:{capture_count}'
                     assert choices.issue(store, format, options, at, context=context, opportunity_id=oid) == oid
                     flush()
@@ -372,12 +306,11 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                 for format in choices.FORMATS:
                     assert summary['formats'][format]['choices'] == (
                         initial_counts[format]['choices'] + expected_choices[format])
-                assert _prepared(store, current['run_id']) == prepared
-                measured = product.measure(store, current, clock[0])
+                assert _prepared(store) == prepared
                 report['days'].append({'day': day + 1, 'captures': capture_count,
                                        'wall_s': time.monotonic() - day_started,
-                                       'inventory': inventory(ledger), 'comparison': measured,
-                                       'accounting': _accounting(store, protected_roots, current['run_id']),
+                                       'inventory': inventory(ledger),
+                                       'accounting': _accounting(store, protected_roots),
                                        'expected_new_choices': dict(expected_choices)})
                 if day == 6:
                     before_restart = choices.replay(store, clock[0])
@@ -387,8 +320,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                     store, worker = open_store()
                     ledger = store.rec_ledger.evidence()
                     assert choices.replay(store, clock[0]) == before_restart
-                    assert _prepared(store, current['run_id']) == prepared
-                    assert product.state(store) == current
+                    assert _prepared(store) == prepared
                     report['restart_verified'] = True
                 save()
                 print(json.dumps({'report': str(destination), 'day': day + 1,
@@ -417,7 +349,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
                     capacity_cycles += result['retired_for_capacity'] > 0
                 if index % 20 == 19:
                     report['pressure'].append({'captures': index + 1,
-                        'accounting': _accounting(store, protected_roots, current['run_id'])})
+                        'accounting': _accounting(store, protected_roots)})
                     save()
                 if index + 1 >= 200 and capacity_cycles >= 2:
                     break
@@ -429,7 +361,7 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
 
         report['phase'] = 'correction-and-restore'
         assert capture_count == 14 * 160
-        assert _prepared(store, current['run_id']) == prepared
+        assert _prepared(store) == prepared
         assert _graph(ledger, protected_graph) == protected_graph
         assert choices.replay(store, start - 1) == historical
         for (kind, identity), raw in original_records.items():
@@ -442,7 +374,6 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
         corrected = choices.compile_report(store, clock[0] + 2)
         assert corrected['formats'][format]['choices'] == before_correction['formats'][format]['choices'] - 1
         assert learning_context(store, ledger.get('opportunity', oid)['context'])
-        assert sum(product.measure(store, current, clock[0])['overall']['days'].values()) >= 13
         store.model_selection.maintain_selection(clock[0])
         assert store.model_selection.restore_model_selection(restore_id, clock[0] + 3)
         assert dict(store.rec_model.get_rec_vectors()) == dict(original_vectors)
@@ -472,23 +403,29 @@ def test_actual_library_sustained_capture_pressure_restart_and_restore(tmp_path,
             store.conn.close()
 
 
-def test_protected_full_storage_explicitly_refuses_capture_without_losing_evidence(store, tmp_path, monkeypatch):
+def test_protected_full_storage_explicitly_refuses_capture_without_losing_evidence(file_backed_store, monkeypatch):
     """A controlled small quota checks the honest limit, separate from the real-data audit."""
-    ledger = EvidenceLedger(tmp_path / 'protected-full', 256 * 1024)
-    monkeypatch.setattr(store.rec_ledger, 'evidence', lambda: ledger)
+    store = file_backed_store
+    budget = 256 * 1024
+    monkeypatch.setattr(type(store.rec_ledger), '_evidence_budget', lambda self: budget)
+    context = {'held': 'x' * 100_000}
     assert choices.issue(store, 'radio', [{'id': 'a'}, {'id': 'b'}], 100,
-                         context={'held': 'x' * 100_000}, opportunity_id='held') == 'held'
+                         context=context, opportunity_id='held') == 'held'
     assert choices.respond(store, 'held', 'choice', 101, option_id='a')
+    ledger = store.rec_ledger.evidence()
     offer = ledger.get('opportunity', 'held')
-    store.rec_proposals.put_proposals(home_prepared.SURFACE,
-        {'choice_context': {'artifact': offer['context']}}, 100)
-    before = {p.relative_to(ledger.directory): p.read_bytes()
-              for p in ledger.directory.glob('*/*/*.json')}
-    ledger.byte_budget = sum(len(raw) for raw in before.values())
-    result = choices.maintain_storage(store, 2000)
+    reference = {'artifact': offer['context']}
+    assert resolve_context(store, reference) == context
+    before = {path: path.read_bytes() for path in ledger.directory.glob('*/*/*.json')}
+    budget = sum(ledger.size(path) for path in before)
+    result = choices.maintain_storage(store, 2000, required_bytes=1,
+                                      protected_artifacts=(offer['context'],))
     assert result['full'] and result['retired_for_capacity'] == 0
+    assert result['available_bytes'] == 0 and result['shortfall_bytes'] == 1
     with pytest.raises(EvidenceBudgetExceeded):
         choices.issue(store, 'radio', [{'id': 'new'}], 2001, context={}, opportunity_id='refused')
+    ledger = store.rec_ledger.evidence()
     assert ledger.get('opportunity', 'refused') is None
-    for relative, raw in before.items():
-        assert (ledger.directory / relative).read_bytes() == raw
+    assert ledger.get('opportunity', 'held') == offer
+    assert resolve_context(store, reference) == context
+    assert all(path.read_bytes() == raw for path, raw in before.items())

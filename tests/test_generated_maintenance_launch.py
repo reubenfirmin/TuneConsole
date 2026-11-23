@@ -33,18 +33,17 @@ def test_maintenance_input_keeps_empty_playlists_and_real_guards(_pristine_curre
 @pytest.fixture(autouse=True)
 def maintenance_routes(monkeypatch, home_pages_only):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home_generation, sync
+    from yt_playlist.web.routes import app_update, audio_vibes, home_generation, sync
 
     # Keep generation, saved receipt reads and sync real across all three apps.
     # The rest of Home's board and tuning endpoints are independent consumers.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home_generation, sync)])
+        for module in (app_update, audio_vibes, home_generation, sync)])
 
 
-@pytest.mark.parametrize('phase', ['compacting', 'checkpoint'])
 @pytest.mark.parametrize('htmx', [False, True])
-def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(store, phase, htmx):
-    account = store.accounts.upsert_account('Main', 'bridge', None, True)
+def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(store, htmx):
+    account = store.accounts.upsert_account('Main', None, True)
     provider = FakeClient(catalog={'song': _track('song', 'Song', 'Artist', 180)})
     app = create_app(store, lambda: {account: provider}, background_work=False)
     ctx = app.state.ctx
@@ -54,10 +53,6 @@ def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(st
         frames.append(frame)
         navigated.set()
 
-    # Exercise the actual middleware state used during maintenance, rather
-    # than only the generator's separate activity_paused branch.
-    ctx.storage_maintenance.active = True
-    ctx.storage_maintenance.phase = phase
     store.activity_paused = True
     before = store.conn.total_changes
     store.conn.execute('PRAGMA query_only=ON')
@@ -112,7 +107,6 @@ def test_mix_launch_during_storage_maintenance_preserves_readonly_local_state(st
     finally:
         store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False
-        ctx.storage_maintenance.active = False
     provider._playlists.append({'playlistId': playlist, 'title': 'Maintenance mix', 'count': 1})
     sync_identity(store, account, provider, now=20)
     local = store.playlists.get_playlist_for_account(account, playlist)

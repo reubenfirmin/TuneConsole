@@ -13,12 +13,12 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def test_each_summary_uses_only_its_dependencies_and_external_changes():
     repository = create_autospec(SummaryInputsRepo, instance=True, spec_set=True)
     settings = create_autospec(Settings, instance=True, spec_set=True)
-    revisions = {('player_events', 'key:tick'): 2, ('cleanup_ignored', ''): 3}
+    revisions = {('player_events', 'key:tick'): 2, ('playlist_overlap_decisions', ''): 3}
     repository.capture.return_value = revisions, 7, {'listening_analytics'}
     settings.get_setting.return_value = 'America/Costa_Rica'
     facts, zone = SummaryInputs(repository, settings).capture(iter(['analytics', 'cleanup']))
     assert facts == {'analytics': ((('player_events', 2),), 7, True),
-                     'cleanup': ((('cleanup_ignored', 3),), 7, False)}
+                     'cleanup': ((('playlist_overlap_decisions', 3),), 7, False)}
     assert zone == 'America/Costa_Rica'
     repository.capture.assert_called_once_with(
         DEPENDENCIES['analytics'] | DEPENDENCIES['cleanup'], ('listening_analytics', 'cleanup'))

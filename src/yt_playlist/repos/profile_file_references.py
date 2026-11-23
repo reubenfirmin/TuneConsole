@@ -1,5 +1,4 @@
 """Profile heads and bounded inline conversion inputs; SQL only."""
-from .profile_file_writes import native
 from .connection import ConnectionRepo
 
 KINDS = {'recording': ('rec_musical_profiles', 'identity_key', 'recording_profile_files', 'recording_id'),
@@ -17,7 +16,6 @@ def identity(conn, kind, key):
 
 def install_references(conn, kind, references):
     table, key_column, marker, subject = KINDS[kind]
-    has_ids = native(conn)
     for reference in references:
         key, owner, publication, size, version, digest = reference[:6]
         file_id = reference[6] if len(reference) == 8 else None
@@ -26,14 +24,9 @@ def install_references(conn, kind, references):
             raise ValueError('Stale musical-profile publication')
         if identity(conn, kind, key) != owner:
             raise ValueError('Musical-profile owner changed')
-        columns, values = f'{subject},publication,byte_size', (owner, publication, size)
-        updates = 'publication=excluded.publication,byte_size=excluded.byte_size'
-        if has_ids:
-            columns += ',file_id'
-            values += (file_id,)
-            updates += ',file_id=excluded.file_id'
-        conn.execute(f'INSERT INTO {marker}({columns}) VALUES ({",".join("?" for _ in values)}) '
-                     f'ON CONFLICT({subject}) DO UPDATE SET {updates}', values)
+        conn.execute(f'INSERT INTO {marker}({subject},publication,byte_size,file_id) VALUES (?,?,?,?) '
+                     f'ON CONFLICT({subject}) DO UPDATE SET publication=excluded.publication,'
+                     'byte_size=excluded.byte_size,file_id=excluded.file_id', (owner, publication, size, file_id))
         conn.execute(f"UPDATE {table} SET payload='' WHERE {key_column}=?", (key,))
 
 

@@ -2,10 +2,6 @@
 from bisect import bisect_right
 from collections import defaultdict
 
-LIVE = "COALESCE(json_extract(provenance,'$.policy_kind'),'live')='live'"
-VIDEO = "json_extract(provenance,'$.candidate.video_id')"
-
-
 class _Timeline:
     def __init__(self, rows, key, value, horizon):
         grouped = defaultdict(list)

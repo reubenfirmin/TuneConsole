@@ -1,36 +1,124 @@
-"""#88 The layered taste model: several readings of "what does this listener want", each at its own
-timescale, from fastest (this file) to slowest (durable taste weights, elsewhere). Layers are meant
-to be blended by later work; this module owns the fastest one.
-
-NOW layer (`now_mode_posterior`): a confidence-gated categorical posterior over the user's discovered
-taste modes (rec/taste_modes.py), read from the last `now_window_h` hours of REAL plays only.
-
-Why a discrete posterior over modes and not a single blended direction (the way `transient.
-centroid_tilt` averages recent vectors into one tilt)? Averaging raw content vectors across a
-short, recent window is exactly the wrong shape for "right now": two or three plays are enough for
-someone to hop between unrelated corners of their taste (a house track, then a chill acoustic one),
-and blending their vectors produces a "free vector" that points at neither region: a meaningless
-midpoint direction nothing in the catalogue actually sounds like. Chasing that phantom average from
-moment to moment is whiplash for no benefit. Classifying each recent play to its NEAREST existing
-taste mode and reporting the resulting mix as shares keeps every unit of evidence anchored to a real,
-previously-discovered region of the user's taste, so "half house, half chill" reads as exactly that
-(a split posterior across two real modes) instead of a vector for a genre that doesn't exist.
-
-The confidence gate matters as much as the shape: with only one or two real plays to go on, ANY
-posterior is a guess dressed up as a read. `now_min_events` distinct played keys (that have a known
-sound) must clear before this returns anything; below that, quiet hours and thin evidence return
-None, not a weak posterior a caller might mistake for a strong one.
-
-SESSION layer (`session_tilt`): a bounded tilt over plays from the last 24 hours of REAL plays,
-each wall-clock decayed by `session_halflife_h` (hours scale). Same conceptual sibling as centroid_tilt
-but tuned for within-session carry-over. Mirrors centroid_tilt's style: accumulates weighted vectors,
-returns a mean of decayed unit vectors or None when quiet/below gate.
-"""
+"""Playback continuity, local listening days and confidence-gated fast taste readings."""
 from dataclasses import dataclass
+from datetime import datetime, time, timedelta
+import json
 
 import numpy as np
 
-from yt_playlist.rec.transient import decay_weight
+from yt_playlist.core.listening_calendar import zone
+from yt_playlist.core.rec_model_policy import SESSION_IDLE_S
+from yt_playlist.rec.transient_math import decay_weight
+
+POLICY_VERSION = 2
+
+
+@dataclass(frozen=True)
+class PlaybackSession:
+    account: int | None
+    started_at: float
+    last_at: float
+
+    @property
+    def expires_at(self):
+        return self.last_at + SESSION_IDLE_S
+
+    @property
+    def episode(self):
+        return f'{self.account}:{self.started_at}'
+
+
+def playback_order(row):
+    return row['at'], row.get('kind') == 'bye'
+
+
+def first_session(activity, deadline):
+    """Find the first session started before pre-play steering would expire."""
+    sessions = {}
+    for row in sorted(activity, key=playback_order):
+        if row['at'] >= deadline:
+            break
+        if (session := advance_session(sessions, row)) is not None:
+            return session
+    return None
+
+
+def playback_sessions(activity, now):
+    """Reconstruct the audible sessions still active at the supplied time."""
+    sessions = {}
+    for row in sorted(activity, key=playback_order):
+        if row['at'] > now:
+            break
+        advance_session(sessions, row)
+    return [session for session in sessions.values() if now < session.expires_at]
+
+
+def active_session(activity, now):
+    return max(playback_sessions(activity, now), key=lambda session: session.last_at, default=None)
+
+
+def advance_session(sessions, row):
+    account, at, kind = row.get('account_id'), row['at'], row.get('kind')
+    if kind == 'bye':
+        sessions.pop(account, None)
+        return None
+    if kind is not None:
+        try:
+            facts = json.loads(row.get('payload') or '{}')
+        except (TypeError, ValueError):
+            return None
+        if (not isinstance(facts, dict) or facts.get('paused') or facts.get('muted')
+                or facts.get('tabMuted') or facts.get('volume') == 0
+                or (kind == 'state' and facts.get('state') != 'playing')):
+            return None
+    previous = sessions.get(account)
+    started = previous.started_at if previous and at < previous.expires_at else at
+    sessions[account] = PlaybackSession(account, started, at)
+    return sessions[account]
+
+
+def calendar_window(now, timezone):
+    local = datetime.fromtimestamp(now, zone(timezone))
+    start = datetime.combine(local.date(), time.min, local.tzinfo).timestamp()
+    end = datetime.combine(local.date() + timedelta(days=1), time.min, local.tzinfo).timestamp()
+    return start, end
+
+
+@dataclass(frozen=True)
+class ListeningWindow:
+    now: float
+    active: PlaybackSession | None
+    days: dict
+
+    def day(self, account=None):
+        return self.days.get(account, self.days[None])
+
+    @property
+    def expires_at(self):
+        return min(*(end for _, end in self.days.values()),
+                   self.active.expires_at if self.active else float('inf'))
+
+    def read(self, plays):
+        current, today = {}, {}
+        for row in plays:
+            key, at, account = row['identity_key'], row['played_at'], row.get('account_id')
+            if at > self.now:
+                continue
+            start, _end = self.day(account)
+            if at >= start:
+                today[key] = max(at, today.get(key, at))
+            if (self.active and account == self.active.account and at >= self.active.started_at
+                    and row.get('live', True)):
+                current[key] = max(at, current.get(key, at))
+        return LayerPlays(current, today)
+
+
+@dataclass(frozen=True)
+class LayerPlays:
+    current: dict
+    today: dict
+
+    def earlier_today(self):
+        return {key: at for key, at in self.today.items() if key not in self.current}
 
 
 @dataclass
@@ -39,17 +127,17 @@ class RecentEvidence:
     modes: list
     vectors: object
     index: dict
+    layers: LayerPlays | None = None
 
     def since(self, timestamp):
         return {key: ts for key, ts in self.latest.items() if ts >= timestamp}
 
 
-def _classified_mode_plays(evidence, since, min_events):
+def _classified_mode_plays(evidence, latest, min_events):
     """Nearest active mode and latest timestamp per usable key, or None below the gate."""
     modes, CV, cidx = evidence.modes, evidence.vectors, evidence.index
     if not modes or CV is None:
         return None
-    latest = evidence.since(since)
     played_keys = [key for key in latest if key in cidx]
     if len(played_keys) < min_events:
         return None
@@ -73,7 +161,8 @@ def now_mode_mix(evidence, now, *, window_h, min_events):
     readings the other two callers take from it.
     """
     modes = evidence.modes
-    classified = _classified_mode_plays(evidence, now - window_h * 3600.0, min_events)
+    latest = evidence.layers.current if evidence.layers else evidence.since(now - window_h * 3600.0)
+    classified = _classified_mode_plays(evidence, latest, min_events)
     if classified is None:
         return None, 0, modes
 
@@ -114,19 +203,18 @@ def evidence_coverage(evidence, now, *, window_h) -> dict:
     """
     cidx = evidence.index
 
-    def one(window_h):
-        latest = evidence.since(now - window_h * 3600.0)
+    def one(latest):
         mapped = sum(k in cidx for k in latest)
         total = len(latest)
         return {"total": total, "mapped": mapped,
-                "coverage": mapped / total if total else None,
-                "window_h": window_h}
+                "coverage": mapped / total if total else None}
 
-    return {"now": one(window_h),
-            "session": one(24)}
+    captured = evidence.layers or LayerPlays(evidence.since(now - window_h * 3600),
+                                              evidence.since(now - 24 * 3600))
+    return {"now": one(captured.current), "session": one(captured.today)}
 
 
-def session_tilt(latest, now, V, idx, *, min_events, halflife_h) -> np.ndarray | None:
+def session_tilt(latest, now, V, idx, *, min_events, halflife_h, since=None) -> np.ndarray | None:
     """Bounded embedding tilt from plays in the current listening session: plays from the last
     24 hours (the kernel does the shaping), each wall-clock decayed by `session_halflife_h` (hours).
     Same transient-model sibling as centroid_tilt: accumulates wall-clock-decayed unit vectors,
@@ -139,7 +227,8 @@ def session_tilt(latest, now, V, idx, *, min_events, halflife_h) -> np.ndarray |
     accumulation. Decay is per-event and internal; callers apply no external freshness factor,
     mirroring centroid_tilt.
     """
-    played_keys = [k for k, at in latest.items() if k in idx and at >= now - 24 * 3600]
+    lower = now - 24 * 3600 if since is None else since
+    played_keys = [k for k, at in latest.items() if k in idx and lower <= at <= now]
     if len(played_keys) < min_events:
         return None
 
@@ -154,7 +243,8 @@ def session_tilt(latest, now, V, idx, *, min_events, halflife_h) -> np.ndarray |
         if nrm == 0:
             continue
         # session_halflife_h is in hours; decay_weight expects half_life_d in days.
-        tilt = tilt + decay_weight(now - ts, halflife_h / 24.0) * (v / nrm)
+        weight = decay_weight(now - ts, halflife_h / 24.0) if halflife_h is not None else 1.
+        tilt += weight * (v / nrm)
         contributing += 1
 
     if contributing < min_events or not np.any(tilt):
@@ -182,7 +272,8 @@ def session_mode_mix(evidence, now, *, min_events, halflife_h):
     gate this returns None, never a weak guess, mirroring every other layer in this module.
     """
     modes = evidence.modes
-    classified = _classified_mode_plays(evidence, now - 24 * 3600.0, min_events)
+    latest = evidence.layers.today if evidence.layers else evidence.since(now - 24 * 3600.0)
+    classified = _classified_mode_plays(evidence, latest, min_events)
     if classified is None:
         return None, 0, modes
 

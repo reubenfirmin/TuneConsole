@@ -1,8 +1,7 @@
 """Bounded provider catalog commands; selection uses detached provider responses."""
 from yt_playlist.core.activity import check_stopping, WorkClosing
 from yt_playlist.core.album_aliases import _text, fingerprint
-from yt_playlist.util.matching import identity_key, track_artist
-from yt_playlist.util.thumbnails import best_thumb
+from yt_playlist.util.matching import identity_key
 
 
 def alias_pairs(artist, discography, candidates):
@@ -18,21 +17,6 @@ def alias_pairs(artist, discography, candidates):
                 yield bid, other
 
 
-def track_values(data, album=None):
-    album = album or {}
-    artist = album.get('artist') or ', '.join(
-        row['name'] for row in (data.get('artists') or []) if row.get('name'))
-    for row in data.get('tracks') or []:
-        video, title = row.get('videoId'), (row.get('title') or '').strip()
-        if video and title:
-            credit = track_artist(row) or artist
-            yield dict(identity=identity_key(title, credit), video=video, title=title,
-                artist=credit, album=album.get('title'),
-                thumbnail=album.get('thumbnail') if album else best_thumb(row.get('thumbnail') or row.get('thumbnails')),
-                genre=album.get('genre'), year=album.get('year'),
-                credits=row.get('artists') or data.get('artists'))
-
-
 class DiscoveryCatalog:
     def __init__(self, *, catalog, radio_client, collection, discovery, query, tracks, charts,
                  settings, rebuild, now, logger):
@@ -42,7 +26,7 @@ class DiscoveryCatalog:
         self.now, self.logger = now, logger
 
     def aliases(self, client, artist, albums):
-        if not hasattr(client, 'get_album'):
+        if not client.can_read_albums:
             return
         candidates = self.collection.album_alias_candidates(row.get('title') for row in albums)
         for bid, other in alias_pairs(artist, albums, candidates):
@@ -71,21 +55,22 @@ class DiscoveryCatalog:
             client = self.catalog()
             if client is None:
                 return None
-            data = client.get_artist(browse_id)
-            albums = [dict(title=row.get('title'), year=row.get('year'), browse_id=row.get('browseId'),
-                thumbnail=best_thumb(row.get('thumbnails'))) for row in (data.get('albums') or {}).get('results') or []]
-            self.aliases(client, name, albums)
-            return dict(bio=data.get('description'), thumbnail=best_thumb(data.get('thumbnails')),
-                subscribers=data.get('subscribers'), name=data.get('name') or name, browse_id=browse_id, albums=albums)
+            profile = client.artist_profile(browse_id)
+            if profile['albums']:
+                self.aliases(client, name, profile['albums'])
+            return {**profile, 'name': profile['name'] or name}
         except WorkClosing:
             raise
         except Exception:
             self.logger.info('artist info fetch failed for %r (non-fatal)', name)
             return None
 
-    def _put(self, row, source, now):
-        return self.discovery.upsert_discovered_track(row['identity'], row['video'], row['title'], row['artist'],
-            row['album'], row['thumbnail'], row['genre'], row['year'], source, now, credits=row['credits'])
+    def _put(self, row, source, now, *, album=None):
+        thumbnail = album.get('thumbnail') if album else row['thumbnail']
+        album = album or {}
+        return self.discovery.upsert_discovered_track(identity_key(row['title'], row['artist']),
+            row['video'], row['title'], row['artist'], album.get('title'), thumbnail, album.get('genre'),
+            album.get('year'), source, now, credits=row['credits'])
 
     def populate(self, now, budget=4):
         client = self.catalog()
@@ -99,16 +84,16 @@ class DiscoveryCatalog:
         for album in todo:
             check_stopping()
             try:
-                data = client.get_album(album['browse_id']) or {}
+                has_tracks, rows = client.album_tracks(album['browse_id'], album_artist=album.get('artist'))
             except WorkClosing:
                 raise
             except Exception:
                 continue
-            for row in track_values(data, album):
+            for row in rows:
                 if self.tracks.identity_key_for_video(row['video']) not in owned:
-                    self._put(row, album['browse_id'], now)
+                    self._put(row, album['browse_id'], now, album=album)
                     count += 1
-            if data.get('tracks'):
+            if has_tracks:
                 self.discovery.remember_album_fetch(album['browse_id'])
         if count:
             self.rebuild()
@@ -127,13 +112,13 @@ class DiscoveryCatalog:
                 continue
             check_stopping()
             try:
-                data = client.get_watch_playlist(video) or {}
+                rows = client.radio_tracks(video)
             except WorkClosing:
                 raise
             except Exception:
                 continue
             taken = 0
-            for row in track_values(data):
+            for row in rows:
                 key = self.tracks.identity_key_for_video(row['video'])
                 if key in owned:
                     continue

@@ -5,25 +5,26 @@ from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core import mix_choices
 from yt_playlist.core.choice_capture_contract import FORMATS
-from yt_playlist.rec import choice_summary, home_format_rules
+from yt_playlist.rec import choice_attribution, choice_summary, home_format_rules, permanent_taste
 from yt_playlist.rec.choice_learning import interest_key
 
+INTEREST_POLICY = 'listener-layer-contexts-v6'
 
-def compile_facts(all_offers, all_responses, now, *, halflife, attribution, album_ids):
+
+def compile_facts(all_offers, all_responses, now, *, halflife, attribution, album_ids,
+                  timezone=None, calendars=None, playback_episodes=None, listener_support=None):
     offers = {row['id']: row for row in all_offers if row['observed_at'] <= now and row['at'] <= now}
     responses = sorted((r for r in all_responses if r['observed_at'] <= now and r['at'] <= now),
                        key=lambda r: (r['at'], r['kind'] != 'visible', r['id']))
-    withdrawn = {r['details'].get('action_id') for r in responses if r['kind'] == 'withdraw'}
+    eligible = choice_attribution.observed_responses(responses, now)
     rows = {format: dict(offered=0, visible=0, opens=0, choices=0, predicted_choices=0,
         top_choice_hits=0, reciprocal_rank=0., starts=0, saves=0, returns=0, promotions=0,
         experience=0, independent_episodes=0) for format in FORMATS}
-    seen, episodes, stages, interests = {}, {f: set() for f in FORMATS}, set(), []
+    seen, episodes, stages = {}, {f: set() for f in FORMATS}, set()
     for offer in offers.values():
         rows[offer['format']]['offered'] += 1
-    for event in responses:
+    for event in eligible:
         check_cancellable_work()
-        if event['id'] in withdrawn or event['kind'] == 'withdraw':
-            continue
         offer = offers.get(event['opportunity_id'])
         if not offer or event['at'] < offer['at']:
             continue
@@ -32,38 +33,15 @@ def compile_facts(all_offers, all_responses, now, *, halflife, attribution, albu
             if oid not in seen:
                 row['visible'] += 1
             seen.setdefault(oid, set()).update(event['visible'])
-        elif event['kind'] in {'choice', 'feedback'}:
-            chosen = event['kind'] == 'choice'
-            if not chosen and event.get('details', {}).get('kind') != 'more':
-                continue
-            if chosen:
-                row['choices'] += 1
-                episodes[offer['format']].add(offer['episode_id'])
-            option = next((o for o in offer['options'] if str(o['id']) == event['option_id']), None)
-            if option:
-                tracks = option.get('tracks') or []
-                details = event.get('details') or {}
-                edited = details.get('tracks') if chosen else None
-                if edited is not None:
-                    tracks = edited
-                keys = (details['keys'] if chosen and 'keys' in details else
-                    [t['key'] for t in tracks if t.get('key')] if edited is not None else
-                    option.get('keys') or [t['key'] for t in tracks if t.get('key')])
-                interest = dict(format=offer['format'], option_id=event['option_id'],
-                    mode_id=option.get('mode_id'), intent=option.get('intent'), keys=sorted(set(keys))[:100],
-                    feature=option.get('feature'), basis=option.get('basis'), at=event['at'],
-                    episode=offer['episode_id'], opportunity_id=oid)
-                if offer['format'] == 'mixes':
-                    interest.update(keys=[], feature=None, mode_id=None, basis=mix_choices.PRECISION,
-                        descriptor_id=option.get('descriptor_id') if option.get('genres_complete') else None)
-                interests.append(interest)
-            if chosen:
-                prediction = [identity for identity in offer.get('prediction') or [] if identity in seen.get(oid, set())]
-                if event['option_id'] in prediction:
-                    row['predicted_choices'] += 1
-                    rank = prediction.index(event['option_id']) + 1
-                    row['top_choice_hits'] += int(rank == 1)
-                    row['reciprocal_rank'] += 1 / rank
+        elif event['kind'] == 'choice':
+            row['choices'] += 1
+            episodes[offer['format']].add(offer['episode_id'])
+            prediction = [identity for identity in offer.get('prediction') or [] if identity in seen.get(oid, set())]
+            if event['option_id'] in prediction:
+                row['predicted_choices'] += 1
+                rank = prediction.index(event['option_id']) + 1
+                row['top_choice_hits'] += int(rank == 1)
+                row['reciprocal_rank'] += 1 / rank
         elif event['kind'] in {'open', 'start', 'save', 'promote', 'return', 'experience'}:
             key = oid, event['kind'], event['option_id']
             if key not in stages:
@@ -71,8 +49,12 @@ def compile_facts(all_offers, all_responses, now, *, halflife, attribution, albu
                          'promote': 'promotions', 'return': 'returns', 'experience': 'experience'}
                 row[field[event['kind']]] += 1
                 stages.add(key)
-    eligible = [r for r in responses if r['id'] not in withdrawn and r['kind'] != 'withdraw']
-    outcomes = choice_summary.summarize(offers, eligible, FORMATS)
+    actions = choice_attribution.actions(offers, eligible, attribution)
+    provenance = [choice_attribution.provenance(action) for action in actions]
+    calendars = calendars or {}
+    choice_days = {action['choice']['id']: choice_attribution.calendar_day(
+        action['choice']['at'], facts, timezone, calendars) for action, facts in zip(actions, provenance)}
+    outcomes = choice_summary.summarize(actions, FORMATS, choice_days)
     for format, row in rows.items():
         row.update(outcomes[format])
         row['returns'] += row['return_days']
@@ -83,25 +65,91 @@ def compile_facts(all_offers, all_responses, now, *, halflife, attribution, albu
     report = dict(schema=1, at=now, watermark=watermark, formats=rows, status='observational',
         promotion_supported=False, source_opportunities=len(offers), source_responses=len(responses),
         home_format=home_format_rules.compile_usage(offers, eligible, now, halflife))
-    groups, episode_groups = {}, {}
-    for interest in interests:
-        if interest['format'] == 'albums':
-            interest = {**interest, 'option_id': album_ids[interest['option_id']]}
-        identity = interest_key(interest)
-        group = groups.setdefault(identity, dict(latest=interest, days=set(), episodes=set()))
-        group['latest'] = interest
-        group['days'].add(int(interest['at'] // 86400))
-        group['episodes'].add(interest['episode'])
-        episode_groups.setdefault(interest['episode'], set()).add(identity)
-    compiled = [{**g['latest'], 'days': len(g['days']), 'episodes': len(g['episodes']),
-        'episode_support': min(1., sum(1 / len(episode_groups[e]) for e in g['episodes']))} for g in groups.values()]
+    moments = [(row.get('choice_account_id'), row.get('choice_start_at')) for row in provenance]
+    playback = playback_episodes({(account, at) for account, at in moments
+                                 if account is not None and at is not None}) if playback_episodes else {}
+    dated = [(action, facts, playback.get(moment, action['offer']['episode_id']))
+             for action, facts, moment in zip(actions, provenance, moments)]
+    compiled = _interests(dated, album_ids, timezone, calendars)
+    if listener_support is not None:
+        listener_support.update(_facet_support(dated, timezone, calendars))
     contexts = sorted(compiled, key=lambda row: -row['at'])[:128]
-    projection = dict(schema=1, at=now, watermark=watermark, contexts_total=len(compiled), contexts=contexts)
-    album_days = choice_summary.album_track_days(offers, eligible, attribution, album_ids=album_ids)
+    projection = dict(schema=3, policy=INTEREST_POLICY, at=now, watermark=watermark,
+                      contexts_total=len(compiled), contexts=contexts)
+    album_days = choice_summary.attributed_album_track_days(actions, choice_days, album_ids=album_ids)
     projection['album_track_days'] = {r['option_id']: album_days[r['option_id']]
         for r in contexts if r['format'] == 'albums' and r['option_id'] in album_days}
-    projection['interest_version'] = hashlib.sha256(canonical([contexts, projection['album_track_days']])).hexdigest()
+    projection['interest_version'] = hashlib.sha256(canonical([
+        INTEREST_POLICY, contexts, projection['album_track_days']])).hexdigest()
     return report, projection, offers, eligible
+
+
+def _interests(decisions, album_ids, timezone, calendars):
+    groups, episode_groups = {}, {}
+    for decision, provenance, episode in decisions:
+        offer, option, event = (decision[key] for key in ('offer', 'option', 'choice'))
+        format = offer['format']
+        details = event.get('details') or {}
+        tracks = details.get('tracks', option.get('tracks')) or []
+        keys = (details['keys'] if 'keys' in details else
+                option.get('keys') if 'tracks' not in details and option.get('keys') else
+                [track['key'] for track in tracks if track.get('key')])
+        option_id = album_ids[event['option_id']] if format == 'albums' else event['option_id']
+        interest = dict(format=format, option_id=option_id, mode_id=option.get('mode_id'),
+            intent=option.get('intent'), keys=sorted(set(keys))[:100], feature=option.get('feature'),
+            basis=option.get('basis'), at=event['at'], episode=offer['episode_id'], opportunity_id=offer['id'],
+            **provenance)
+        if format == 'mixes':
+            interest.update(keys=[], feature=None, mode_id=None, basis=mix_choices.PRECISION,
+                descriptor_id=option.get('descriptor_id') if option.get('genres_complete') else None)
+        identity = interest_key(interest)
+        group = groups.setdefault(identity, {'episodes': {}, 'units': {}})
+        amount = choice_attribution.strength(decision)
+        prior, strength = group['episodes'].get(episode, (interest, 0.))
+        if episode != interest['episode']:
+            prior = interest
+        if 'choice_start_at' not in prior and 'choice_start_at' in interest:
+            prior = {**prior, 'choice_start_at': interest['choice_start_at']}
+            if 'choice_account_id' not in prior and 'choice_account_id' in interest:
+                prior['choice_account_id'] = interest['choice_account_id']
+        group['episodes'][episode] = prior, max(strength, amount)
+        day = choice_attribution.calendar_day(prior['at'], prior, timezone, calendars)
+        permanent_taste.add_support(group['units'], day, episode, amount)
+        episode_groups.setdefault(episode, set()).add(identity)
+    rows = []
+    for group in groups.values():
+        episodes = group['episodes']
+        latest_episode = max(episodes, key=lambda key: episodes[key][0]['at'])
+        latest, strength = episodes[latest_episode]
+        rows.append({**latest, 'days': len(group['units']), 'episodes': len(episodes),
+            'sustained': permanent_taste.reading(group['units'])['weight'] > 1.,
+            'episode_support': strength / len(episode_groups[latest_episode])})
+    return rows
+
+
+def _facet_support(decisions, timezone, calendars):
+    mixes, tracks = {}, {}
+    for decision, provenance, episode in decisions:
+        offer, option, event = (decision[key] for key in ('offer', 'option', 'choice'))
+        day = choice_attribution.calendar_day(event['at'], provenance, timezone, calendars)
+        strength = choice_attribution.strength(decision)
+        if (descriptor := option.get('descriptor_id')) and offer['format'] == 'mixes' and option.get('genres_complete'):
+            permanent_taste.add_support(mixes.setdefault(str(descriptor), {}), day, episode, strength)
+            continue
+        # A track needs a deliberate target and its own verified onset.
+        details = event.get('details') or {}
+        lineup = details.get('tracks', option.get('tracks')) or []
+        if not lineup:
+            continue
+        video = (details.get('video_id') if offer['format'] == 'radio' else None) or lineup[0].get('video_id')
+        keys = {track['key'] for track in lineup if track.get('video_id') == video and track.get('key')}
+        if video and len(keys) == 1 and any(
+                outcome['kind'] == 'start' and outcome['details'].get('video_id') == video
+                and not outcome['details'].get('continuation')
+                for outcome in decision['outcomes']):
+            permanent_taste.add_support(tracks.setdefault(keys.pop(), {}), day, episode, strength)
+    version = hashlib.sha256(canonical([INTEREST_POLICY, mixes, tracks])).hexdigest()
+    return {'version': version, 'mixes': mixes, 'tracks': tracks}
 
 
 def replay_facts(offers, events, captured, now, predictor=None):

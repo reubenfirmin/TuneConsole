@@ -3,21 +3,19 @@
 No inference, provider request or candidate-pool normalization happens here.
 The exact profile version and digest travel with each served recording.
 """
-import math
-
 from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec import musical_profiles, vibe_intensity
-from yt_playlist.core.audio_vibe_contract import serving_compatible
+from yt_playlist.rec.vibe_score_policy import compatible_profile_vibes
 
 VERSION = musical_profiles.VERSION
 
 
-def compact(profile):
-    if not profile or profile.get('schema') != 1:
+def compact(profile, *, provenance=True):
+    if not profile or profile.get('schema') != 1 or profile.get('version') != VERSION:
         return None
-    vibes = profile.get('vibes') or {}
-    if not serving_compatible(vibes.get('inputs_version')):
-        vibes = {}
+    vibes = compatible_profile_vibes(profile.get('vibes') or {})
+    if not provenance:
+        return {'dimensions': profile['dimensions'], 'vibes': vibes}
     return {'version': profile['version'], 'digest': musical_profiles.digest(profile),
             'dimensions': {name: {key: value for key, value in dimension.items()
                                   if key in ('value', 'support', 'override', 'conflict')}
@@ -36,27 +34,13 @@ def load(store, keys):
 
 
 def dimension(item, name):
-    profile = item.get('musical') or {}
-    value = profile.get('dimensions', {}).get(name) or {}
-    number, support = value.get('value'), value.get('support', 0)
-    if (type(number) not in (int, float) or not math.isfinite(number) or not 0 <= number <= 1
-            or type(support) not in (int, float) or not math.isfinite(support) or not 0 < support <= 1):
-        return None, 0
-    return number, support
+    return musical_profiles.dimension(item.get('musical') or {}, name)
 
 
 def _intensity_fit(item):
     """Select the same usable learned input for scoring and served provenance."""
-    correction = ((item.get('musical') or {}).get('dimensions') or {}).get('intensity') or {}
-    if (isinstance(correction, dict) and correction.get('override') is True
-            and dimension(item, 'intensity')[0] is not None):
-        return None
     vibes = (item.get('musical') or {}).get('vibes') or {}
-    if vibes.get('inputs_version') and not serving_compatible(vibes['inputs_version']):
-        return None
-    fits = vibes.get('intensity_fits') or {}
-    if not isinstance(fits, dict):
-        return None
+    fits = compatible_profile_vibes(vibes).get('intensity_fits') or {}
     combined = vibe_intensity.ensemble(fits)
     return (combined['selected'], combined) if combined else None
 
@@ -67,7 +51,7 @@ def intensity_evidence(item):
     if chosen is not None:
         _name, fit = chosen
         return fit['score'], fit.get('support', 0)
-    return dimension(item, 'intensity')
+    return None, 0
 
 
 def intensity(item):
@@ -80,8 +64,7 @@ def provenance(item):
     profile = item.get('musical') or {}
     chosen = _intensity_fit(item)
     if chosen is None:
-        value, support = dimension(item, 'intensity')
-        name, source = None, None
+        value, support, name, source = None, 0, None, None
     else:
         name, fit = chosen
         value, support, source = fit['score'], fit.get('support', 0), fit.get('source')

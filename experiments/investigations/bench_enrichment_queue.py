@@ -70,12 +70,19 @@ def test_priority_selection_profile(tmp_path, monkeypatch):
         # Model the current catalog-wide genre policy refresh, retaining real
         # memberships, container sizes and listening-day distributions.
         with store.conn:
-            store.conn.execute("INSERT OR REPLACE INTO enrichment_provider_config VALUES ('deezer','profile','available')")
-            store.conn.execute("INSERT OR IGNORE INTO enrichment_provider_jobs "
-                               "SELECT id,'deezer' FROM recordings WHERE first_enriched_at IS NOT NULL")
+            store.conn.execute("INSERT INTO enrichment_provider_config(provider,fingerprint,status) "
+                               "VALUES ('deezer','profile','available') ON CONFLICT(provider) DO UPDATE "
+                               "SET fingerprint=excluded.fingerprint,status=excluded.status")
+            store.conn.execute("INSERT INTO enrichment_provider_state "
+                               "(recording_id,provider,cycle,at,status,failures,retry_at,error,queued) "
+                               "SELECT id,'deezer',-1,0,'queued',0,0,'',1 FROM recordings WHERE first_enriched_at IS NOT NULL "
+                               "ON CONFLICT(recording_id,provider) DO UPDATE SET queued=1")
         report["counts"] = {table: store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
-            for table in ("recordings", "catalog_entries", "catalog_enrichment_tracks", "playlist_tracks",
-                          "album_tracks", "listening_days", "enrichment_provider_jobs")}
+            for table in ("recordings", "track_sources", "playlist_tracks",
+                          "album_tracks", "listening_days")}
+        report["counts"]["provider_jobs"] = store.conn.execute(
+            "SELECT count(*) FROM enrichment_provider_state WHERE queued=1").fetchone()[0]
+        report["counts"]["enrichment_subjects"] = store.enrichment_reports.coverage_stats(include_discovery=True)["total"]
         monkeypatch.setattr(db_diagnostics.DiagnosticCursor, "_call", measured)
 
         def run(name, target):

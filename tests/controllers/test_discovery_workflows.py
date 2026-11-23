@@ -10,16 +10,46 @@ import pytest
 from tests.repository_mock_support import no_database, repository_store
 from yt_playlist.controllers.clusters import Clusters
 from yt_playlist.controllers.discovery_actions import DiscoveryActions
+from yt_playlist.controllers.discovery_catalog import DiscoveryCatalog
 from yt_playlist.controllers.discovery_preparation import DiscoveryArtists, DiscoveryPreparation
 from yt_playlist.controllers.road_trip_transitions import RoadTripFacts, RoadTripTransitions
 from yt_playlist.controllers.suggestions import Suggestions, SuggestionFeedback
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.rec.discover import _rank_candidates
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
 
+def test_artist_profile_read_leaves_alias_reconciliation_to_discovery():
+    provider = Mock(spec_set=['get_artist', 'get_album'])
+    provider.get_artist.return_value = {'name': 'Artist', 'albums': {'results': [
+        {'title': 'Record', 'browseId': 'MPREnew', 'year': '2020'}]}}
+    provider.get_album.return_value = {'title': 'Record', 'artists': [{'name': 'Artist'}],
+        'year': '2020', 'trackCount': 1, 'tracks': [
+            {'videoId': 'video', 'title': 'Song', 'duration': '3:00', 'isExplicit': False}]}
+    collection = Mock(spec_set=['album_alias_candidates', 'claim_album_alias_check',
+                               'observe_album_representation'])
+    collection.album_alias_candidates.return_value = [
+        {'title': 'Record', 'artist': 'Artist', 'browse_id': 'MPREold'}]
+    collection.claim_album_alias_check.return_value = True
+    access = YouTubeMusicAccess(provider)
+    command = DiscoveryCatalog(catalog=lambda: access, radio_client=Mock(), collection=collection,
+        discovery=Mock(), query=Mock(), tracks=Mock(), charts=Mock(), settings=Mock(),
+        rebuild=Mock(), now=lambda: 1000, logger=Mock())
+
+    profile = access.artist_profile('UCartist')
+    assert [album['browse_id'] for album in profile['albums']] == ['MPREnew']
+    assert provider.mock_calls == [call.get_artist('UCartist')]
+    assert collection.mock_calls == []
+
+    assert command.artist('Artist', 'UCartist') == profile
+    collection.claim_album_alias_check.assert_called_once_with('MPREnew', 'MPREold', 1000)
+    assert provider.get_album.call_args_list == [call('MPREold'), call('MPREnew')]
+    assert collection.observe_album_representation.call_args_list == [
+        call('MPREold', provider.get_album.return_value), call('MPREnew', provider.get_album.return_value)]
+
+
 def test_catalog_population_bounds_requests_respects_exact_ownership_and_remembers_fetches():
-    from yt_playlist.controllers.discovery_catalog import DiscoveryCatalog
     discovery = Mock(spec_set=['discovered_source_tokens', 'get_discovered_albums', 'fetched_albums',
                                'upsert_discovered_track', 'remember_album_fetch'])
     discovery.discovered_source_tokens.return_value = set()
@@ -34,7 +64,7 @@ def test_catalog_population_bounds_requests_respects_exact_ownership_and_remembe
     query = Mock(spec_set=['library_keys'])
     query.library_keys.return_value = {'owned'}
     rebuild = Mock()
-    command = DiscoveryCatalog(catalog=lambda: client, radio_client=Mock(), collection=Mock(),
+    command = DiscoveryCatalog(catalog=lambda: YouTubeMusicAccess(client), radio_client=Mock(), collection=Mock(),
         discovery=discovery, query=query, tracks=tracks, charts=Mock(), settings=Mock(),
         rebuild=rebuild, now=lambda: 1000, logger=Mock())
     assert command.populate(1000, budget=1) == 1
@@ -56,7 +86,7 @@ def test_cluster_query_expands_then_detached_ring_keeps_recording_and_album_limi
     genres = Mock(spec_set=['feature_axes'])
     genres.feature_axes.return_value = {'Jazz': ('jazz', None)}
     expand = Mock(return_value=[(key, 1 - int(key)/10) for key in rows])
-    command = ClusterQuery(query, Mock(), genres, Mock(), expand=expand, geometry=Mock())
+    command = ClusterQuery(query, Mock(), genres, Mock(), rank_candidates=expand, geometry=Mock())
     payload, offered = command.expansion({'pos_keys': ['seed'], 'k': 6})
     assert [row['video_id'] for row in payload['ring']] == ['v0', 'v1', 'v3', 'v4']
     assert offered == []
@@ -84,7 +114,8 @@ def test_discovery_pass_bounds_scan_rotates_owned_albums_and_preserves_held_trac
         store.eligibility, store.history, parameter=lambda name: 1, artist_info=info,
         new_artists=lambda: [{'artist': 'New artist', 'score': .8}], populate=populate, radio=radio, logger=Mock())
     assert command.run(1000, budget=2) == {'scanned': 1}
-    store.discovery.artists_due_for_scan.assert_called_once_with(1000, budget=2, artist_limit=1, with_ids=True)
+    store.discovery.artists_due_for_scan.assert_called_once_with(
+        1000, budget=2, artist_limit=1, with_ids=True, require_channel=True)
     info.assert_called_once_with('Artist', 'channel')
     assert store.discovery.upsert_discovered_album.call_args.args[0] == 'new'
     assert store.discovery.upsert_discovered_album.call_count == 1
@@ -97,49 +128,54 @@ def test_discovery_pass_bounds_scan_rotates_owned_albums_and_preserves_held_trac
 
 
 def test_artist_query_uses_real_bridge_ranking_and_does_not_cache_outage_as_empty_success():
-    cache = Mock(spec_set=['cached_similar', 'cache_similar'])
-    cache.cached_similar.side_effect = [None, [['New Artist', .8]]]
+    from yt_playlist.rec.artist_model import ArtistNeighbor
+
+    cache = Mock(spec_set=['cached_similar', 'cache_similar', 'lookup_name'])
+    cache.cached_similar.return_value = None
+    cache.lookup_name.return_value = 'Anchor'
     taste = SimpleNamespace(titles=['Favorites'], context_contributions=lambda value: np.array([value[0]]))
     command = DiscoveryArtists(taste=lambda: taste, vectors=lambda: (['seed'], np.array([[1., 0.]]), {'seed': 0}),
         anchors=lambda *args: [('anchor', 1., np.array([1., 0.]))], owned=lambda: {'owned'},
         reference=lambda key: {'id': 1, 'name': 'Anchor'} if key == 'anchor' else None,
         cache=cache, similar=lambda label: ([], False),
-        neighbors=lambda name, **kwargs: [('owned', 1.), ('new artist', .8)], rank=_rank_candidates,
+        neighbors=lambda name, **kwargs: [ArtistNeighbor('owned', 1., {'content': 1.}, None),
+                                          ArtistNeighbor('new artist', .8, {'lastfm': .8}, None)], rank=_rank_candidates,
         thumbnail=lambda name: 'image', genre=lambda name: 'Jazz', now=lambda: 1000)
     result = command.query(limit=1)
     assert len(result) == 1 and result[0]['artist'] == 'New Artist'
     assert result[0]['because'] == ['Anchor'] and result[0]['score'] > 0
     assert result[0]['thumbnail'] == 'image' and result[0]['genre'] == 'Jazz'
     cache.cache_similar.assert_not_called()
-    assert cache.cached_similar.call_args.kwargs == {'ttl_days': float('inf')}
+    cache.cached_similar.assert_called_once_with('anchor', 1000)
+    assert result[0]['sources'] == {'anchor': {'lastfm': .8}}
 
 
 def test_suggestions_capture_cold_metadata_and_record_exact_ranked_offer():
     store = repository_store(playlists={}, query={'key_for_video': 'seed', 'tracks_by_keys': {'seed': {'title': 'Seed'}}},
-        discovery={'discovered_tracks_by_keys': {'cold': {'video_id': 'cold-video', 'title': 'Cold', 'artist': 'Artist'}}},
+        discovery={'playable_discoveries_by_keys': {'cold': {'video_id': 'cold-video', 'title': 'Cold', 'artist': 'Artist'}}},
         model={'rec_vectors_count': 1})
     record = Mock()
     command = Suggestions(store.playlists, store.query, store.discovery, store.model, complete=Mock(),
-        neighbors=lambda key, **kwargs: [], proxy=lambda key, **kwargs: [('cold', .75)], record=record, rebuild=Mock())
+        neighbors=lambda key, **kwargs: [('cold', .75)], record=record, rebuild=Mock())
     result = command.similar('seed-video', 3, 1000)
     assert result['items'][0]['video_id'] == 'cold-video'
     assert record.call_args.args[1][0]['key'] == 'cold'
     assert record.call_args.args[1][0]['score'] == .75
-    store.discovery.discovered_tracks_by_keys.assert_called_once_with(['cold'])
+    store.discovery.playable_discoveries_by_keys.assert_called_once_with(['cold'])
 
 
 def test_feedback_applies_interpretation_and_lane_change_but_own_it_does_not_teach_taste():
-    store = repository_store(model={'record_feedback': None, 'nudge_weight': None}, signals={}, playlists={}, recipes={})
-    facet, facts = Mock(), Mock(return_value={})
+    store = repository_store(model={'record_feedback': None, 'get_weights': {}, 'set_session_weight': None},
+                             signals={}, playlists={}, recipes={})
+    facts = Mock(return_value={})
     command = SuggestionFeedback(store.model, store.signals, store.playlists, store.recipes, facts=facts,
-        parameter=lambda name: 1., lanes={'comfort'}, facet=facet, moods=Mock())
+        parameter=lambda name: 1., lanes={'comfort'})
     command.feedback('exact', 'less', 'genre', 'for_you', 'track', 'comfort', 'genre:jazz', 1000)
-    facet.assert_called_once()
-    assert facet.call_args.args[:2] == ('genre:jazz', -1)
-    store.model.nudge_weight.assert_called_once()
-    facet.reset_mock()
+    assert [call.args for call in store.model.set_session_weight.call_args_list] == [
+        ('genre:jazz', .85, 1000), ('lane:comfort', .85, 1000)]
+    store.model.set_session_weight.reset_mock()
     command.feedback('exact', 'less', 'own_it', 'for_you', 'track', '', '', 1001)
-    facet.assert_not_called()
+    store.model.set_session_weight.assert_not_called()
     facts.assert_not_called()
     assert store.model.record_feedback.call_count == 2
 
@@ -161,7 +197,7 @@ def test_cluster_save_owns_recipe_metadata_order_and_complete_generated_command(
     rows = {key: {'video_id': key, 'title': key, 'artist': 'Artist', 'album': '', 'thumbnail': None}
             for key in ('library', 'cold', 'central')}
     store = repository_store(query={'tracks_by_keys': {'library': rows['library'], 'central': rows['central']}},
-        discovery={'discovered_tracks_by_keys': {'cold': rows['cold']}}, recipes={}, evidence={}, model={})
+        discovery={'playable_discoveries_by_keys': {'cold': rows['cold']}}, recipes={}, evidence={}, model={})
     generated = Mock(spec_set=['create'])
     generated.create.return_value = {'status': 'confirmed', 'new_ytm': 'remote', 'pid': 9, 'added': 3}
     recipe = Mock(return_value=({'model': 'cluster'}, ['cold', 'library', 'central']))
@@ -229,7 +265,7 @@ def test_draft_owner_rejects_cancelled_worker_and_keeps_new_revision_with_real_t
     work = Mock(spec_set=['wrap'])
     work.wrap.side_effect = lambda label, run, job: lambda: run(job)
     acquisition = Mock(spec_set=['add', 'fill'])
-    acquisition.add.side_effect = lambda state, client, item: state['done_inputs'].append(item['name'])
+    acquisition.add.side_effect = lambda state, client, item, now: state['done_inputs'].append(item['name'])
     owner = RoadTripDrafts(repository, transitions, acquisition, now=lambda: 1000, work=work,
         spawn=queued.append, artist_genre=Mock(), served=Mock(), identity=Mock(), record=Mock())
     client = object()

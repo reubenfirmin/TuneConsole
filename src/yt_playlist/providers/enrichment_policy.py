@@ -12,7 +12,7 @@ PROVIDERS = [
     {"name": "musicbrainz", "label": "MusicBrainz", "key": None, "requires": None,
      "blurb": "Genre & release year, by recording match."},
     {"name": "acousticbrainz", "label": "AcousticBrainz", "key": None, "requires": "musicbrainz",
-     "blurb": "BPM, energy, danceability. Keyed by MusicBrainz ID, so it runs after it."},
+     "blurb": "Tempo and native sound classifiers. Looks up the MusicBrainz recording ID."},
     {"name": "lastfm", "label": "Last.fm", "key": "lastfm_api_key", "requires": None,
      "blurb": "Better genre labels than the free, public sources used by default. Register for a free API key to improve recommendations over time."},
     {"name": "discogs", "label": "Discogs", "key": None, "requires": None,

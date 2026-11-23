@@ -13,7 +13,7 @@ import pytest
     "unknown_account", "unverified_credits", "album_art", "like_again", "dislike_again",
     "unlike", "clear_dislike", "switch_to_like", "switch_to_dislike",
     "dislike_skip", "dislike_skip_already_set", "dislike_auto_advance", "dislike_no_next",
-    "dislike_wrong_account", "next", "next_stale", "next_disabled", "next_wrong_account", "next_unknown_account",
+    "dislike_wrong_account", "next", "next_after_rating", "next_stale", "next_disabled", "next_wrong_account", "next_unknown_account",
     "rating_target_only", "controller_data", "conflicting_controller", "missing_binding",
     "delayed_binding", "expired_before_probe", "expired_during_probe", "cancelled_probe", "superseded_probe",
     "unknown_expected_account",
@@ -40,7 +40,7 @@ const video={paused:false,muted:false,volume:1,addEventListener(){},removeEventL
 const window={ytcfg:['unknown_account','unknown_expected_account','next_unknown_account'].includes(scenario)?null:{get:key=>key==='LOGGED_IN'?true:'brand'},addEventListener(t,fn){if(t==='message')handlers.push(fn);},
  removeEventListener(t,fn){if(t==='message')handlers.splice(handlers.indexOf(fn),1);},
  postMessage(msg){queue.push(msg);if(msg.__tcNow)snapshots.push(msg.__tcNow);}};
-const document={addEventListener(){},querySelector(s){
+const document={addEventListener(){},removeEventListener(){},querySelector(s){
  if(s==='video')return video;
  if(s==='#movie_player')return {getVideoData:()=>({video_id:playerId,title:'Song',
    author:scenario==='rating_target_only'?'Uploader channel':'Artist'}),getPlaylistId:()=>''};
@@ -107,9 +107,9 @@ const desiredStatus={like_again:'LIKE',dislike_again:'DISLIKE',unlike:'INDIFFERE
  (scenario.startsWith('dislike_')?'DISLIKE':['delayed_binding','unconfirmed_click'].includes(scenario)?'LIKE':undefined);
 const skip=scenario.startsWith('dislike_') && scenario!=='dislike_again';
 assert.equal(runtime({type:scenario.startsWith('next')?'next':'rate',action,videoId:'A',
- likeStatus:desiredStatus,skip,ratingId:'one',expiresAt:2000,
+ likeStatus:desiredStatus,skip,ratingAdvance:scenario==='next_after_rating',ratingId:'one',expiresAt:2000,
  brandId:['dislike_wrong_account','next_wrong_account'].includes(scenario)?'other':
-   ['unknown_expected_account','next_unknown_account','next'].includes(scenario)?'brand':undefined},{},r=>reply=r),true);
+   ['unknown_expected_account','next_unknown_account','next','next_after_rating'].includes(scenario)?'brand':undefined},{},r=>reply=r),true);
 if(scenario==='expired_during_probe')clock=3000;
 if(scenario==='cancelled_probe')runtime({type:'cancel-rating',ratingId:'one'},{},()=>{});
 if(scenario==='superseded_probe')runtime({type:'rate',ratingId:'two',action:'like',videoId:'A',
@@ -154,7 +154,7 @@ if(scenario==='rating_target_only'){
   assert.equal(snapshot.metadataVerified,false,'rating identity cannot certify missing recording credits');
 }
 if(scenario==='dislike_skip')assert.deepEqual(clicks,['#button-shape-dislike button','next']);
-else if(scenario==='dislike_skip_already_set' || scenario==='next')assert.deepEqual(clicks,['next']);
+else if(['dislike_skip_already_set','next','next_after_rating'].includes(scenario))assert.deepEqual(clicks,['next']);
 else if(scenario==='dislike_auto_advance' || scenario==='dislike_no_next')
  assert.deepEqual(clicks,['#button-shape-dislike button']);
 else assert.equal(clicks.length,rejected || alreadySet?0:1);
@@ -162,7 +162,10 @@ if(scenario.startsWith('next')){
  assert.equal(ratingStatus,'INDIFFERENT');
  const requests=events.filter(m=>m.type==='pevent'&&m.kind==='next');
  assert.equal(requests.length,['next_stale','next_wrong_account','next_unknown_account'].includes(scenario)?0:1);
- if(requests.length){assert.equal(requests[0].videoId,'A');assert.equal(requests[0].brandKnown,true);}
+ if(requests.length){
+  assert.equal(requests[0].videoId,'A');assert.equal(requests[0].brandKnown,true);
+  assert.equal(requests[0].ratingAdvance,scenario==='next_after_rating');
+ }
  process.exit(0);
 }
 if(reply.ok){

@@ -1,15 +1,12 @@
 """The single temporal policy for sampled-song Vibe scoring.
 
-These are provisional listening-purpose heuristics, not learned probabilities.
-Only observed excerpts contribute: gaps are retained, never interpolated or
-treated as evidence for the unheard music between them. Classifiers and their
-within-excerpt source mappings remain independent of this policy.
+Only observed excerpts contribute. Classifiers and their within-excerpt source
+mappings remain independent of this policy.
 """
 import math
 from statistics import median_high
 
 VERSION = 'ordered-vibe-arc-1'
-ARC_CHANGE = .1
 FADE_PENALTY = .25
 
 
@@ -17,23 +14,6 @@ def ordered(samples):
     """Arrival order and nominal capture names never define the song's arc."""
     return sorted(samples, key=lambda sample: (
         sample['position_seconds'], sample['target_seconds'], sample['id']))
-
-
-def path(values):
-    steps = [later - earlier for earlier, later in zip(values, values[1:])]
-    span = max(values) - min(values)
-    if span < ARC_CHANGE:
-        shape = 'steady'
-    elif any(step > ARC_CHANGE for step in steps) and any(step < -ARC_CHANGE for step in steps):
-        shape = 'peak' if values.index(max(values)) not in (0, len(values) - 1) else 'dip'
-    elif values[-1] - values[0] >= ARC_CHANGE:
-        shape = 'rising'
-    elif values[0] - values[-1] >= ARC_CHANGE:
-        shape = 'falling'
-    else:
-        shape = 'changing'
-    return {'values': values, 'minimum': min(values), 'maximum': max(values), 'range': span,
-            'steps': steps, 'net_change': values[-1] - values[0], 'shape': shape}
 
 
 def fit(vibe, values):

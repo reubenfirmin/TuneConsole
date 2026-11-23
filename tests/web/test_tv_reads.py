@@ -39,7 +39,7 @@ def test_playlist_response_stays_consistent_during_replacement_and_refreshes_nex
         source.conn.execute('PRAGMA synchronous=OFF')
         initialize_consumer(source, _pristine_current_schema)
         install_catalog_inputs(source, monkeypatch)
-        account = source.accounts.upsert_account('TV account', 'cred', None, True)
+        account = source.accounts.upsert_account('TV account', None, True)
         videos = [video(index) for index in range(11)]
         client = FakeClient(catalog={item['video_id']: {
             'videoId': item['video_id'], 'title': item['title'],

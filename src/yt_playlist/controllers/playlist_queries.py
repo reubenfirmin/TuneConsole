@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 from yt_playlist.library.analysis import SYSTEM_PLAYLIST_IDS
-from yt_playlist.core.playlist_snapshot import playlist_read_report
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.repos.base import GENERATED_GROUP
 from yt_playlist.util.navigation import artist_credit_links
 
@@ -103,15 +103,21 @@ class PlaylistQueries:
         return dict(cells=[dict(video_id=t['video_id'], genre=t.get('genre') or '', year=t.get('year') or '') for t in tracks],
             pending=sum(not (t.get('genre') and t.get('year')) for t in tracks), feedback_version=feedback_version(tracks))
 
-    def metadata(self, video):
+    def metadata(self, video, *, proposed_genre=None):
         with self.read_view() as reader:
             track = reader.tracks.metadata_for_video(video)
             provenance = reader.enrichment_reports.genre_provenance(track['track_id']) if track else None
             if track:
                 track = {**track, 'artist_links': artist_credit_links(
                     reader.artists.navigation(name=track.get('artist') or '', video=video))}
-            return dict(metadata=track, genre_options=provenance['options'] if provenance else [],
+            result = dict(metadata=track, genre_options=provenance['options'] if provenance else [],
                 genres=sorted(set(reader.genres.get_genre_whitelist()) | set(reader.genres.all_genres()), key=str.casefold))
+            if track and proposed_genre is not None:
+                proposed_key, _ = reader.genres.resolve(proposed_genre)
+                saved_key = reader.tracks.effective_genre_key(track['track_id'])
+                result['genre_matches'] = proposed_key == saved_key and (
+                    proposed_key is not None or proposed_genre == track['genre'])
+            return result
 
     def row(self, video, *, pid=None, album=None):
         with self.read_view() as reader:
@@ -157,4 +163,4 @@ class PlaylistQueries:
             account, client = self.access.resolve(account_id=account)
             remote = 'LM'
         return dict(account_id=account, **({'playlist_id': pid} if pid is not None else {}),
-                    reads=playlist_read_report(client, remote))
+                    reads=YouTubeMusicAccess.for_client(client).playlist_read_report(remote))

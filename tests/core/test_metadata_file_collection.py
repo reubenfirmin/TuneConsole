@@ -11,6 +11,8 @@ from types import SimpleNamespace
 import pytest
 
 from yt_playlist.core import catalog, fao, metadata_native, metadata_runtime, metadata_runtime_files as files
+from yt_playlist.core.activity import work_budget
+from yt_playlist.core.metadata_contract import ALTERNATIVE_SECONDS
 from yt_playlist.core.metadata_observations import MetadataObservation
 from tests.core.test_metadata_runtime import runtime_store, entry
 from tests.store_fixture_support import bounded_consumer_schema
@@ -31,7 +33,7 @@ def _pristine_current_schema():
 def native(store, track, recording, value, run, now):
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        metadata_native.record(store.conn, track, 'native', [MetadataObservation('energy', value,
+        metadata_native.record(store.conn, track, 'native', [MetadataObservation('mood_party', value,
             'recording', 'identity', 'prediction', unit='classifier_probability')],
             run_id=run, now=now, recording_id=recording)
 
@@ -65,6 +67,60 @@ def close_collectors(runtime_store):
         runtime_store.retention.managed.close()
 
 
+def test_expiry_waiting_for_writer_keeps_metadata_publication_and_reads_available(runtime_store, monkeypatch):
+    store = runtime_store
+    track, recording = entry(store)
+    state = store.enrichment_state
+    now = time.time()
+    state.record_enrichment_attempt('song|artist', 'expired', {'bpm': 120},
+        now=now - ALTERNATIVE_SECONDS - 1, video_id='video', run_id='expired')
+    initial_check_done = threading.Event()
+    publisher_holds_writer = threading.Event()
+    expiry_waiting_for_writer = threading.Event()
+    expiry_state = state.repository.expiry_state
+    acquire_writer = store._lock.acquire
+    expiry_thread = None
+
+    def pause_after_initial_check():
+        nonlocal expiry_thread
+        result = expiry_state()
+        if expiry_thread is None:
+            expiry_thread = threading.get_ident()
+            initial_check_done.set()
+            assert publisher_holds_writer.wait(4)
+        return result
+
+    def observe_writer(*args, **kwargs):
+        if threading.get_ident() == expiry_thread:
+            expiry_waiting_for_writer.set()
+        return acquire_writer(*args, **kwargs)
+
+    def read_library():
+        with work_budget(5), store.read_view() as reader:
+            return reader.tracks.duration_for_video('video')
+
+    monkeypatch.setattr(state.repository, 'expiry_state', pause_after_initial_check)
+    monkeypatch.setattr(store._lock, 'acquire', observe_writer)
+    with ThreadPoolExecutor(2) as workers:
+        expiry = workers.submit(state.expire_provider_alternatives, now)
+        try:
+            assert initial_check_done.wait(4)
+            with work_budget(5), state.subject_guard(track, recording):
+                publisher_holds_writer.set()
+                assert expiry_waiting_for_writer.wait(4)
+                read = workers.submit(read_library)
+                state.record_enrichment_attempt('song|artist', 'fresh', {'bpm': 125},
+                    now=now, video_id='video', run_id='fresh')
+                assert read.result(timeout=4) == 200
+        finally:
+            publisher_holds_writer.set()
+        assert expiry.result(timeout=4) == 1
+
+    attempts = state.enrichment_provider_state(recording)
+    assert attempts['fresh']['fields']['bpm'] == 125
+    assert not attempts['expired']['fields']
+
+
 @pytest.mark.parametrize('kind', ['conflicts', 'native', 'choices', 'unlinked-native'])
 def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_history(runtime_store, kind):
     store = runtime_store
@@ -88,12 +144,12 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
             elif kind == 'choices':
                 catalog.choose_field(store.conn, track, 'bpm', 150)
             elif kind == 'native':
-                metadata_native.record(store.conn, track, 'other-native', [MetadataObservation('energy', .8,
+                metadata_native.record(store.conn, track, 'other-native', [MetadataObservation('mood_party', .8,
                     'recording', 'other', 'prediction', unit='classifier_probability')],
                     run_id='rolled-back', now=at, recording_id=recording)
             else:
                 # Update the actual source before unlinking it below.
-                metadata_native.record(store.conn, track, 'native', [MetadataObservation('energy', .9,
+                metadata_native.record(store.conn, track, 'native', [MetadataObservation('mood_party', .9,
                     'recording', 'identity', 'prediction', unit='classifier_probability')],
                     run_id='rolled-back', now=at + 1, recording_id=recording)
             raise RuntimeError('rollback publication')
@@ -123,7 +179,8 @@ def test_rolled_back_and_unlinked_metadata_collect_without_losing_committed_hist
     assert all(files.owns_file(store.conn, path) for path in committed)
     # Normal maintenance legitimately replaces an expired conflict's contents.
     # Its new current document must remain owned and readable.
-    identity, revision = store.conn.execute('SELECT id,revision FROM metadata_runtime_conflicts').fetchone()
+    identity, revision = store.conn.execute('SELECT runtime_id,runtime_revision FROM metadata_conflicts '
+                                            'WHERE runtime_id IS NOT NULL').fetchone()
     current = files.reference_path(store.conn, 'conflicts', (identity,), revision)
     assert files.owns_file(store.conn, current)
     assert files.read(store.conn, 'conflicts', (identity,), revision) == {'candidates': []}

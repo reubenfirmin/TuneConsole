@@ -31,7 +31,7 @@ def evidence():
         finally:
             active.pop()
 
-    service = GroupEvidence(repo, lambda: ledger, admission, files, admission, enabled=True, recommendations=True)
+    service = GroupEvidence(repo, lambda: ledger, admission, files, admission)
     return service, ledger, active
 
 
@@ -105,12 +105,19 @@ def test_recommendation_only_context_keeps_its_explicit_references(evidence):
         'proposal:home_prepared:context', None, None, [7])
 
 
-def test_comparison_envelope_does_not_decode_its_unrelated_payload(evidence):
+def test_prepared_envelope_does_not_decode_its_unrelated_payload(evidence):
     service, _ledger, _active = evidence
-    service.replace_prepared('model_pair:trial:mixes', {'codec': 'opaque', 'data': 'not decoded', 'context': context()}, 10)
+    service.replace_prepared('home_prepared', {'codec': 'opaque', 'data': 'not decoded', 'context': context()}, 10)
     kind, surface, operations, _generations = service.repository.replace_prepared.call_args.args
-    assert (kind, surface) == ('comparison', 'model_pair:trial:mixes')
+    assert (kind, surface) == ('prepared', 'home_prepared')
     assert operations[0][1].versions == (('alias', 'group'),)
+
+
+def test_retired_trial_namespace_does_not_retain_references(evidence):
+    service, ledger, _active = evidence
+    assert service.replace_prepared('model_pair:trial:mixes', {'context': {'artifact': 'old'}}, 10) is None
+    ledger.get.assert_not_called()
+    service.repository.replace_prepared.assert_not_called()
 
 
 def test_mix_orphans_are_verified_under_admission_before_sql_deletion(evidence):

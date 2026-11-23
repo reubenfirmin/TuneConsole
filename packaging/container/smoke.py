@@ -91,6 +91,7 @@ print(json.dumps({'version': importlib.metadata.version('yt-playlist'),
 from contextlib import closing
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from yt_playlist.core import metadata_history
 from yt_playlist.core.store import Store
 
 with TemporaryDirectory(prefix='enrichment-smoke-') as directory:
@@ -102,6 +103,13 @@ with TemporaryDirectory(prefix='enrichment-smoke-') as directory:
         entry = store.tracks.upsert_track('smoke-track', 'Smoke Track', 'Smoke Artist', duration_s=180)
         batch = queue.next_enrich_batch(5, providers=['musicbrainz'])
         assert [row['id'] for row in batch] == [entry], batch
+        recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
+        binary = bytes(range(256))
+        with store.conn:
+            metadata_history.append(store.conn, entry, recording, 'binary_smoke', 'musicbrainz', 'select', binary, 1)
+        row = store.conn.execute('SELECT typeof(value),value FROM recording_metadata_history '
+                                 "WHERE entry_id=? AND field='binary_smoke'", (entry,)).fetchone()
+        assert row is not None and tuple(row) == ('blob', binary), 'Binary metadata history changed'
 """)
 
         key = base64.b64encode(uuid.uuid4().bytes).decode()
@@ -145,7 +153,7 @@ assert paths.app_log_path().is_file()
 """)
         stop()
         print(f"{args.engine}: {args.image} passed startup, pairing, origin guards, "
-              "enrichment selection, non-root storage, persistence, and graceful shutdown checks")
+              "enrichment selection, binary metadata history, non-root storage, persistence, and graceful shutdown checks")
     except BaseException:
         print(run("logs", name, check=False))
         raise

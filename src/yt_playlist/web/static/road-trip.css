@@ -20,6 +20,10 @@
   cursor: pointer; color: inherit; }
 .rt-suggestion small { color: var(--faint); font-family: var(--font-mono); font-size: .62rem;
   letter-spacing: .05em; text-transform: uppercase; }
+.rt-artist-suggestion { align-items: center; justify-content: flex-start; }
+.rt-artist-suggestion img { border-radius: 50%; object-fit: cover; flex: none; }
+.rt-artist-suggestion small { display: block; color: var(--dim); font-size: var(--type-xs);
+  text-transform: none; letter-spacing: normal; overflow-wrap: anywhere; }
 /* Suggestions use a row highlight instead of the shared secondary-button fill. */
 .rt-suggestion:hover, .rt-suggestion:focus-visible {
   background: var(--accent-soft); color: var(--text); }
@@ -131,7 +135,7 @@ input[type="range"].rt-shape-slider { display: block; width: 100%; height: 6px; 
 .rt-duration { display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem; margin: 0; }
 .rt-duration-field { box-sizing: border-box; height: 2.15rem; display: inline-flex; align-items: center;
   gap: 0.15rem; padding: 0.15rem 0.5rem;
-  border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--card); }
+  border: 1px solid var(--border); border-radius: var(--radius-sm); }
 .rt-duration-field:focus-within { border-color: var(--accent-2); }
 .rt-duration-field input { width: 2.6rem; border: none; background: transparent; padding: 0.2rem 0;
   text-align: right; font-variant-numeric: tabular-nums; color: inherit; appearance: textfield; }

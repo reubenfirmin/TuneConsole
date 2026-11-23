@@ -1,19 +1,16 @@
 """#54: disliking one song by an artist must not suppress all of that artist's songs."""
+from tests.conftest import seed_catalog_track
+from tests.retained_rating_support import observe_rating
 from yt_playlist.rec import transient
-from tests.derived_rating_support import seed_dislike
 
 
-def test_dislike_does_not_emit_artist_lean(store, monkeypatch):
-    from tests.conftest import seed_catalog_track
-    seed_catalog_track(store,"billy|rebel","Rebel Yell","Billy Idol",genre="rock-classic",mb_year="1983")
-    store.conn.commit()
-    seed_dislike(store, "billy|rebel", None, 100.0)
-    # #85: staleness_factor is gone; facet_leans decays each event on its own wall clock and never
-    # depended on a global sync-staleness relax, so there is nothing left to isolate from here.
-
-    leans = transient.facet_leans(store, now=100.0)
-
-    # The artist is NOT pushed negative by a single disliked track (the bug).
-    assert all(v >= 0.0 for f, v in leans.items() if f.startswith("artist:")), leans
-    # But the dislike still registers as a (broad, non-artist) negative signal, so it isn't inert.
-    assert any(v < 0.0 for f, v in leans.items() if not f.startswith("artist:")), leans
+def test_dislike_is_scoped_to_the_rated_recording(store):
+    seed_catalog_track(store, 'rebel yell|billy idol', 'Rebel Yell', 'Billy Idol',
+                       video_id='rebel-yell', genre='rock-classic', mb_year='1983')
+    seed_catalog_track(store, 'eyes without a face|billy idol', 'Eyes Without a Face', 'Billy Idol',
+                       video_id='eyes-without-a-face', genre='rock-classic', mb_year='1983')
+    observe_rating(store, 'rebel yell|billy idol', 'DISLIKE', 100., provenance='api')
+    assert store.rec_model.disliked_with_ts() == [('rebel yell|billy idol', 100.)]
+    assert store.rec_model.suppressed_keys('for_you', now=100.) == {'rebel yell|billy idol'}
+    assert transient.facet_leans(store, now=100.) == {}
+    assert store.rec_model.get_weights(now=100.) == {}

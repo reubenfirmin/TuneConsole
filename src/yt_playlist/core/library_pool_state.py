@@ -1,5 +1,6 @@
 """Clicked fallback parameters attached to the complete recommendation pool owner."""
-from . import genre_identity
+import json
+
 from .clicked_pool_policy import LANES, SURFACES, decode, publication_inputs, validate
 
 
@@ -16,25 +17,21 @@ def prepare(conn, surface, value, at, *, policy=None, input_revision=None, pendi
 def parameters(conn, generation, value, at):
     if not conn.in_transaction:
         raise ValueError('Clicked pool parameters require their publication transaction')
-    conn.execute('INSERT INTO clicked_library_pools VALUES (?,?,?,?)',
-                 (generation, value['lane'], value['epoch'], at))
-    for field, kind in (('include_genres', 'include'), ('avoid_genres', 'avoid')):
-        for position, raw in enumerate(value[field]):
-            family = conn.execute('SELECT key FROM genre_family WHERE key=?', (raw,)).fetchone()
-            genre, reason = (None, None) if family else genre_identity.resolve(conn, raw.removeprefix('other:'))
-            conn.execute('INSERT INTO clicked_library_genres VALUES (?,?,?,?,?,?,?)',
-                (generation, kind, position, raw, family[0] if family else None, genre, reason))
+    changed = conn.execute('UPDATE recommendation_generations SET clicked_lane=?,clicked_epoch=?,clicked_built_at=?,'
+                           'clicked_include_genres=?,clicked_avoid_genres=? WHERE id=?',
+                           (value['lane'], value['epoch'], at, json.dumps(value['include_genres']),
+                            json.dumps(value['avoid_genres']), generation)).rowcount
+    if not changed:
+        raise ValueError('Unknown clicked pool generation')
 
 
 def read_parameters(conn, surface):
-    row = conn.execute('SELECT p.generation_id,p.lane,p.epoch FROM recommendation_heads h '
-        'JOIN clicked_library_pools p ON p.generation_id=h.generation_id WHERE h.surface=?', (surface,)).fetchone()
+    row = conn.execute('SELECT p.clicked_lane,p.clicked_epoch,p.clicked_include_genres,p.clicked_avoid_genres '
+        'FROM recommendation_generation_surfaces h JOIN recommendation_generations p ON p.id=h.generation_id '
+        'WHERE h.selected=1 AND h.surface=? AND p.clicked_lane IS NOT NULL', (surface,)).fetchone()
     if row is None:
         return None
-    result = {'lane': row[1], 'epoch': row[2]}
-    for field, kind in (('include_genres', 'include'), ('avoid_genres', 'avoid')):
-        result[field] = [entry[0] for entry in conn.execute('SELECT raw_key FROM clicked_library_genres '
-            'WHERE generation_id=? AND kind=? ORDER BY position', (row[0], kind))]
-    return result
+    return {'lane': row[0], 'epoch': row[1], 'include_genres': json.loads(row[2] or '[]'),
+            'avoid_genres': json.loads(row[3] or '[]')}
 
 

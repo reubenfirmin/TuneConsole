@@ -1,10 +1,11 @@
 /* Readiness is server-observed. This browser remembers only notice visibility. */
-function accountGrowth(initial) {
+function accountGrowth(initial, initialPanel = '') {
   return {
     growth: initial, seen: [], later: false, selected: null, choosing: false,
     homeChoice: '', choiceError: '', savingChoice: false, refreshing: false,
-    growthPanel: location.hash.slice(1), twinkling: false, hovered: null, mapPanned: false,
+    growthPanel: location.hash.slice(1) || initialPanel, twinkling: false, hovered: null, mapPanned: false,
     destinationPopup: null, destroyed: false, choiceVersion: 0,
+    hasActionNotices: false,
     get newNodes() {
       const unseen = this.growth.nodes.filter(node => !this.seen.includes(node.id));
       return [
@@ -14,6 +15,7 @@ function accountGrowth(initial) {
       ];
     },
     get notice() { return this.newNodes[0] || null; },
+    get hasIntegrationNotice() { return this.growth.nodes.some(node => node.recommendation_at != null); },
     get choiceInvite() { return this.growth.home_choice_available && !this.later; },
     get selectedNode() { return this.growth.nodes.find(node => node.id === this.selected); },
     node(id) { return this.growth.nodes.find(node => node.id === id); },
@@ -21,6 +23,7 @@ function accountGrowth(initial) {
     homePanel(anchor) { return anchor.startsWith('gen-') ? 'directions' : anchor; },
     areaAccessible(panel) {
       return ['unlocks', 'notices'].includes(panel) || this.growth.ready_areas[panel] === true ||
+        this.growth.open_areas?.includes(panel) ||
         this.growth.nodes.some(node => node.unlocked && node.href === '/#' + panel);
     },
     get pathStates() { return this.growth.trails.some(trail => ['connected', 'explored', 'ready'].includes(trail.state)) ? ['open'] : []; },
@@ -93,18 +96,36 @@ function accountGrowth(initial) {
       this.choosing = false; this.later = true; this.choiceError = '';
       this.$refs.homeDialog.close(); this.saveVisibility();
     },
-    async refresh() {
-      if (this.refreshing || document.hidden) return;
+    applyGrowth(state) {
+      if (state.has_action_notices !== undefined) this.hasActionNotices = state.has_action_notices;
+      if (state.vibes_ready === null && this.growth.vibes_ready != null) {
+        state.vibes_ready = this.growth.vibes_ready;
+      }
+      this.growth = state;
+    },
+    async refresh(includeVibes = true) {
+      if (document.hidden || this.destroyed) return;
+      if (this.refreshing) {
+        if (includeVibes && this.navigationCheck) this.vibesRequested = true;
+        return;
+      }
       const choiceVersion = this.choiceVersion;
       this.refreshing = true;
+      this.navigationCheck = !includeVibes;
+      const requests = this.growthRequests ||= new AbortController();
       try {
-        const response = await fetch('/home/growth');
+        const response = await fetch(includeVibes ? '/home/growth' : '/home/growth?navigation=true',
+          {signal: AbortSignal.any([requests.signal, AbortSignal.timeout(20000)])});
         if (response.ok) {
           const state = await response.json();
-          if (!this.destroyed && choiceVersion === this.choiceVersion) this.growth = state;
+          if (!this.destroyed && choiceVersion === this.choiceVersion && Array.isArray(state.nodes))
+            this.applyGrowth(state);
         }
       } catch (_) { /* Keep the last real snapshot during a temporary disconnect. */ }
-      finally { this.refreshing = false; }
+      finally {
+        this.refreshing = false;
+        if (this.vibesRequested) { this.vibesRequested = false; this.refresh(true); }
+      }
     },
     init() {
       // The map lives inside Home's separate tab component. Keep its dialog
@@ -117,8 +138,22 @@ function accountGrowth(initial) {
       } catch (_) {}
       this.twinkling = this.newNodes.length > 0;
       this.twinkleTimer = setTimeout(() => { this.twinkling = false; }, 1800);
-      this.timer = setInterval(() => this.refresh(), 15000);
+      // The second frame starts after the browser can paint the selected tab.
+      this.paint = requestAnimationFrame(() => {
+        this.paint = requestAnimationFrame(() => {
+          if (this.$el.querySelector('.home-dashboard')) this.refresh(this.growthPanel === 'unlocks');
+        });
+      });
+      this.timer = setInterval(() => {
+        if (this.$el.querySelector('.home-dashboard')) this.refresh(this.growthPanel === 'unlocks');
+      }, 15000);
     },
-    destroy() { this.destroyed = true; clearInterval(this.timer); clearTimeout(this.twinkleTimer); },
+    destroy() {
+      this.destroyed = true;
+      this.growthRequests?.abort();
+      cancelAnimationFrame(this.paint);
+      clearInterval(this.timer);
+      clearTimeout(this.twinkleTimer);
+    },
   };
 }

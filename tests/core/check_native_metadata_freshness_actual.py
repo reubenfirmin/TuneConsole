@@ -26,7 +26,9 @@ def digest_file(path):
 
 def digest_rows(conn, table):
     digest = hashlib.sha256()
-    for row in conn.execute('SELECT * FROM '+table+' ORDER BY 1,2'):
+    query = ('SELECT source_key,provider,scope,entity_id,revision FROM rec_musical_sources'
+             if table == 'rec_musical_sources' else 'SELECT identity_key,position,revision FROM content_refreshes')
+    for row in conn.execute(query + ' ORDER BY 1,2'):
         digest.update(repr(tuple(row)).encode())
     return digest.hexdigest()
 
@@ -57,12 +59,13 @@ def check(database, report):
                     key = row['source_key']
                     if key in selected:
                         continue
-                    relative = files.relative('native', (key,), row['revision'])
+                    root = files.directory(source)
+                    relative = files.reference_path(source, 'native', (key,), row['revision']).relative_to(root)
                     target = files.directory(store.conn)/relative
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copyfile(files.root_for_database(database, None)/relative, target)
+                    shutil.copyfile(root/relative, target)
                     selected[key] = row
-                tables = ('rec_musical_sources', 'rec_musical_pending', 'rec_content_pending', 'rec_musical_source_profiles')
+                tables = ('rec_musical_sources', 'content_pending')
                 before = {table: digest_rows(store.conn, table) for table in tables}
                 documents = {path: path.read_bytes() for path in files.directory(store.conn).rglob('*.json')}
                 scopes = Counter()
@@ -92,10 +95,10 @@ def check(database, report):
                 assert before == {table: digest_rows(store.conn, table) for table in tables}
                 assert documents == {path: path.read_bytes() for path in files.directory(store.conn).rglob('*.json')}
                 assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-                receipt_count = store.conn.execute('SELECT count(*) FROM metadata_native_delivery_heads').fetchone()[0]
-                receipt_bytes = store.conn.execute("SELECT sum(pgsize) FROM dbstat WHERE name='metadata_native_delivery_heads'").fetchone()[0]
+                receipt_count = store.conn.execute('SELECT count(*) FROM rec_musical_sources WHERE accepted_run IS NOT NULL').fetchone()[0]
+                receipt_bytes = store.conn.execute("SELECT sum(pgsize) FROM dbstat WHERE name='rec_musical_sources'").fetchone()[0]
                 result = {'source': str(database), 'source_sha256': original_hash, 'selected_sources': len(selected),
-                    'cohorts': dict(scopes), 'current_receipts': receipt_count, 'receipt_sql_bytes': receipt_bytes,
+                    'cohorts': dict(scopes), 'current_receipts': receipt_count, 'source_sql_bytes': receipt_bytes,
                     'unchanged_documents': len(documents), 'input_and_work_hashes': before,
                     'older_changes_ignored': True, 'changed_latest_runs_rejected': True,
                     'foreign_keys_valid': True, 'complete': True}

@@ -12,6 +12,9 @@ from yt_playlist.core.activity import check_cancellable_work
 MARKER = '__yt_playlist_cache__'
 LEGACY_FORMAT = 'zlib-json-v1'
 FORMAT = 'zlib-json-v2'
+HOME_MENUS = 'home-menus-v1'
+HOME_MENU_SCHEMA = 2
+HOME_PART_CHARS = 256 * 1024
 MIN_BYTES = 64 * 1024
 
 
@@ -190,6 +193,50 @@ def _select(value, keys):
         keys is not None and isinstance(value, dict)) else value
 
 
+def encode_home_menus(menus, index):
+    """Put selection fields first, followed by individually compressed menus."""
+    sections = [json.dumps(_pack(json.dumps(menu, separators=(',', ':')))) +
+                (',\n' if position + 1 < len(menus) else ']}')
+                for position, menu in enumerate(menus)]
+    parts = [(len(section) + HOME_PART_CHARS - 1) // HOME_PART_CHARS for section in sections]
+    header = json.dumps({MARKER: HOME_MENUS, 'index': _pack(json.dumps(index, separators=(',', ':'))),
+                         'parts': parts}, separators=(',', ':'))
+    return header[:-1] + ',"menus":[\n' + ''.join(sections)
+
+
+def home_menu_parts(raw):
+    header, *sections = raw.splitlines(keepends=True)
+    if not sections or not header.endswith(',"menus":[\n') or len(header) > HOME_PART_CHARS:
+        raise ValueError('Invalid Home menu index')
+    return (header, *(section[start:start + HOME_PART_CHARS] for section in sections
+                      for start in range(0, len(section), HOME_PART_CHARS)))
+
+
+def home_menu_index(header, *, max_bytes):
+    if not header.endswith(',"menus":[\n'):
+        raise ValueError('Invalid Home menu index')
+    envelope = json.loads(header.removesuffix(',"menus":[\n') + '}')
+    if envelope.get(MARKER) != HOME_MENUS:
+        raise ValueError('Invalid Home menu encoding')
+    return _home_index(envelope, lambda value: unpack(value, max_bytes=max_bytes))
+
+
+def _home_index(envelope, expand):
+    index = bounded_json.loads(expand(envelope.get('index')))
+    parts = envelope.get('parts')
+    if (not isinstance(index, dict) or not isinstance(index.get('menus'), list) or not isinstance(parts, list)
+            or not 0 < len(parts) == len(index['menus']) <= 12
+            or any(type(count) is not int or count <= 0 for count in parts)):
+        raise ValueError('Invalid Home menu sections')
+    return index, parts
+
+
+def decode_home_menu(parts, *, max_bytes):
+    section = ''.join(parts)
+    packed = json.loads(section.removesuffix(',\n').removesuffix(']}'))
+    return bounded_json.loads(unpack(packed, max_bytes=max_bytes))
+
+
 def _read(encoded, keys, *, max_bytes=None):
     """Keep compressed-profile references until the caller selects its rows."""
     remaining = max_bytes
@@ -201,8 +248,16 @@ def _read(encoded, keys, *, max_bytes=None):
         if remaining is not None:
             remaining -= len(raw.encode())
         return raw
-    envelope_keys = {MARKER, 'json', 'groups', 'profiles'}
+    envelope_keys = {MARKER, 'json', 'groups', 'profiles', 'index', 'parts'}
     value = bounded_json.loads(encoded, keys=keys | envelope_keys if keys is not None else None)
+    if isinstance(value, dict) and value.get(MARKER) == HOME_MENUS:
+        index, sections = _home_index(value, expand)
+        if keys is None or 'menus' in keys:
+            menus = value.get('menus')
+            if not isinstance(menus, list) or len(menus) != len(sections):
+                raise ValueError('Incomplete Home menu sections')
+            index['menus'] = [bounded_json.loads(expand(menu)) for menu in menus]
+        return index, None
     if isinstance(value, dict) and value.get(MARKER) == LEGACY_FORMAT:
         return bounded_json.loads(expand(value.get('json')), keys=keys), None
     if isinstance(value, dict) and value.get(MARKER) == FORMAT:

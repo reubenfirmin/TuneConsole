@@ -21,6 +21,24 @@ class PlayerEvents:
     def player_events_since(self, since_ts, kind=None):
         return self.repository.player_events_since(since_ts, kind)
 
+    def event_for_capture(self, account_id, at, capture_id):
+        return self.repository.event_for_capture(account_id, at, capture_id)
+
+    def playback_activity(self, since, until):
+        return self.repository.playback_activity(since, until)
+
+    def latest_id(self):
+        return self.repository.latest_id()
+
+    def activity_added_before(self, after_id, through):
+        return self.repository.activity_added_before(after_id, through)
+
+    def listening_exits(self, since_ts):
+        return self.repository.listening_exits(since_ts)
+
+    def rating_advance_exit_ids(self, event_ids):
+        return self.repository.rating_advance_exit_ids(event_ids)
+
     def recent_skips_with_ts(self, since_ts):
         latest = {}
         for row in self.repository.library_exits(since_ts):

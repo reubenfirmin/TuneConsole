@@ -12,6 +12,9 @@ on:
       revision:
         default: ''
         type: string
+    secrets:
+      SPARKLE_PRIVATE_ED_KEY:
+        required: false
 permissions:
   contents: read
 jobs:
@@ -45,7 +48,7 @@ jobs:
       - name: Prepare locked dependencies within their own budget
         timeout-minutes: 9
         run: python3 packaging/ci_stage.py --timeout 240 --attempts 2 macos-dependencies -- packaging/macos/build.sh --prepare-only
-      - name: Build locked app and DMG
+      - name: Build app and DMG
         timeout-minutes: 6
         run: |
           test "$(uname -m)" = "${{ matrix.arch }}"
@@ -83,6 +86,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: release-macos-${{ matrix.arch }}
+          overwrite: true
           retention-days: 30
           if-no-files-found: error
           path: |

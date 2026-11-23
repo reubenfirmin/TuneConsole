@@ -21,8 +21,7 @@ def retained_capture(conn, identity_id, captured_at, item_keys, *, source="unkno
     from yt_playlist.core import catalog
 
     with conn:
-        capture_id = conn.execute('INSERT INTO listening_capture_receipts(account_id,captured_at) VALUES (?,?)',
-                                  (identity_id, captured_at)).lastrowid
+        capture_id = conn.execute('SELECT COALESCE(MAX(capture_id),0)+1 FROM listening_observations').fetchone()[0]
         item_id = conn.execute('SELECT COALESCE(MAX(capture_item_id),0)+1 FROM listening_observations').fetchone()[0]
         for raw in item_keys:
             key = catalog.resolve_key(conn, raw) or raw

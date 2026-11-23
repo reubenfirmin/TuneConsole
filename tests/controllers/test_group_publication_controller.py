@@ -32,30 +32,26 @@ def publication():
             active.pop()
 
     files.retained.side_effect = retained
-    def describe(documents):
-        return [dict(kind=kind, value=value, digest='digest', size=10) for kind, value in documents]
-
-    def reserve(records):
-        events.extend(('pending', record['kind']) for record in records)
-        return list(range(1, len(records) + 1))
-
-    def write(records):
+    def publish(documents):
         assert active
-        assert all(record['file_id'] > 0 for record in records)
-        events.extend(('file', record['kind']) for record in records)
-        return [(record['kind'] + '.json', 'digest', 10, 0) for record in records]
+        references = []
+        for kind, _value in documents:
+            events.append(('file', kind))
+            references.append((kind + '.json', 'digest', 10, 0))
+        return references
 
-    files.describe.side_effect = describe
-    repo.reserve_files.side_effect = reserve
-    files.write_reserved.side_effect = write
+    files.publish.side_effect = publish
     repo.recording_ids.return_value = {'one': 1}
-    repo.claim_generation.return_value = 10, 11, 'owner', False
+    repo.conflicting_build.return_value = None
+
+    def claim(*_args):
+        assert active
+        events.append(('sql', 'generation'))
+        return 10, 'owner', False
+
+    repo.claim_generation.side_effect = claim
     repo.generation_reference.return_value = None
-    repo.definition_candidates.return_value = [(0, 12)]
-    repo.group_state.return_value = {'version_id': 13, 'group_id': 12, 'sealed': False,
-                                     'members': 0, 'representatives': 0}
-    repo.lineage_prefix.return_value = 0
-    repo.lineage_facts.return_value = {}
+    repo.stages.side_effect = lambda *_args: {}
     definition = {'leaf': True, 'membership_known': True, 'size': 1, 'rep_keys': ['one']}
     files.read.return_value = definition
     files.policy.return_value = {'version': 1}
@@ -67,6 +63,7 @@ def publication():
     def installing(*_args, **_kwargs):
         assert active
         events.append(('sql', 'definition'))
+        return {'group': {'id': 13, 'external_version': 'alias', 'complete': False, 'member_count': 0}}
 
     repo.install_definitions.side_effect = installing
     prepared = {'generation': 'next', 'fingerprint': 'fingerprint', 'at': 3, 'serial': 3,
@@ -74,21 +71,20 @@ def publication():
                 'payload': canonical({'recording_inputs': {'one': 'a' * 64}}).decode(),
                 'groups': [{'group_id': 'group', 'version': 'alias', 'parent_version': None,
                             'payload': canonical(definition).decode(), 'members': [('one', .9, .8)]}],
-                'unknown': [], 'edges': [], 'lineage': []}
+                'unknown': [], 'edges': []}
     return GroupPublication(repo, files, policies), prepared, events, active
 
 
 def test_files_are_published_before_their_sql_references_and_head_is_last(publication):
     service, prepared, events, active = publication
     service.publish(prepared)
-    assert events.index(('pending', 'generation')) < events.index(('file', 'generation'))
-    assert events.index(('pending', 'definition')) < events.index(('file', 'definition'))
+    assert events.index(('file', 'generation')) < events.index(('sql', 'generation'))
     assert events.index(('file', 'definition')) < events.index(('sql', 'definition'))
     service.repository.install_members.assert_called_once_with(
         10, 'owner', 13, [('one', .9, .8)], {'one': 1}, {'one': 'a' * 64})
-    service.repository.link_group.assert_called_once_with(10, 'owner', 12, 13, 0, 'alias')
-    assert service.repository.method_calls[-2:] == [
-        ('mark_ready', (10, 'owner', 1), {}), ('finish_staged', ('next', 'owner'), {})]
+    assert service.repository.method_calls[-3:] == [
+        ('seal', (10, 'owner', 13), {}), ('mark_ready', (10, 'owner', 1), {}),
+        ('finish_staged', ('next', 'owner'), {})]
     assert not active
 
 
@@ -99,17 +95,15 @@ def test_invalid_graph_scores_never_claim_a_build_or_publish_files(publication, 
     with pytest.raises(ValueError, match='scores must be finite'):
         service.stage(prepared)
     service.repository.claim_generation.assert_not_called()
-    service.files.write_reserved.assert_not_called()
-    service.repository.reserve_files.assert_not_called()
+    service.files.publish.assert_not_called()
 
 
 def test_failed_generation_file_does_not_create_a_sql_generation(publication):
     service, prepared, _events, active = publication
-    service.files.write_reserved.side_effect = OSError('disk full')
+    service.files.publish.side_effect = OSError('disk full')
     with pytest.raises(OSError, match='disk full'):
         service.publish(prepared)
     service.repository.claim_generation.assert_not_called()
-    service.repository.reserve_files.assert_called_once()
     service.repository.finish_staged.assert_not_called()
     assert not active
 
@@ -119,7 +113,7 @@ def test_live_foreign_lease_keeps_the_previous_head(publication):
     service.repository.claim_generation.side_effect = BuildUnavailable('another build')
     with pytest.raises(BuildUnavailable):
         service.publish(prepared)
-    service.repository.install_inputs.assert_not_called()
+    service.repository.install_identities.assert_not_called()
     service.repository.finish_staged.assert_not_called()
     assert not active
 
@@ -129,13 +123,18 @@ def test_interrupted_member_installation_is_retryable_without_advancing_the_head
     service.repository.install_members.side_effect = WorkClosing('stop')
     with pytest.raises(WorkClosing):
         service.publish(prepared)
-    service.repository.link_group.assert_not_called()
+    service.repository.seal.assert_not_called()
     service.repository.finish_staged.assert_not_called()
     assert not active
     service.repository.install_members.side_effect = None
-    service.repository.group_state.return_value['members'] = 1
+    service.repository.stages.side_effect = None
+    service.repository.stages.return_value = {
+        'group': {'id': 13, 'external_version': 'alias', 'complete': False, 'member_count': 1},
+    }
     service.publish(prepared)
     assert service.repository.install_members.call_count == 1
+    assert service.repository.install_definitions.call_count == 1
+    service.repository.seal.assert_called_once_with(10, 'owner', 13)
     service.repository.finish_staged.assert_called_once_with('next', 'owner')
 
 
@@ -144,42 +143,48 @@ def test_digest_match_with_different_actual_members_cannot_advance_the_head(publ
     service.repository.version_facts.return_value['members'][0] = (1, .1, .8, 'a' * 64)
     with pytest.raises(ValueError, match='digest collision'):
         service.publish(prepared)
-    service.repository.link_group.assert_not_called()
+    service.repository.seal.assert_not_called()
+    service.repository.mark_ready.assert_not_called()
     service.repository.finish_staged.assert_not_called()
 
 
-def test_reused_sealed_content_is_verified_before_linking_without_resume_counts(publication):
+def test_resumed_sealed_group_needs_no_member_counts_or_rewrites(publication):
     service, prepared, _events, _active = publication
-    service.repository.group_state.return_value = {
-        'version_id': 13, 'group_id': 12, 'sealed': True,
+    service.repository.stages.side_effect = None
+    service.repository.stages.return_value = {
+        'group': {'id': 13, 'external_version': 'alias', 'complete': True},
     }
-    service.repository.version_facts.return_value['members'][0] = (1, .1, .8, 'a' * 64)
-    with pytest.raises(ValueError, match='digest collision'):
-        service.publish(prepared)
+    service.publish(prepared)
+    service.repository.install_definitions.assert_not_called()
     service.repository.install_members.assert_not_called()
-    service.repository.install_representatives.assert_not_called()
-    service.repository.link_group.assert_not_called()
-    service.repository.finish_staged.assert_not_called()
+    service.repository.version_facts.assert_not_called()
+    service.repository.seal.assert_not_called()
+    service.repository.mark_ready.assert_called_once_with(10, 'owner', 1)
+    service.repository.finish_staged.assert_called_once_with('next', 'owner')
 
 
 def test_ready_build_only_needs_its_final_publication(publication):
     service, prepared, _events, _active = publication
-    service.repository.claim_generation.return_value = 10, 11, 'owner', True
+    service.repository.claim_generation.side_effect = None
+    service.repository.claim_generation.return_value = 10, 'owner', True
+    service.repository.generation_reference.return_value = ('generation.json', 'digest', 10, 0)
     service.publish(prepared)
-    service.repository.install_inputs.assert_not_called()
+    service.files.publish.assert_not_called()
+    service.repository.install_identities.assert_not_called()
     service.repository.install_definitions.assert_not_called()
     service.repository.finish_staged.assert_called_once_with('next', 'owner')
 
 
-def test_same_version_cannot_silently_reuse_changed_temporal_evidence(publication):
+def test_resumed_version_cannot_silently_reuse_changed_recording_evidence(publication):
     service, prepared, _events, _active = publication
-    value = {'old_share': .5, 'new_share': .5, 'overlap': 1, 'compatible': True}
-    prepared['lineage'] = [('before', 'alias', 'continuation', canonical(value).decode())]
-    previous = {'relation': 'continuation'}
-    service.repository.lineage_facts.return_value = {('before', 'alias'): previous}
-    original_read = service.files.read.return_value
-    service.files.read.side_effect = lambda row, kind: ({**value, 'overlap': 2} if kind == 'lineage' else original_read)
-    with pytest.raises(ValueError, match='Temporal musical group evidence changed'):
+    service.repository.stages.side_effect = None
+    service.repository.stages.return_value = {
+        'group': {'id': 13, 'external_version': 'alias', 'complete': False, 'member_count': 1},
+    }
+    prepared['payload'] = canonical({'recording_inputs': {'one': 'b' * 64}}).decode()
+    with pytest.raises(ValueError, match='digest collision'):
         service.publish(prepared)
-    service.repository.install_lineage.assert_not_called()
+    service.repository.install_members.assert_not_called()
+    service.repository.seal.assert_not_called()
+    service.repository.mark_ready.assert_not_called()
     service.repository.finish_staged.assert_not_called()

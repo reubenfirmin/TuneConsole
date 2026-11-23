@@ -14,7 +14,7 @@ from yt_playlist.web.spotify_import import current_job
 @pytest.mark.parametrize('phase', ['prepare', 'confirm'])
 @pytest.mark.parametrize('failure', ['persistence', 'thread-create', 'thread-start', 'provider'])
 def test_failed_start_releases_import_for_recovery_and_retry(store, monkeypatch, phase, failure):
-    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     app = create_app(store, lambda: {iid: AlbumClient()}, now_fn=lambda: 1000, background_work=False)
     ctx = app.state.ctx
     web = TestClient(app, base_url='http://127.0.0.1:8123')

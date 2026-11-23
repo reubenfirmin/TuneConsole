@@ -28,7 +28,7 @@ def descriptions():
 
     def outside_transaction(value):
         def operation(*args):
-            assert not writing, 'Paid-description file I/O must run outside the SQL transaction'
+            assert not writing, 'Policy publication must run outside the request transaction'
             return value
         return operation
 
@@ -36,20 +36,19 @@ def descriptions():
     repository.canonical_album.side_effect = lambda identity: identity
     repository.request_for.return_value = None
     repository.request.return_value = None
-    repository.legacy_usage.return_value = None
     repository.active_request.return_value = None
     repository.usage.return_value = 0
     repository.access_rows.return_value = []
     repository.access_state.return_value = None
     repository.reserve.return_value = 7
-    repository.reserve_result.side_effect = outside_transaction(257)
+    def complete(*args):
+        assert writing
+
+    repository.complete.side_effect = complete
     repository.mark_sent.return_value = True
     policies = Mock()
     policies.publish.side_effect = outside_transaction(None)
-    return AlbumDescriptions(repository,
-        Mock(side_effect=outside_transaction(json.dumps(ready_record()))),
-        Mock(side_effect=outside_transaction(('result-file', 'result-digest', 90))),
-        policies)
+    return AlbumDescriptions(repository, policies)
 
 
 def ready_record():
@@ -60,7 +59,7 @@ def ready_record():
 def request(**values):
     return {'id': 7, 'status': 'sent', 'claim_token': 'owner', 'lease_until': 160,
             'attempt_count': 2, 'credential_key': 'credential', 'retry_at': 0,
-            'outcome_filename': 'result-file', 'outcome_digest': 'result-digest', **values}
+            'outcome_json': json.dumps(ready_record()), **values}
 
 
 @pytest.mark.parametrize('album,expected', [
@@ -76,14 +75,10 @@ def test_only_explicit_and_agreeing_release_evidence_identifies_an_album(descrip
     assert descriptions.album_id(album) == expected
 
 
-def test_legacy_summary_composes_proposals_without_paid_request_sql(descriptions):
-    descriptions.installed = False
-    descriptions.proposals = Mock()
-    descriptions.proposals.get_proposals.side_effect = [
-        {'paid': {'description': {'kind': 'generated'}}, 'editorial': {'description': {'kind': 'editorial'}},
-         'missing': {}}, {'requested': True}]
+def test_summary_reads_completed_and_pending_paid_requests(descriptions):
+    descriptions.repository.summary.return_value = (1, True)
     assert descriptions.summary() == (1, True)
-    descriptions.repository.summary.assert_not_called()
+    descriptions.repository.summary.assert_called_once_with('ready', ('pending', 'claimed', 'sent'))
 
 
 def test_reservation_counts_the_attempt_after_independent_policy_publication(descriptions):
@@ -97,12 +92,11 @@ def test_reservation_counts_the_attempt_after_independent_policy_publication(des
         (descriptions.policy_version({'model': 'exact-model'}), json.dumps({'model': 'exact-model'}), 86401)])
 
 
-def test_saved_success_is_read_after_sql_commit_even_when_the_limit_is_zero(descriptions):
+def test_saved_success_is_read_even_when_the_limit_is_zero(descriptions):
     descriptions.repository.request_for.return_value = 7
     descriptions.repository.request.return_value = request(status='ready')
     assert descriptions.claim(3, {}, 'new-key', 0, 100) == {'status': 'cached', 'record': ready_record()}
     descriptions.repository.reserve.assert_not_called()
-    descriptions.read_result.assert_called_once_with('result-file', 'result-digest')
 
 
 def test_current_paid_claim_blocks_other_albums_without_spending_again(descriptions):
@@ -129,15 +123,15 @@ def test_unsent_expiry_replaces_the_token_and_preserves_attempt_count(descriptio
     descriptions.repository.expire_request.assert_called_once_with(7, 'paused', False, 161)
 
 
-@pytest.mark.parametrize('legacy,expected', [
-    ({'lease_until': 110, 'claim_token': None, 'send_authorized': False, 'status': 'paused'},
-     {'status': 'busy', 'retry_at': 110}),
-    ({'lease_until': 0, 'claim_token': 'legacy', 'send_authorized': True, 'status': 'sent'},
-     {'status': 'uncertain'}),
+@pytest.mark.parametrize('state,expected', [
+    ({'status': 'busy', 'retry_at': 110}, {'status': 'busy', 'retry_at': 110}),
+    ({'status': 'uncertain', 'retry_at': 110}, {'status': 'busy', 'retry_at': 110}),
+    ({'status': 'uncertain', 'retry_at': 0}, {'status': 'uncertain'}),
 ])
-def test_legacy_usage_does_not_acquire_an_invented_album_owner(descriptions, legacy, expected):
-    descriptions.repository.legacy_usage.return_value = legacy
+def test_unattributed_request_blocks_admission(descriptions, state, expected):
+    descriptions.repository.access_state.return_value = state
     assert descriptions.claim(3, {}, 'credential', 20, 100) == expected
+    descriptions.repository.access_state.assert_called_once_with('unattributed_request', '')
     descriptions.repository.reserve.assert_not_called()
 
 
@@ -157,8 +151,8 @@ def test_auth_block_takes_precedence_over_a_longer_host_cooldown(descriptions):
 
 def test_unknown_result_is_a_negative_cache_until_its_retry_time(descriptions):
     descriptions.repository.request_for.return_value = 7
-    descriptions.repository.request.return_value = request(status='unknown', retry_at=200)
-    descriptions.read_result.side_effect = lambda *args: '{"status":"unknown"}'
+    descriptions.repository.request.return_value = request(status='unknown', retry_at=200,
+        outcome_json='{"status":"unknown"}')
     assert descriptions.claim(3, {}, 'credential', 5, 100) == {'status': 'cached', 'record': {'status': 'unknown'}}
     descriptions.repository.reserve.assert_not_called()
 
@@ -179,86 +173,35 @@ def test_authorization_requires_this_days_counted_current_claim(descriptions, ch
     assert descriptions.repository.mark_sent.called is expected
 
 
-def test_completion_publishes_before_receipting_and_records_usage_once(descriptions):
+def test_completion_saves_outcome_and_usage_together(descriptions):
     descriptions.repository.request.return_value = request()
     assert descriptions.finish(7, 'owner', ready_record(), 100)
-    arguments = descriptions.repository.complete.call_args
-    assert arguments.args == (7, 2, 'owner', {'status': 'ready', 'token': None, 'retry_at': 0, 'access': None},
-        ('result-file', 'result-digest', 90), {'total_tokens': 10}, 0, 100)
-    assert arguments.kwargs == {'file_id': 257, 'model': 'exact-model'}
-    assert descriptions.publish_result.call_args.args[0] == 257
-    assert json.loads(descriptions.publish_result.call_args.args[1]) == ready_record()
-    assert descriptions.repository.request.call_count == 2
+    request_id, attempt, token, decision, raw, usage, day, now = descriptions.repository.complete.call_args.args
+    assert (request_id, attempt, token) == (7, 2, 'owner')
+    assert decision == {'status': 'ready', 'token': None, 'retry_at': 0, 'access': None}
+    assert json.loads(raw) == ready_record()
+    assert (usage, day, now) == ({'total_tokens': 10}, 0, 100)
+    descriptions.repository.request.assert_called_once_with(7)
 
 
 def test_stale_owner_cannot_publish_a_result(descriptions):
     descriptions.repository.request.return_value = request(claim_token='new-owner')
     assert not descriptions.finish(7, 'owner', ready_record(), 100)
-    descriptions.repository.reserve_result.assert_not_called()
-    descriptions.publish_result.assert_not_called()
     descriptions.repository.complete.assert_not_called()
 
 
-def test_claim_is_rechecked_after_file_publication(descriptions):
-    descriptions.repository.request.side_effect = [request(), request(claim_token='new-owner')]
-    assert not descriptions.finish(7, 'owner', ready_record(), 100)
-    descriptions.publish_result.assert_called_once()
-    descriptions.repository.complete.assert_not_called()
-
-
-def test_failed_file_publication_leaves_request_and_usage_untouched(descriptions):
-    descriptions.repository.request.return_value = request()
-    descriptions.publish_result.side_effect = OSError('disk unavailable')
-    with pytest.raises(OSError, match='disk unavailable'):
-        descriptions.finish(7, 'owner', ready_record(), 100)
+def test_oversized_result_is_rejected_before_starting_the_transaction(descriptions):
+    with pytest.raises(ValueError, match='byte limit'):
+        descriptions.finish(7, 'owner', {**ready_record(), 'extra': 'x' * 262144}, 100)
     descriptions.repository.transaction.assert_not_called()
     descriptions.repository.complete.assert_not_called()
-
-
-@pytest.mark.parametrize('usage,now,status,count', [
-    ({'day': 0, 'requests': 2}, 100, 'daily_limit', None),
-    ({'day': 0, 'requests': 2}, 86400, 'reserved', 1),
-    ({'day': 0, 'requests': 1}, 100, 'reserved', 2),
-    ({'day': 0, 'requests': 1, 'lease_until': 101}, 100, 'busy', None),
-])
-def test_legacy_admission_keeps_day_budget_and_active_reservation(descriptions, usage, now, status, count):
-    values = {'album_description_usage': usage}
-    descriptions.repository.legacy_record.side_effect = values.get
-    result = descriptions.legacy_claim('release', 'credential', 2, now)
-    assert result['status'] == status
-    if count is None:
-        descriptions.repository.store_legacy_records.assert_not_called()
-    else:
-        saved = dict(descriptions.repository.store_legacy_records.call_args.args[0])['album_description_usage']
-        assert saved['requests'] == count and saved['day'] == int(now // 86400)
-        assert saved['token'] == result['token'] and not saved['send_authorized']
-
-
-@pytest.mark.parametrize('changes', [
-    {'token': 'other'}, {'credential': 'other'}, {'day': -1}, {'lease_until': 100},
-    {'status': 'ready'}, {'send_authorized': True}, {'requests': 3},
-])
-def test_legacy_authorization_rejects_changed_or_consumed_reservations(descriptions, changes):
-    usage = {'token': 'owner', 'credential': 'credential', 'day': 0, 'lease_until': 101,
-             'status': 'pending', 'requests': 1, 'send_authorized': False, **changes}
-    descriptions.repository.legacy_record.return_value = usage
-    assert not descriptions.legacy_authorize('owner', 'credential', 2, 100)
-    descriptions.repository.store_legacy_records.assert_not_called()
-
-
-def test_legacy_completion_cannot_replace_successful_paid_copy(descriptions):
-    descriptions.repository.legacy_record.side_effect = {
-        'album_description:release': {'description': 'Purchased copy'},
-        'album_description_usage': {'token': 'other'}}.get
-    descriptions.legacy_finish('release', 'owner', {'status': 'unavailable', 'retry_at': 200}, 100)
-    descriptions.repository.store_legacy_records.assert_called_once_with([], 100)
 
 
 def test_unsent_claim_cannot_accept_paid_output(descriptions):
     descriptions.repository.request.return_value = request(status='claimed')
     with pytest.raises(ValueError, match='authorized transport'):
         descriptions.finish(7, 'owner', ready_record(), 100)
-    descriptions.publish_result.assert_not_called()
+    descriptions.repository.complete.assert_not_called()
 
 
 def test_unavailable_send_remains_uncertain_and_blocks_the_host(descriptions):

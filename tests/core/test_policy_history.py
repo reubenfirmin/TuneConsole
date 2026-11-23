@@ -1,10 +1,11 @@
 """Historical attribution survives body expiry, rollback and independent restore."""
 from tests.file_custody_support import export_owner, restore_owner
 import shutil
+import sqlite3
 
 import pytest
 
-from yt_playlist.core import fao, policy_history as owner, policy_documents
+from yt_playlist.core import fao, policy_history_read as owner, policy_documents
 from yt_playlist.core.db_writes import atomic_write
 from tests.file_preparation_support import policy_history
 from yt_playlist.core.store import Store
@@ -39,7 +40,7 @@ def test_candidate_scan_is_off_writer_and_new_operational_owner_is_rechecked(fil
     assert store.rec_ledger.policy_configuration('candidate') == {'exact': True}
     assert store.conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',
                               ('candidate',)).fetchone()
-    assert not store.conn.execute('SELECT 1 FROM recommendation_policy_history').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_policy_archive_refs').fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -55,20 +56,20 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
         with pytest.raises(OSError,match='disk full'):
             policy_history.prepare(store,now=10000)
     assert store.rec_ledger.policy_configuration(historical) == expected
-    assert store.conn.execute("SELECT file_status FROM policy_history_files").fetchone()[0] == 'pending'
-    from yt_playlist.repos import policy_history_files
-    complete = policy_history_files.complete
-
-    def interrupted(conn, record):
-        complete(conn, record)
-        raise OSError('SQL status interruption')
-
-    with monkeypatch.context() as patch:
-        patch.setattr(policy_history_files, 'complete', interrupted)
-        with pytest.raises(OSError, match='SQL status interruption'):
+    assert not store.conn.execute('SELECT 1 FROM recommendation_policy_archive_refs').fetchone()
+    with atomic_write(store):
+        store.conn.execute('CREATE TEMP TRIGGER interrupt_policy_archive BEFORE DELETE ON recommendation_policies '
+                           "BEGIN SELECT RAISE(ABORT,'SQL archive interruption'); END")
+    try:
+        with pytest.raises(sqlite3.IntegrityError, match='SQL archive interruption'):
             policy_history.prepare(store, now=10000)
+    finally:
+        with atomic_write(store):
+            store.conn.execute('DROP TRIGGER interrupt_policy_archive')
     assert store.rec_ledger.policy_configuration(historical) == expected
-    assert [row[0] for row in store.conn.execute('SELECT file_status FROM policy_history_files')] == ['pending', 'pending']
+    assert not store.conn.execute('SELECT 1 FROM recommendation_policy_archive_refs').fetchone()
+    assert store.conn.execute('SELECT primary_policy_version,pool_policy_version '
+                              'FROM rec_served_impressions').fetchone()[:] == (historical, historical)
     with store.read_view() as snapshot:
         assert policy_history.prepare(store,now=10000) == 1
         assert policy_documents.configuration(snapshot.conn,historical) == expected
@@ -76,7 +77,9 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
     assert store.rec_ledger.policy_configuration(historical) == expected
     assert not store.conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',(historical,)).fetchone()
     assert store.conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',(live,)).fetchone()
-    assert store.conn.execute('SELECT count(*) FROM historical_impression_policies').fetchone()[0] == 2
+    assert store.conn.execute('SELECT primary_historical_version,pool_historical_version '
+                              'FROM rec_served_impressions').fetchone()[:] == (historical, historical)
+    assert list(owner.archive_ids(store.conn)) == [3]
     assert owner.document(store.conn,historical)['base']['version'] == base[0]
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
     manifest = export_owner(store.conn, owner,tmp_path/'saved')
@@ -87,11 +90,11 @@ def test_impression_only_history_keeps_exact_shared_configuration_and_compact_id
         restore_owner(restored.conn, 'policy-history', owner,manifest)
         restored.init_schema()
         assert restored.rec_ledger.policy_configuration(historical) == expected
-        with atomic_write(restored):
-            assert owner.expire(restored.conn,181*86400) == 1
+        assert restored.rec_ledger.maintain_policy_history(181*86400) == 1
         assert restored.rec_ledger.policy_configuration(historical) is None
-        assert restored.conn.execute('SELECT state FROM recommendation_policy_history').fetchone()[0] == 'expired'
-        assert restored.conn.execute('SELECT count(*) FROM historical_impression_policies').fetchone()[0] == 2
+        assert restored.conn.execute('SELECT state FROM recommendation_policy_archive_refs').fetchone()[0] == 'expired'
+        assert restored.conn.execute('SELECT primary_historical_version,pool_historical_version '
+                                     'FROM rec_served_impressions').fetchone()[:] == (historical, historical)
         # Expired diagnostics never remove the live prepared policy or its base.
         assert restored.conn.execute('SELECT 1 FROM recommendation_policies WHERE version=?',(live,)).fetchone()
     finally:
@@ -104,8 +107,8 @@ def test_missing_required_history_is_a_failure_and_queued_policy_can_republish(s
     store.rec_ledger.record_served_impressions('old','home',[{'key':'song','rank':1,'model_version':'old'}],10000)
     assert policy_history.prepare(store,now=10000) == 1
     store.rec_ledger.record_served_impressions('later','home',[{'key':'song','rank':1,'model_version':'old'}],10001)
-    assert store.conn.execute('SELECT count(*) FROM historical_impression_policies').fetchone()[0]==2
-    assert not store.conn.execute("SELECT 1 FROM recommendation_impression_policies WHERE raw_version='old'").fetchone()
+    assert store.conn.execute("SELECT count(*) FROM rec_served_impressions WHERE primary_historical_version='old'").fetchone()[0] == 2
+    assert not store.conn.execute("SELECT 1 FROM rec_served_impressions WHERE primary_policy_version='old'").fetchone()
     with atomic_write(store):
         policy_documents.install(store.conn,*capture)
     assert store.rec_ledger.policy_configuration('old') == {'exact':True}
@@ -134,5 +137,6 @@ def test_large_configuration_cohort_uses_byte_bounded_batches_and_converges(stor
     assert sum(counts)==len(configs)
     assert max(counts)<len(configs)
     assert all(store.rec_ledger.policy_configuration(version)==config for version,config in configs.items())
-    assert store.conn.execute('SELECT count(*) FROM historical_impression_policies').fetchone()[0]==len(configs)
+    assert store.conn.execute('SELECT count(*) FROM rec_served_impressions '
+                              'WHERE primary_historical_version IS NOT NULL').fetchone()[0] == len(configs)
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

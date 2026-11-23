@@ -11,6 +11,7 @@ from tests.store_fixture_support import (
 )
 
 from yt_playlist.core import embeddings
+from yt_playlist.core.model_state import ArtistModelUpdate, RecordingModelUpdate
 from yt_playlist.core.migrations import registry, regular, runner
 from yt_playlist.core.store import Store
 from yt_playlist.rec import invalidation
@@ -62,8 +63,8 @@ def _identity_inputs(store, *, current):
                 ('rec_content_model', MODEL), ('rec_artist_content_model', MODEL)])
         store.conn.execute("INSERT INTO rec_model_selection_runs(started_at,result_json,identity_version) VALUES (1,'evidence',2)")
     if current:
-        store.settings.set_setting('rec_content_model', MODEL)
-        store.settings.set_setting('rec_artist_content_model', MODEL)
+        store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder=MODEL),
+                                            artist=ArtistModelUpdate(encoder=MODEL))
     return {
         'history': list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version'))),
         'subjects': list(map(tuple, store.conn.execute('SELECT id,identity_key FROM recordings'))),
@@ -74,7 +75,8 @@ def _identity_inputs(store, *, current):
 @pytest.mark.parametrize('change', ['model', 'artist'])
 def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, change):
     from tests.onboarding_support import publish_personal_mix
-    from yt_playlist.rec import home_prepared, onboarding, tv
+    from yt_playlist.rec import home_prepared, onboarding, tv, tv_artwork
+    from yt_playlist.util.matching import search_squash
 
     # Invalidation consumes completed menus and TV output. The actual resolver
     # and bounded producer/recovery loop have their owners in test_tv.
@@ -93,6 +95,13 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     }, 1000)
     previous_tv = tv.cached(store)
     assert previous_tv and tv.queue(store, 1000)
+    artist = 'Retained TV Artist'
+    artwork_key = search_squash(artist)
+    retained_photo, prepared_photo = 'https://img/retained.jpg', 'https://img/prepared.jpg'
+    store.discovery.upsert_discovered_artist(artist, 1, [], [], retained_photo, 1000)
+    assert tv_artwork.request(store, artist, 1000)
+    store.rec_proposals.put_proposals(tv_artwork.SURFACE, {artwork_key: {'images': [prepared_photo]}}, 1000)
+    assert tv_artwork.images(store, artist)[0] == [retained_photo, prepared_photo]
     previous_mix = home_prepared.peek(store, 1000)
     serving = {surface: store.rec_proposals.get_proposals(surface)
                for surface in ('home_prepared', 'home_tuned')}
@@ -110,6 +119,8 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     assert store.rec_proposals.choice_usage()['episodes'] == {'mixes': 2}
     assert store.rec_proposals.revisit_remaining() == ['rediscover_tracks']
     assert tv.cached(store) == previous_tv
+    assert tv.queue(store, 1001)
+    assert tv_artwork.images(store, artist)[0] == [retained_photo, prepared_photo]
     assert onboarding.prepared_mixes_ready(store, 1001)
     key = previous_mix['menus'][0]['protos'][0]['tracks'][0]['key']
     seed_dislike(store, key, until=None, now=1002)
@@ -123,6 +134,9 @@ def test_refresh_retains_playable_menus_usage_and_tv_until_replacement(store, ch
     assert not onboarding.prepared_mixes_ready(store, 1002)
     assert not store.rec_proposals.choice_usage()
     assert tv.cached(store) is None
+    assert store.rec_proposals.get_proposals(tv_artwork.SURFACE) is None
+    assert store.rec_proposals.get_proposals(tv_artwork.REQUESTS) == {artwork_key: artist}
+    assert tv_artwork.images(store, artist) == ([retained_photo], {})
 
 
 @pytest.mark.parametrize('current', [True])
@@ -151,7 +165,7 @@ def test_identity_invalidation_policy_preserves_eligible_spaces_and_rollback_evi
         vectors = {table: embeddings.rows(store.conn, table) for table in (*track_tables, *artist_tables)}
         assert all(vectors[table] == [('key', bytes.fromhex('0000803F'))] for table in track_tables)
         assert all(vectors[table] == [('@artist:1', bytes.fromhex('0000803F'))] for table in artist_tables)
-        store.settings.set_setting('rec_artist_fit_inputs', 'artist inputs')
+        store.rec_model.publish_model_state(artist=ArtistModelUpdate(fit_fingerprint='artist inputs'))
         with store.conn:
             if change=='artist':
                 invalidation.artist_reconciled(store.conn)
@@ -163,14 +177,14 @@ def test_identity_invalidation_policy_preserves_eligible_spaces_and_rollback_evi
             assert all(embeddings.rows(store.conn, table) == vectors[table] for table in track_tables)
             assert all(count(table)==0 for table in artist_tables)
             assert store.rec_proposals.get_proposals('home_choice') is None
-            assert store.settings.get_setting('rec_content_model') == model
-            assert store.settings.get_setting('rec_artist_content_model') is None
-            assert store.settings.get_setting('rec_artist_fit_inputs') is None
+            assert store.rec_model.recording_encoder() == model
+            assert store.rec_model.artist_encoder() is None
+            assert store.rec_model.artist_state().fit_fingerprint is None
         else:
             assert all(count(table)==1 for table in (*track_tables,*artist_tables))
             assert all(embeddings.rows(store.conn, table) == vectors[table] for table in vectors)
             assert store.rec_proposals.get_proposals('home_choice') == {'marker': 'artist-choice'}
-        assert store.conn.execute("SELECT 1 FROM rec_change_queue WHERE kind='refresh' AND item=''").fetchone()
+        assert store.rec_refresh.revision() is not None
         evidence = store.conn.execute('SELECT result_json,identity_version FROM rec_model_selection_runs').fetchone()
         assert tuple(evidence)==('evidence',0)
         assert list(map(tuple, store.conn.execute(

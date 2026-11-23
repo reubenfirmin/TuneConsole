@@ -12,7 +12,6 @@ from yt_playlist.rec import measurement, mode_inputs, mode_surfaces
 from yt_playlist.repos import recommendation_publication as publication
 from yt_playlist.core import policy_config, recommendation_pools as pools
 from yt_playlist.rec import recommendation_retirement
-from yt_playlist.controllers import mode_preparation
 from yt_playlist.library import mode_composition
 
 
@@ -49,7 +48,7 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
         store.rec_ledger.record_serving_policy(version, {'algorithm': version}, -10000)
     old = plan(store, 'old-large', fingerprint='b' * 64,
                candidates=[pools.Candidate(i, 1 / i) for i in range(1, 1303)])
-    old_pool = pools.prepare('wheelhouse', 'expired-pool-policy', None, 'b' * 64, 'card', old.slots[0].pool.candidates)
+    old_pool = pools.prepare('wheelhouse', 'expired-pool-policy', 'b' * 64, 'card', old.slots[0].pool.candidates)
     old = replace(old, policy_version='expired-pool-policy',
                   slots=tuple(replace(slot, pool=old_pool) for slot in old.slots))
     previous = publish_plan(store, old)
@@ -60,7 +59,7 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
     expired = store.recommendations.claim(expired_plan)
     store.recommendations.stage(expired_plan, expired)
     with store.conn:
-        store.conn.execute('UPDATE recommendation_builds SET expires_at=0 WHERE generation_id=?',
+        store.conn.execute('UPDATE recommendation_generations SET build_expires_at=0 WHERE id=?',
                            (expired.generation_id,))
     # Detach old ownership first. The real incident already had no generation
     # headers for most of its orphan pools, so that must not satisfy the gate.
@@ -71,17 +70,14 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
     assert store.recommendations.retirement_pending()
     original = publication.cleanup_pools
     reads, failed = [], False
-    if interrupted:
-        # Force an incomplete durable prefix without constructing a giant
-        # fixture. The ordinary variant exercises the larger recovery batch.
-        monkeypatch.setattr(recommendation_retirement, 'BATCH_ROWS', 1024)
 
     def prefix(repo, **kwargs):
         nonlocal failed
         result = original(repo, **kwargs)
         if result:
-            if not interrupted:
-                assert result.rows > 1024
+            assert result.rows <= publication.CLEANUP_ROWS
+            if not reads:
+                assert result.rows == publication.CLEANUP_ROWS
             assert store.activity_paused and not store.conn.in_transaction
             def browse():
                 assert store.settings.get_setting('safe-browse') is None
@@ -104,12 +100,12 @@ def test_priority_drain_resumes_orphan_children_and_preserves_live_shared_and_bu
             recommendation_retirement.drain(store, 10000)
         assert store.activity_paused and store._recommendation_retirement_error == 'OSError'
         assert store.recommendations.retirement_pending()
-        assert store.conn.execute('SELECT 1 FROM recommendation_pool_retirements').fetchone()
+        assert store.conn.execute('SELECT 1 FROM recommendation_pools WHERE retiring=1').fetchone()
         # Reconstruct process-local admission; remaining SQL is the recovery
         # source of truth even when a previous process's flag no longer exists.
         del store._recommendation_retirement_pending
     recommendation_retirement.drain(store, 10000)
-    assert reads and not store.activity_paused
+    assert len(reads) > 1 and not store.activity_paused
     assert not store.recommendations.retirement_pending()
     assert not store.rec_ledger.policy_retirement_pending(10000)
     assert store.rec_ledger.policy_configuration('expired-pool-policy') is None
@@ -151,7 +147,7 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
     assert store.rec_ledger.policy_configuration(head['policy_version']) == {
         'algorithm': 'actual-controlled-inputs', 'params': {'minimum': 2}, 'ranker': 'prepared-bundle'}
     assert store.settings.get_setting('rec_candidate_preferences') == '10'
-    assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE build_owner IS NOT NULL').fetchone()
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')").fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     first_pool = store.recommendations.page('home', 'all', 'wheelhouse')[0]['pool_policy']
@@ -164,11 +160,12 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
         batches.append((rows, bases))
         if retired:
             with store.conn:
-                store.conn.execute('DELETE FROM recommendation_heads WHERE generation_id=?', (generation,))
+                store.conn.execute('UPDATE recommendation_generation_surfaces SET selected=0 WHERE generation_id=?',
+                                   (generation,))
             collect(store)
             assert not store.conn.execute('SELECT 1 FROM recommendation_pools').fetchone()
             with store.conn:
-                result = store.rec_ledger.prune_policies([head['policy_version'], first_pool], None)
+                result = store.rec_ledger.prune_policies([head['policy_version'], first_pool])
             assert result['policies_deleted'] == 2
             assert store.rec_ledger.policy_configuration(first_pool) is None
         return record(rows, bases)
@@ -189,12 +186,9 @@ def test_staged_worker_publishes_captured_policy_generation_and_settings_togethe
     assert store.rec_ledger.policy_configuration(first_pool)['params'] == {'minimum': 2}
     current_policy = store.recommendations.page('home', 'all', 'wheelhouse')[0]['pool_policy']
     assert store.rec_ledger.policy_configuration(current_policy)['params'] == {'minimum': 3}
-    # The regular schema worker can install this owner after a long-lived
-    # serving Store was bound. A cheap direct lookup must adopt that new table.
-    store._recommendation_revalidations = False
     assert store.recommendations.pool('home', 'all', 'wheelhouse')['source_policy_version'] == first_pool
     with store.conn:
-        assert store.rec_ledger.prune_policies([row[0] for row in rows], None)['policies_deleted'] == 0
+        assert store.rec_ledger.prune_policies([row[0] for row in rows])['policies_deleted'] == 0
     assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == before
     assert store.settings.get_setting('rec_candidate_preferences') == '11'
 
@@ -254,7 +248,6 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         lanes = {'wheelhouse': items}
         return {'all': lanes, '_meta': {'full_pools': True}}, []
     monkeypatch.setattr(mode_inputs, '_calculate_bundles', calculate)
-    monkeypatch.setattr(mode_preparation, 'encode_proposals', lambda *args: pytest.fail('Encoded the obsolete bundle'))
     if capacity == 'invalid-batch':
         monkeypatch.setattr(policy_config, 'MAX_BATCH_BYTES', 4)
         with pytest.raises(ValueError, match='publication budget'):
@@ -271,7 +264,7 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
                 mode_surfaces.prepare_bundles(store, now)
             assert store.recommendations.head('home')['id'] == first
             assert not store.conn.in_transaction
-            assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
+            assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE build_owner IS NOT NULL').fetchone()
         assert calculations == [11], 'Capacity retries repeated ranking'
         deferred = store._deferred_bundles
         assert deferred.snapshot._reader_released
@@ -280,7 +273,7 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
         if capacity == 'changed-inputs':
             store.settings.set_setting('bundle-guard', 'changed')
         with store.conn:
-            pruned = store.rec_ledger.prune_policies(['expired'], None)
+            pruned = store.rec_ledger.prune_policies(['expired'])
         assert pruned['policies_deleted'] == 1
         result = mode_surfaces.prepare_bundles(store, 14)
         assert result['all']['wheelhouse'][0]['key'] == 'one'
@@ -295,13 +288,11 @@ def test_ordinary_worker_uses_typed_publication_without_serializing_a_legacy_bun
     assert not store.conn.execute("SELECT 1 FROM rec_proposals WHERE surface IN ('mode_bundles','fresh_pool')").fetchone()
 
 
-def test_readiness_follows_committed_heads_without_reading_legacy_documents(recommendations, policies, monkeypatch):
+def test_readiness_follows_committed_heads(recommendations, policies):
     store = recommendations
-    from yt_playlist.repos import proposal_cache
-    monkeypatch.setattr(proposal_cache, 'head', lambda *args, **kwargs: pytest.fail('Read a legacy pool head'))
-    assert not store.rec_proposals.has_proposals('mode_bundles')
-    assert not store.rec_proposals.has_proposals('fresh_pool')
+    assert store.recommendations.head('home') is None
+    assert store.recommendations.head('fresh') is None
     publish(store)
-    assert store.rec_proposals.has_proposals('mode_bundles')
-    assert store.rec_proposals.has_proposals('fresh_pool')
+    assert store.recommendations.head('home') is not None
+    assert store.recommendations.head('fresh') is not None
     assert mode_surfaces.bundle_metadata(store) == {'full_pools': 1}

@@ -169,16 +169,6 @@ main.page-clusters { max-width: none; margin: 0; padding: 0; animation: none; }
   width: 230px; background: var(--cluster-seed-bg); border-color: var(--accent);
   box-shadow: 0 0 0 2px var(--accent-soft), var(--shadow);
 }
-/* #14 colour-coding: a track card is tinted by its branch hue; depth desaturates/lightens it (the
-   hue vars are set inline per node, see app.js nodeStyle). Declared before .trunk/.pruned so those
-   states still override the border colour. */
-.cluster-node.track {
-  border-color: hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%));
-  background: color-mix(in srgb, var(--surface) 88%,
-              hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%)) 12%);
-  box-shadow: 0 0 0 1px hsl(var(--node-hue, 210) var(--node-sat, 60%) var(--node-light, 60%) / 0.22),
-              var(--shadow);
-}
 /* #30 a clicked (trunk) card: green edge so the spine reads as one piece with its highlighted lines */
 .cluster-node.trunk { border-color: var(--cta); box-shadow: 0 0 0 1px color-mix(in srgb, var(--cta) 35%, transparent), var(--shadow); }
 /* Pruned = a spent negative-signal marker: shrink to a single struck-through line. */

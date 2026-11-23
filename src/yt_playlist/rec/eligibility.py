@@ -3,25 +3,31 @@
 
 def comfort_tracks(store, tracks, now):
     """Recheck listening and favorite status for the bounded prepared selection."""
-    from yt_playlist.rec import rec_params
-    keys = {track['key'] for track in tracks}
+    from yt_playlist.rec import candidate_policy, rec_params
+    keys = tuple(sorted({track['key'] for track in tracks}))
     if not keys:
         return []
-    eligible = {row['key'] for row in store.rec_candidates.comfort_candidates(now,
-        min_plays=rec_params.get_param(store, 'comfort_min_plays'),
-        recency_full_days=rec_params.get_param(store, 'comfort_recency_full_days'),
-        keys=keys, limit=len(keys))}
+
+    # Listening and likes can be reused across visits. Evaluate the moving
+    # rest cutoff on every response against the same committed inputs.
+    facts = store.memoized_read(('comfort-facts', keys), lambda: store.rec_candidates.comfort_facts(keys))
+    policy = candidate_policy.comfort_criteria(now, rec_params.get_param(store, 'comfort_min_plays'),
+        rec_params.get_param(store, 'comfort_recency_full_days'))
+    eligible = {row['key'] for row in facts if (row['liked'] or row['plays'] >= policy.repeated_plays)
+                and (row['last_played'] is None or row['last_played'] <= policy.month)}
     return [track for track in tracks if track['key'] in eligible]
 
 
-def home_exclusions(store, keys, now):
+def home_exclusions(store, keys, now, *, check_genres=True):
     """Feedback and canonical artist/genre bans.
 
-    Keep this bounded to offered candidates. Lane-specific ownership and requested genre
-    constraints are applied by the caller against its current candidate metadata.
+    Pass None to share the current exclusions across lanes on the same reader.
+    Lane-specific ownership and requested genres use the caller's candidate metadata.
     """
+    if keys is None:
+        return store.memoized_read(('home-exclusions', now, check_genres),
+            lambda: store.rec_model.suppressed_keys('for_you', now, check_genres=check_genres))
     keys = set(keys)
     if not keys:
         return set()
-    return (store.rec_eligibility.suppressed_candidate_keys(keys, now)
-            | store.rec_model.suppressed_keys("for_you", now, keys=keys))
+    return store.rec_model.suppressed_keys("for_you", now, keys=keys, check_genres=check_genres)

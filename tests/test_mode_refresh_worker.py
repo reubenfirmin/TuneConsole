@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.rec import (content_model, embedding_training as training, embedding_vectors as embed, measurement,
                              model_refresh, mode_inputs, mode_surfaces, rec_params, rec_worker, taste_modes)
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
@@ -25,7 +26,7 @@ def disable_periodic_library_sync():
 
 
 def _seed_library(store, *, per_genre=27):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # These workers consume already saved clusters. Clustering discovery and
     # its corpus threshold belong to test_taste_modes_discover; model refresh,
     # saved-vector reads and publication remain real here.
@@ -143,7 +144,7 @@ def test_content_update_refreshes_original_models_and_places_track(store, librar
     # membership, nearest-mode assignment and typed publication remain actual.
     ranked = [SimpleNamespace(key=key, **track) for key, track in
               store.rec_query.tracks_by_keys(store.rec_query.library_keys()).items()]
-    monkeypatch.setattr(mode_inputs, '_rank_pools', lambda *args:
+    monkeypatch.setattr(mode_inputs, '_rank_pools', lambda *args, **kwargs:
                         {'wheelhouse': ranked, 'explore': ranked, 'comfort': ranked, 'fresh': []})
     assert mode_surfaces.prepare_bundles(store, 2000) is not None
     assert embed.content_space_id(store) == space
@@ -205,7 +206,7 @@ def test_startup_repairs_absent_discovery_songs_while_reusing_saved_groups(store
         discoveries=[track['key'] for track in discoveries], now=1001)
     if cached is None:
         with store.conn:
-            store.conn.execute("DELETE FROM recommendation_heads WHERE surface='fresh'")
+            store.conn.execute("UPDATE recommendation_generation_surfaces SET selected=0 WHERE surface='fresh'")
         assert store.recommendations.head('fresh') is None
     else:
         publish_bundles(store, {}, 1000, fresh=cached)
@@ -278,8 +279,7 @@ def test_metadata_update_during_rebuild_gets_a_local_catchup(scheduled, monkeypa
             worker.trigger_content_update(["song|artist"])
         else:
             assert worker.ctx.store.rec_refresh.revision() is not None
-            with worker.ctx.store.conn:
-                worker.ctx.store.conn.execute('DELETE FROM rec_change_queue')
+            worker.ctx.store.rec_refresh.acknowledge(worker.ctx.store.rec_refresh.revision())
 
     monkeypatch.setattr(worker, "_do_rebuild", rebuild)
     if synchronous:
@@ -368,7 +368,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         monkeypatch.setattr(rec_worker, 'time', SimpleNamespace(monotonic=lambda: clock[0]))
 
     def invalidate_once(reader, now):
-        attempts.append(store.settings.get_setting("rec_content_model"))
+        attempts.append(store.rec_model.recording_encoder())
         if len(attempts) == 1:
             if failure == 'policy-capacity':
                 from yt_playlist.core.policy_config import PolicyCapacityFull
@@ -419,7 +419,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
         request_guard.setattr(training, "build_vectors_from_baskets", forbidden)
         worker._refresh_bundles()
     assert len(attempts) == 2 and all(attempts)
-    assert store.settings.get_setting("rec_content_model")
+    assert store.rec_model.recording_encoder()
     assert store.recommendations.head('home') is not None
     assert _pool_keys(store, 'temporal')
 
@@ -427,7 +427,7 @@ def test_bundle_retry_repairs_a_model_invalidated_during_preparation(store, libr
 def test_enrichment_requests_repair_when_saved_clusters_have_lost_their_model(store, library, monkeypatch):
     worker = _worker(store)
     calls = []
-    store.settings.delete_setting("rec_content_model")
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder=None))
     monkeypatch.setattr(worker, "_schedule", lambda **kw: calls.append(kw))
     worker.trigger_content_update(["techno 0|artist"])
     assert calls == [{"full": True, "prepare": True}]

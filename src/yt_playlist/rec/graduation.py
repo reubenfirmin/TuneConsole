@@ -40,34 +40,23 @@ def feedback_axis(store, explicit_axis, reason, item):
 
 
 def mood_tilt(store, keys, signed, now):
-    """Transient mood feedback: tilt these tracks' recent-mood signal, then graduate it.
-
-    #85: fades on the wall clock (mood_halflife_d), reactive, never a permanent taste signal.
-    """
+    """Record bounded, track-scoped mood feedback."""
     if not keys:
         return
     halflife_d = rec_params.get_param(store, "mood_halflife_d")
     prune_before = now - 4 * halflife_d * 86400
     store.rec_signals.record_mood(keys, signed, now, prune_before=prune_before)
-    graduate_moods(store, list(keys), signed, now, source=rec_params.get_param(store, "source_w_vibe"))
 
 
 def apply_ratings(store, states):
-    """Project combined recording evidence, graduating a positive contribution at most once.
+    """Project combined recording evidence at its original observation time.
 
     Ratings carry their own observation time and sync/action provenance. Dislikes
-    retain suppression and durable negative evidence; neutral ratings clear the
+    exclude the recording for the configured duration; neutral ratings clear the
     projected state. Callers reconcile confirmed observations before projection.
     """
-    with store._lock:
-        new_likes = store.rec_model.apply_rating_feedback(
-            states, dislike_seconds=rec_params.get_param(store, "dislike_suppress_days") * 86400)
-        for key, rating in new_likes.items():
-            if store.rec_model.mark_graduated_once(key, "like_grad", rating.observed_at):
-                w_param = ("source_w_like" if rating.provenance == "action"
-                           else "source_w_like_synced")
-                graduate_moods(store, [key], 1.0, rating.observed_at,
-                               source=rec_params.get_param(store, w_param), source_label="like")
+    store.rec_model.apply_rating_feedback(
+        states, dislike_seconds=rec_params.get_param(store, "dislike_suppress_days") * 86400)
 
 
 def graduate_facet(store, axis, signed, now, source=1.0, source_label="event") -> None:
@@ -88,8 +77,8 @@ def graduate_moods(store, keys, signed, now, source=1.0, source_label="mood") ->
     intensity (±1, ±2 on 'a lot').
 
     Negative track feedback does not establish a permanent artist, genre, or era preference.
-    Its short-lived facets stay in transient.py; explicit dislikes also retain their own vector
-    direction. Deliberate facet steering still graduates through graduate_facet/slider exposure.
+    Short-lived mood choices stay in transient.py. Deliberate facet steering
+    still graduates through graduate_facet/slider exposure.
     Positive track signals continue to graduate all their facets."""
     if signed <= 0:
         return
@@ -121,7 +110,7 @@ def graduate_play_exposure(store, now, *, prepared_leans=None) -> None:
 
     Plays feed only the transient model (sync stores history; transient.play_facet_leans reads it).
     Here, once per UTC day per axis, the sustained play-derived lean contributes lean_magnitude *
-    source_w_play to the rec_theme ledger; crossing theme_threshold nudges the permanent weight.
+    source_w_play to the axis contribution; crossing theme_threshold nudges the permanent weight.
     Unlike sliders there is NO migration step: plays are not a displayed handle to keep sticky, and
     the play lean self-decays on the wall clock (#85) when listening stops, so the daily
     contribution falls to ~0 on its own.

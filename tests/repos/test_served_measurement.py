@@ -15,7 +15,7 @@ def _shown(store, request, at, key="song|artist", rank=1, surface="home"):
 
 
 def _seed_track(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("vid", "song", "artist", None, None)
     return iid
 
@@ -151,19 +151,24 @@ def test_individual_offers_record_final_order_and_trace(store):
                "tracks": [{"key": "a|x"}, {"key": "b|y"}]}]
     for key, title, artist in [('a|x', 'A', 'X'), ('b|y', 'B', 'Y')]:
         seed_catalog_track(store, key, title, artist, video_id=key)
+    ppr_policy = {'algorithm': 'basket-ppr-v1', 'params': {'ppr_alpha': 0.15}}
     measurement.record_offers(store, 'radio', [{'items': protos[0]['tracks'], 'lane': 'explore',
-        'mode_id': 7, 'ranker': 'ppr', 'provenance': {'ranker': 'ppr'}}], 100)
+        'mode_id': 7, 'ranker': 'ppr', 'provenance': {'ppr_policy': ppr_policy}}], 100)
     rows = store.conn.execute(
-        "SELECT lane,mode_id,identity_key,rank,model_version,provenance "
+        "SELECT id,lane,mode_id,identity_key,rank,model_version "
         "FROM rec_served_impressions ORDER BY rank").fetchall()
     assert [(r["identity_key"], r["rank"]) for r in rows] == [("a|x", 1), ("b|y", 2)]
     assert rows[0]["lane"] == "explore" and rows[0]["mode_id"] == 7
     assert len(rows[0]["model_version"]) == 16
-    assert '"ranker": "ppr"' in rows[0]["provenance"]
+    for row in rows:
+        detail = scorecard.served_recommendation(store, row["id"])
+        assert detail["diagnostic_status"] == "available"
+        assert detail["provenance"]["ranker"] == "ppr"
+        assert detail["provenance"]["ppr_policy"] == ppr_policy
 
 
 def test_coverage_conversion_and_variety_use_immutable_serving_metadata(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tid = store.tracks.upsert_track("owned", "Owned", "Known artist", None, 200)
     store.tracks.set_track_genre(tid, "Techno")
     store.tracks.set_track_year(tid, "1999")
@@ -207,7 +212,7 @@ def test_explicit_outcomes_follow_bounded_nearest_ownership(store, offset, credi
 
 
 def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.discovery.upsert_discovered_track("cold|artist", "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
     measurement.record_recommendations(store, "similar", [{"key": "cold|artist"}], 100)
@@ -223,7 +228,7 @@ def test_cold_exit_depth_and_staleness_have_samples_per_surface(store):
 
 @pytest.mark.parametrize("position,outcome", [(20, "skip"), (190, "completion")])
 def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(store, position, outcome):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     key = "cold|artist"
     store.discovery.upsert_discovered_track(key, "cold", "Cold", "Artist", "", None,
                                   "Techno", None, "source", 0)
@@ -234,8 +239,7 @@ def test_cold_exit_attribution_survives_discovery_removal_and_report_boundaries(
     assert before[outcome] == 1 and before["by_surface"]["similar"][outcome] == 1
 
     with store.conn:
-        store.conn.execute("DELETE FROM discovery_memberships WHERE recording_id IN "
-                           "(SELECT id FROM recordings WHERE identity_key=?)", (key,))
+        store.discovery.repository.delete_pool_entries([], [], [key])
     assert store.discovery.get_discovered_tracks() == []
     assert scorecard.recommendation_scorecard(store, 90, 160) == before
     assert scorecard.recommendation_scorecard(store, 90, 110)[outcome] == 0

@@ -17,7 +17,7 @@ from yt_playlist.core.db_space import LowDiskSpace
 from yt_playlist.core.migrations import current
 from yt_playlist.core.migrations.runner import MigrationError
 from yt_playlist.core.store import Store
-from yt_playlist.repos import policy_storage, proposal_cache, recommendation_publication as publication
+from yt_playlist.repos import policy_storage, recommendation_publication as publication
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -56,7 +56,7 @@ def test_staging_releases_writer_between_bounded_commits_and_keeps_last_good_vis
     old = publish(database, plan(database, 'old'))
     prepared = plan(database, 'new', count=3 * publication.BATCH_ROWS + 7,
                     value={'title': 'café 🎵' * 1000})
-    original, sizes = proposal_cache._write, []
+    original, sizes = publication.staging_write, []
     with ThreadPoolExecutor(1) as foreground:
         @contextmanager
         def observed(repo, **kwargs):
@@ -68,9 +68,9 @@ def test_staging_releases_writer_between_bounded_commits_and_keeps_last_good_vis
             assert database.recommendations.head('home')['id'] == old.generation_id
             foreground.submit(database.settings.set_setting, 'foreground', 'saved').result(5)
 
-        monkeypatch.setattr(proposal_cache, '_write', observed)
+        monkeypatch.setattr(publication, 'staging_write', observed)
         build = stage(database, prepared)
-    monkeypatch.setattr(proposal_cache, '_write', original)
+    monkeypatch.setattr(publication, 'staging_write', original)
     assert max(sizes) == publication.BATCH_ROWS
     assert sum(size > 0 for size in sizes) == 4
     database.recommendations.publish(build, 11)
@@ -160,14 +160,12 @@ def test_changed_head_rejects_old_snapshot_but_private_staging_does_not(database
     old = publish(database, plan(database, 'old'))
     prepared = plan(database, 'new', value={'title': 'old'})
     with database.read_snapshot() as snapshot:
-        # Guard the published head alone. Reading full generation rows also
-        # conservatively guards private generation staging on the current schema.
-        assert snapshot.store.conn.execute("SELECT generation_id FROM recommendation_heads WHERE surface='home'").fetchone()[0] == old.generation_id
+        assert snapshot.store.recommendations.mix_head_ids()['home'] == old.generation_id
         snapshot.release_reader()
         build = stage(database, prepared)
         assert snapshot.publish_ordered(lambda: database.settings.publish_values({'same': 'accepted'}))
     with database.read_snapshot() as snapshot:
-        snapshot.store.conn.execute("SELECT generation_id FROM recommendation_heads WHERE surface='home'").fetchone()
+        assert snapshot.store.recommendations.mix_head_ids()['home'] == old.generation_id
         snapshot.release_reader()
         database.recommendations.publish(build, 12)
         assert not snapshot.publish_ordered(lambda: database.settings.publish_values({'stale': 'forbidden'}))
@@ -221,7 +219,7 @@ def test_incomplete_build_cannot_publish_skip_a_rank_or_become_ready(database):
     with database.conn:
         database.conn.execute('BEGIN IMMEDIATE')
         identity = publication._create_pool(database.conn, prepared.slots[0].pool)
-        database.conn.execute('INSERT INTO recommendation_build_pools VALUES (?,?)', (build.generation_id, identity))
+        publication.stage_pool(database.conn, build.generation_id, identity)
         pools.append(database.conn, identity, prepared.slots[0].pool.candidates[:128], 0)
     with pytest.raises(ValueError, match='unfinished'):
         database.recommendations.publish(build, 12)
@@ -259,7 +257,7 @@ def test_expired_cleanup_restarts_with_a_new_generation_without_partial_exposure
     prepared = plan(database, 'expired', count=400)
     build = stage(database, prepared)
     with database.conn:
-        database.conn.execute('UPDATE recommendation_builds SET expires_at=0 WHERE generation_id=?', (build.generation_id,))
+        database.conn.execute('UPDATE recommendation_generations SET build_expires_at=0 WHERE id=?', (build.generation_id,))
     assert database.recommendations.cleanup()
     while database.recommendations.cleanup():
         pass
@@ -273,7 +271,7 @@ def test_expired_cleanup_restarts_with_a_new_generation_without_partial_exposure
 def test_legacy_replacement_and_raw_invalidation_cannot_replace_the_domain_owner(database, operation):
     old = publish(database, plan(database, 'old'))
     if operation == 'put':
-        with pytest.raises(sqlite3.IntegrityError, match='domain owner'):
+        with pytest.raises(ValueError, match='Unknown recommendation surface'):
             database.rec_proposals.put_proposals('mode_bundles', {'replacement': True}, 3)
     else:
         # Retired rows are absent, so a zero-row raw operation cannot replace a head.
@@ -286,7 +284,8 @@ def test_legacy_replacement_and_raw_invalidation_cannot_replace_the_domain_owner
 def test_database_rejects_mutating_or_cleaning_published_state(database):
     publish(database, plan(database, 'published'))
     for sql in ('UPDATE recommendation_candidates SET score=score', 'DELETE FROM recommendation_candidates',
-                "UPDATE recommendation_generations SET status='building'", 'DELETE FROM prepared_outputs'):
+                "UPDATE recommendation_generations SET status='building'",
+                'DELETE FROM collection_file_writes WHERE chunk_id IS NOT NULL'):
         with pytest.raises(sqlite3.IntegrityError), database.conn:
             database.conn.execute(sql)
     assert database.recommendations.output('home', 'fixture') == {'title': 'published'}

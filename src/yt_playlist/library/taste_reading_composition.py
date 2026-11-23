@@ -15,17 +15,14 @@ def readings(store):
         ('proposals', 'rec_proposals'), ('recommendations', 'recommendations'))})
     a = NS(group_prepared=lambda: group_viz.prepared(store),
         group_choices=lambda now, preview: group_viz.choices(store, now, preview),
-        group_layers=lambda now, preview: group_viz.mode_layers(store, now, preview),
+        group_layers=lambda now, preview, **kw: group_viz.mode_layers(store, now, preview, **kw),
         choice_evidence=lambda now: mode_eval.choice_evidence(store, now),
         mode_profiles=lambda: mode_profiles.describe_modes(store),
         playlist_taste=lambda: scoring.playlist_taste(store), home_exclusions=lambda keys, now: home_exclusions(store, keys, now),
         breadth=lambda: taste_analysis.taste_breadth(store), era_shares=lambda: taste_analysis.era_distribution(store),
-        facet_leans=lambda now: transient.facet_leans(store, now), radio_ids=lambda: transient.radio_list_ids(store),
-        evidence_plays=lambda limit: transient.evidence_plays(store, limit),
-        recent=lambda now, **kw: layers.recent_evidence(store, now, **kw),
-        now_mix=lambda now, **kw: layers.now_mode_mix(store, now, **kw),
-        session_mix=lambda now, **kw: layers.session_mode_mix(store, now, **kw),
-        coverage=lambda now, **kw: layers.evidence_coverage(store, now, **kw),
+        facet_breakdown=lambda now: scoring.facet_breakdown(store, now),
+        today_coverage=lambda now: layers.today_coverage(store, now),
+        recent_sources=lambda now: transient.recent_sources(store, now),
         vectors=lambda: embedding_vectors.load_vectors(store),
         session_tilt=lambda now, matrix, index: layers.session_tilt(store, now, matrix, index),
         transient_tilt=lambda now, matrix, index: transient.centroid_tilt(store, now, matrix, index),
@@ -33,7 +30,7 @@ def readings(store):
     configuration = NS(lanes=rec_params.LANES, lane_default=rec_params.LANE_DEFAULT, lane_max=rec_params.LANE_MAX,
         training_dim=embedding_training.DIM, catalog_content_percent=round(surfaces.CATALOG_CONTENT_FRAC * 100))
     return TasteReadings(queries=q, analysis=a, parameter=lambda name: rec_params.get_param(store, name),
-        configuration=configuration, files=getattr(store, '_recommendation_files', False))
+        configuration=configuration)
 
 
 def read(store, operation, *args, **kwargs):

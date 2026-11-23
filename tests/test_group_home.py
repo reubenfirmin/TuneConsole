@@ -36,7 +36,7 @@ def adaptive_selection(tmp_path, _pristine_current_schema, monkeypatch,
     from unittest.mock import Mock
     from yt_playlist.core import bounded_json, home_outputs, json_cache
     from yt_playlist.repos.group_ordering import GroupOrderingRepo
-    from yt_playlist.rec import measurement, stored_groups
+    from yt_playlist.rec import measurement
 
     bound_catalog(monkeypatch, entries=(('house', 'House'), ('jazz', 'Jazz')))
     # The input documents are trusted fixture output. Codec admission has its
@@ -70,18 +70,6 @@ def adaptive_selection(tmp_path, _pristine_current_schema, monkeypatch,
             return {key: facts[key] for key in keys}
 
         monkeypatch.setattr(type(store.recommendations), '_candidate_facts', fixed_catalog)
-        pages, read_pages = {}, stored_groups.pages
-
-        def fixed_pages(reader, generation, version, lane):
-            key = generation, version, lane
-            if key not in pages:
-                pages[key] = tuple(read_pages(reader, generation, version, lane))
-            return deepcopy(pages[key])
-
-        # These cases keep their catalog and candidate generation fixed.
-        # Supply its complete pages once; graph allocation, rotation and
-        # every one of the twelve menus still run through the real code.
-        monkeypatch.setattr(stored_groups, 'pages', fixed_pages)
         with reuse_reporting_reader(store, monkeypatch):
             # Publishing fixture inputs does not own source-change races.
             # Restore real guarded snapshots before exercising Home preparation.
@@ -122,10 +110,10 @@ def adaptive_library_template(_pristine_current_schema):
 def group_pages(monkeypatch, home_page_bytecode, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, taste
+    from yt_playlist.web.routes import app_update, audio_vibes, home, taste
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home, taste)])
+        for module in (app_update, audio_vibes, home, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
@@ -306,17 +294,47 @@ def test_filters_do_not_turn_small_interests_into_unrelated_mixes(store, adaptiv
     assert not group_home.assemble(store, 1200, 0, data, include={'metal'})
 
 
-def test_rollback_and_old_preview_schema_do_not_activate_graph_serving(store, adaptive_library):
+def test_unavailable_home_preview_uses_published_groups(store, adaptive_library):
     assert group_serving.policy(store) == 'adaptive'
     store.settings.set_setting('rec_group_serving', 'legacy')
     assert group_serving.policy(store) == 'legacy'
-    assert group_home.inputs(store, 1200) is None
+    data = group_home.inputs(store, 1200)
+    assert data['preview']['generation'] == store.taste_groups.head_generation()
+    cards = group_home.assemble(store, 1200, 0, data)
+    assert cards and all(card['group_version'] for card in cards)
     store.settings.set_setting('rec_group_serving', 'adaptive')
     preview = store.rec_proposals.get_proposals(group_serving.SURFACE)
     preview['schema'] = 1
     store.rec_proposals.put_proposals(group_serving.SURFACE, preview, 1300)
     assert group_serving.policy(store) == 'legacy'
-    assert group_home.inputs(store, 1300) is None
+    assert group_home.inputs(store, 1300)['preview']['generation'] == data['preview']['generation']
+
+
+def test_mix_setup_reads_preview_payload_only_for_current_groups(store, adaptive_library, monkeypatch):
+    tracks, head = adaptive_library
+    proposals = type(store.rec_proposals)
+    original = proposals._proposal_json
+    reads = []
+
+    def read(self, surface):
+        if surface == group_serving.SURFACE:
+            reads.append(surface)
+        return original(self, surface)
+
+    monkeypatch.setattr(proposals, '_proposal_json', read)
+    current = group_home.inputs(store, 1200)
+    assert current['preview']['generation'] == head['generation']
+    assert current['preview']['menus']
+    assert reads == [group_serving.SURFACE]
+
+    next_head = publish(store, tracks[:-4], 1300, head)
+    assert next_head['generation'] != head['generation']
+    assert group_serving.checkpoint(store)['generation'] == head['generation']
+    fallback = group_home.inputs(store, 1300)
+    assert fallback['preview']['generation'] == next_head['generation']
+    assert fallback['recommendation_generation'] == store.recommendations.head('home')['id']
+    home_prepared._proposal_generation(store)
+    assert reads == [group_serving.SURFACE]
 
 
 def test_small_initial_groups_remain_visible_without_replacing_usable_startup_mixes(store):
@@ -343,7 +361,7 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(adaptive_sel
     assert payload and payload['group_policy'] == 'adaptive'
     assert home_prepared._valid(payload)
     assert payload['choice_context']['group_generation'] == head['generation']
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     returning_listener(store, 'mixes', now=1200)
     fake = FakeClient(catalog=library_catalog(store))
     clock = [1300]
@@ -426,7 +444,7 @@ def test_prepared_home_and_real_menu_capture_preserve_group_context(adaptive_sel
         assert 'Server-rendered Home offers' not in choices.text
 
 
-def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(
+def test_history_only_refresh_and_retirement_preserve_adaptive_menu_inputs(
         store, monkeypatch, adaptive_library):
     from yt_playlist.rec import candidate_refresh, rec_params
     assert store.rec_proposals.get_proposals(home_prepared.SURFACE) is None
@@ -442,12 +460,12 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(
         clock[0] += 6
         return result
 
-    # Exercise every real partial batch and both attempts after capacity is full.
+    # Limit each attempt to one complete menu and compare the inputs across attempts.
     monkeypatch.setattr(home_prepared.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(home_prepared, 'PREPARE_BUDGET_S', 10)
     monkeypatch.setattr(home_cards.HomeCards, 'cards', one_menu)
     generation = None
-    for index in range(home_prepared.MAX_MENUS + 2):
+    for index in range(2):
         at = 1200 + index
         current, expired = f'admission:{index}', f'expired:{index}'
         old = at - (rec_params.get_param(store, 'choice_retention_d') + 1) * 86400
@@ -462,30 +480,25 @@ def test_history_only_refresh_and_retirement_accumulate_all_adaptive_menus(
         payload = home_prepared.prepare(store, at)
         assert payload and payload['group_policy'] == 'adaptive'
         assert any(menu['protos'] for menu in payload['menus'])
-        assert len(payload['menus']) == min(index + 1, home_prepared.MAX_MENUS)
+        assert len(payload['menus']) == 1
         generation = generation or payload['generation']
         assert payload['generation'] == generation
         assert original_pools == {name: store.rec_proposals._proposal_json(name) for name in pools}
         assert candidate_refresh.preferences(store, at) == preferences
-    assert {menu['epoch'] for menu in payload['menus']} == set(range(home_prepared.MAX_MENUS))
 
 
-def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_library):
+def test_home_worker_retries_discovery_independently_of_mix_tapes(store, adaptive_library):
     from yt_playlist.rec.worker_tasks import ServingTasks
     calls = []
-    protos = [{'lane': lane, 'tracks': [{'key': lane}]}
-              for lane in ('wheelhouse', 'explore', 'fresh', 'comfort')]
-    payload = {'group_policy': 'adaptive', 'modes': [],
-               'menus': [{'protos': protos[:3]}], 'play_exposure': {}}
 
     def stage(name, target, *args, **kwargs):
         calls.append(name)
         if name == 'Home collections':
-            return payload
+            pytest.fail('The worker prepared finished Mix Tapes')
         if name == 'Album choices':
             return {'items': []}
         if name == 'Home Discovery':
-            return {}
+            return {} if calls.count(name) == 2 else None
         if name == 'Home revisit':
             return True
         return None
@@ -493,11 +506,8 @@ def test_home_worker_retries_partial_adaptive_menus_until_full(store, adaptive_l
     tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1200,
         client_provider=lambda: {}, logger=logging.getLogger(__name__)), stage)
     assert tasks.home()
-    payload['menus'] = [{'protos': protos[:3]} for _ in range(home_prepared.MAX_MENUS)]
-    assert tasks.home()
-    payload['menus'] = [{'protos': protos}]
     assert not tasks.home()
-    assert calls.count('Home collections') == 3
+    assert calls.count('Home Discovery') == 2
 
 
 def test_muting_and_suppression_are_checked_again_after_group_preparation(store, adaptive_library):
@@ -505,7 +515,7 @@ def test_muting_and_suppression_are_checked_again_after_group_preparation(store,
     store.rec_model.set_weight('genre:jazz', 0, lo=0, now=1200)
     store.rec_model.record_feedback('for_you', tracks[0].key, 'dislike', now=1200)
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET available=0 WHERE video_id='v1'")
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='v1'")
     data = group_home.inputs(store, 1200)
     cards = group_home.assemble(store, 1200, 0, data)
     assert cards and all(t['genre'] != 'Jazz' for p in cards for t in p['tracks'])
@@ -536,23 +546,77 @@ def test_active_preparation_freezes_graph_inputs_and_does_not_capture_legacy_mod
     assert context['musical_groups'] and all('choice_context' not in m for m in prepared['menus'])
 
 
-def test_rollback_rejects_cached_adaptive_menus_but_keeps_definitions(adaptive_selection):
+def test_disabling_preview_preserves_published_group_menus(adaptive_selection):
     store, _tracks, head = adaptive_selection
     assert home_prepared.prepare(store, 1200)
     store.settings.set_setting('rec_group_serving', 'legacy')
     scheduled = []
-    assert home_prepared.load(store, 1300, lambda: scheduled.append(True)) is None
-    assert scheduled and store.taste_groups.head_generation() == head['generation']
+    assert home_prepared.load(store, 1300, lambda: scheduled.append(True))['group_policy'] == 'adaptive'
+    assert not scheduled and store.taste_groups.head_generation() == head['generation']
 
 
 def test_recent_listening_is_mapped_to_exact_graph_memberships_without_vectors(store, adaptive_library):
     tracks, _head = adaptive_library
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     for i, track in enumerate(tracks[:6]):
         store.history.record_play_event(identity, track.key, f'v{i}', 1200 + i)
     reading = group_viz.mode_layers(store, 1300, group_viz.prepared(store))
     assert reading['now']['n'] == 6
     assert reading['now']['segments'] and all(s['label'] == 'House' for s in reading['now']['segments'])
+
+
+def test_app_preloads_published_group_graph_before_serving(route_store, monkeypatch):
+    monkeypatch.delattr(route_store, 'read_view')
+    tracks = recordings([('House', 12, .1), ('Jazz', 12, .9)])
+    generation = publish(route_store, tracks)['generation']
+    app = create_app(route_store, lambda: {}, background_work=False)
+    controller = type(route_store.taste_groups)
+    definitions = controller.definitions
+    loaded = []
+
+    def load(self, generation, *, members=False):
+        loaded.append(generation)
+        return definitions(self, generation, members=members)
+
+    monkeypatch.setattr(controller, 'definitions', load)
+    with TestClient(app):
+        assert loaded == [generation]
+        with route_store.read_view() as reader:
+            assert group_viz.prepared(reader)['generation'] == generation
+        assert loaded == [generation]
+
+
+def test_published_group_graph_is_shared_and_follows_publication(route_store, monkeypatch):
+    # This test needs independent SQL readers, including a pinned transaction.
+    monkeypatch.delattr(route_store, 'read_view')
+    tracks = recordings([('House', 12, .1), ('Jazz', 12, .9)])
+    first = publish(route_store, tracks)['generation']
+    controller = type(route_store.taste_groups)
+    definitions = controller.definitions
+    loads = []
+
+    def load(self, generation, *, members=False):
+        loads.append(generation)
+        return definitions(self, generation, members=members)
+
+    monkeypatch.setattr(controller, 'definitions', load)
+    initial = group_viz.prepared(route_store)
+    with route_store.read_view(pinned=True) as pinned:
+        graph = group_viz.prepared(pinned)
+        assert graph == initial
+        graph['groups'][0]['name'] = 'Changed by caller'
+        assert group_viz.prepared(pinned) == initial
+        assert loads == [first]
+
+        second = publish(route_store, tracks[:-1], 1100)['generation']
+        assert second != first
+        with route_store.read_view() as reader:
+            assert group_viz.prepared(reader)['generation'] == second
+        assert group_viz.prepared(pinned) == initial
+
+    with route_store.read_view() as reader:
+        assert group_viz.prepared(reader)['generation'] == second
+    assert loads == [first, second, first]
 
 
 def test_definitions_survive_regrouping_and_held_offers_keep_their_context(

@@ -7,11 +7,11 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.genre_catalog_support import bound_catalog
+from tests.group_support import publish_keyed
 from tests.model_support import build_content_model, publish_modes
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 from yt_playlist.core.store import Store
-from yt_playlist.core.storage_maintenance import StorageMaintenance
 from yt_playlist.rec import (embedding_training as training, embedding_vectors as embed,
                              mode_surfaces, model_refresh, model_selection,
                              recommendation_retirement, rec_params, rec_worker,
@@ -43,13 +43,18 @@ def seed_regions(store, per_genre):
               'title': f'{genre} {index}', 'artist': 'Artist', 'genre': genre}
              for genre in ('Techno', 'Jazz', 'Rock') for index in range(per_genre)]
     seed_publication_subjects(store, items)
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     rec_params.set_param(store, 'modes_k', 3)
     rec_params.set_param(store, 'modes_min_members', 20)
     assert build_content_model(store) == len(items)
     store.history.import_play_events(account, [
         (f'techno {index}|artist', f'Techno-{index}', 2000.) for index in range(4)])
     return items
+
+
+def publish_regions(store, items):
+    return publish_keyed(store, [(genre, [item['key'] for item in items if item['genre'] == genre], sound)
+                                 for genre, sound in (('Techno', .9), ('Jazz', .5), ('Rock', .1))])
 
 
 @pytest.mark.parametrize('reason,per_genre', [('stale', 27), ('missing', 27), ('missing', 60)],
@@ -65,13 +70,13 @@ def test_real_group_repair_preserves_regions_identity_and_recent_listening(
     old_ids = {mode['mode_id'] for mode in old_modes}
     if reason == 'missing':
         with store.conn:
-            store.conn.execute('DELETE FROM taste_modes')
+            store.conn.execute('DELETE FROM taste_groups WHERE mode_label IS NOT NULL')
         assert not store.modes.list_modes()
     else:
         old_space = embed.content_space_id(store)
         # Completed lower-layer metadata changes the actual encoder's basis.
         with store.conn:
-            store.conn.execute("UPDATE youtube_items SET mb_year='2001' WHERE video_id LIKE 'Jazz-%'")
+            store.conn.execute("UPDATE track_sources SET mb_year='2001' WHERE video_id LIKE 'Jazz-%'")
         assert build_content_model(store) == len(items)
         assert embed.content_space_id(store) != old_space
     assert not taste_viz.overview(store, 2000.)['recent']['styles_current']
@@ -91,6 +96,8 @@ def test_real_group_repair_preserves_regions_identity_and_recent_listening(
     assert sorted(mode['size'] for mode in live) == [per_genre] * 3
     assert all(mode['last_seen'] == 2000. for mode in live)
     assert all(np.isclose(np.linalg.norm(mode['centroid']), 1.) for mode in live)
+    assert not taste_viz.overview(store, 2000.)['recent']['styles_current']
+    assert len(publish_regions(store, items)) == len(items)
     recent = taste_viz.overview(store, 2000.)['recent']
     assert recent['styles_current'] and recent['n'] == 4
     assert len(recent['shifts']) == 3
@@ -100,16 +107,6 @@ def test_real_group_repair_preserves_regions_identity_and_recent_listening(
 def test_startup_keeps_taste_requests_available_until_worker_repair_finishes(native_store, monkeypatch):
     store = native_store
     items = seed_regions(store, 4)
-    vectors = store.rec_model.content_vectors_by_keys([item['key'] for item in items])
-    space = embed.content_space_id(store)
-    # This owner receives completed lower-layer groups. The parameterized owner
-    # above independently runs real discovery on both 81 and 180 recordings.
-    completed = [{'mode_id': index + 1, 'label': genre.lower(),
-                  'families': [(genre.lower(), 4)], 'size': 4,
-                  'centroid': np.frombuffer(vectors[f'{genre.lower()} 0|artist'], dtype=np.float32),
-                  'space': space,
-                  'rep_keys': [f'{genre.lower()} {i}|artist' for i in range(4)]}
-                 for index, genre in enumerate(('Techno', 'Jazz', 'Rock'))]
     store.settings.set_setting('enrich_worker_enabled', '0')
     started, release, finished = threading.Event(), threading.Event(), threading.Event()
     calls = []
@@ -124,13 +121,12 @@ def test_startup_keeps_taste_requests_available_until_worker_repair_finishes(nat
         calls.append('models')
         started.set()
         assert release.wait(3)
-        store.modes.replace_modes(completed, [], now)
         store.rec_refresh.acknowledge(store.rec_refresh.revision())
         return {'tracks': len(items)}
 
     def completed_candidates(target, now):
         assert target is store and now == 2000.
-        assert len(taste_modes.live_modes(store)) == 3
+        assert store.modes.list_modes() == []
         calls.append('candidates')
         return {'built_at': now}
 
@@ -139,6 +135,7 @@ def test_startup_keeps_taste_requests_available_until_worker_repair_finishes(nat
     def refresh(worker):
         try:
             original(worker)
+            publish_regions(store, items)
         finally:
             finished.set()
 
@@ -153,7 +150,6 @@ def test_startup_keeps_taste_requests_available_until_worker_repair_finishes(nat
     monkeypatch.setattr(rec_worker.RecWorker, '_do_mode_refresh', refresh)
     # Native current SQL is already installed. Schema admission/maintenance is
     # below this lifecycle owner and has independent upgrade/failure tests.
-    monkeypatch.setattr(StorageMaintenance, 'start', lambda self: self.ready.set())
     app = create_app(store, forbidden, now_fn=lambda: 2000., background_work=True)
     worker = app.state.ctx.rec_worker
     worker.debounce_s = 0

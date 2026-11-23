@@ -8,7 +8,8 @@ async ({action, id, zoom, expected}) => {
       const bounds = host.getBoundingClientRect();
       const node = graph.graphData().nodes.find(node => node.id === id);
       const point = graph.graph2ScreenCoords(node.x, node.y);
-      return {x: bounds.left + point.x, y: bounds.top + point.y};
+      const scale = graph.zoom();
+      return {x: bounds.left + point.x, y: bounds.top + point.y, width: node.width * scale, height: node.height * scale};
     },
     background() {
       const bounds = host.getBoundingClientRect(), scale = graph.zoom();
@@ -26,6 +27,12 @@ async ({action, id, zoom, expected}) => {
     ids: () => graph.graphData().nodes.map(node => node.id),
     zoom: () => graph.zoom(),
     view,
+    async stableView() {
+      const before = view();
+      for (let i = 0; i < 3; i++) await new Promise(requestAnimationFrame);
+      const after = view();
+      return before.zoom === after.zoom && before.center.x === after.center.x && before.center.y === after.center.y;
+    },
     visibleConnections() {
       const nodes = graph.graphData().nodes, scale = graph.zoom();
       const bounds = host.getBoundingClientRect();
@@ -56,25 +63,47 @@ async ({action, id, zoom, expected}) => {
       });
     },
     featureRouting() {
-      const nodes = graph.graphData().nodes.filter(node => node.area === 'feature');
-      const routes = window.routeModelMapFeatures(nodes), blocked = [];
-      for (const [identity, path] of routes) for (let index = 1; index < path.length; index++) {
-        const a = path[index - 1], b = path[index], steps = Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 4);
-        for (let step = 0; step <= steps; step++) {
-          const x = a.x + (b.x - a.x) * step / steps, y = a.y + (b.y - a.y) * step / steps;
-          for (const node of nodes) {
-            if (node.id !== identity && Math.abs(x - node.x) < node.width / 2 && Math.abs(y - node.y) < node.height / 2)
-              blocked.push([identity, node.id]);
+      const data = graph.graphData();
+      const nodes = data.nodes.filter(node => node.area === 'feature');
+      const tasteLayers = data.nodes.filter(node => node.tasteLayer).sort((a, b) => a.x - b.x);
+      const inputs = data.links.filter(link => !link.feedback && link.target.area === 'feature');
+      const routes = window.routeModelMapLinks(nodes, inputs, tasteLayers);
+      const blocked = [], backwards = [], missing = [];
+      for (const link of inputs) {
+        const identity = link.target.id, route = routes.get(link.edgeIndex);
+        if (!route) {
+          missing.push([link.source, link.target, ...nodes.filter(node =>
+            node.x - node.width / 2 < link.target.x && node.x + node.width / 2 > link.source.x)]
+            .map(node => [node.id, Math.round(node.x), Math.round(node.y)]));
+          continue;
+        }
+        for (let index = 1; index < route.points.length; index++) {
+          const a = route.points[index - 1], b = route.points[index];
+          if (a.x > b.x) backwards.push([link.source.id, identity]);
+          const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 4));
+          const curved = route.direct && index === 1;
+          const bend = (b.x - a.x) * .45;
+          for (let step = 0; step <= steps; step++) {
+            const t = step / steps, u = 1 - t;
+            const x = curved ? u ** 3 * a.x + 3 * t * u * (u * (a.x + bend) + t * (b.x - bend)) + t ** 3 * b.x
+              : a.x + (b.x - a.x) * t;
+            const y = a.y + (b.y - a.y) * (curved ? t * t * (3 - 2 * t) : t);
+            for (const node of nodes) {
+              if (node.id !== identity && Math.abs(x - node.x) < node.width / 2 && Math.abs(y - node.y) < node.height / 2)
+                blocked.push([link.source.id, identity, node.id]);
+            }
           }
         }
       }
-      return {count: routes.size, blocked};
+      return {blocked, backwards, missing};
     },
     linkPaint() {
       const link = graph.graphData().links.find(value => value.source.id === id && value.target.id === expected);
       const context = document.createElement('canvas').getContext('2d');
       let result;
-      context.stroke = () => { result = {alpha: context.globalAlpha, color: context.strokeStyle}; };
+      context.stroke = () => {
+        result = {alpha: context.globalAlpha, color: context.strokeStyle, width: context.lineWidth, dash: context.getLineDash()};
+      };
       graph.linkCanvasObject()(link, context);
       return result;
     },
@@ -109,15 +138,21 @@ async ({action, id, zoom, expected}) => {
         featureLeft: Math.min(...nodes.filter(node => node.area === 'feature').map(node => node.x - node.width / 2)),
         modelRight: Math.max(...nodes.filter(node => node.area === 'model').map(node => node.x + node.width / 2)),
         modelColumns: nodes.filter(node => node.area === 'model').map(node => node.x),
-        gaps: edges.map(edge => {
+        gaps: edges.flatMap(edge => {
+          if (edge.feedback) return [];
           const source = byId.get(edge.source), target = byId.get(edge.target);
-          return target.x - source.x - (source.width + target.width) / 2;
+          return source.tasteLayer && target.tasteLayer ? [] :
+            [target.x - source.x - (source.width + target.width) / 2];
+        }),
+        feedbackGaps: edges.filter(edge => edge.feedback).map(edge => {
+          const source = byId.get(edge.source), target = byId.get(edge.target);
+          return source.x - target.x - (source.width + target.width) / 2;
         }),
         overlaps: nodes.flatMap((node, index) => nodes.slice(index + 1).filter(other =>
           Math.abs(node.x - other.x) < (node.width + other.width) / 2 + 16
           && Math.abs(node.y - other.y) < (node.height + other.height) / 2 + 16)
           .map(other => [node.id, other.id])),
-        satellites: nodes.filter(node => node.area === 'model' && node.outgoing.length === 1).map(node => {
+        satellites: nodes.filter(node => node.area === 'model' && !node.tasteLayer && node.outgoing.length === 1).map(node => {
           const target = byId.get(edges.find(edge => edge.source === node.id).target);
           const others = nodes.filter(other => other !== node && other !== target).map(other => distance(node, other));
           return {parent: distance(node, target), others};

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from tests.radio_session_support import poc  # noqa: F401 - shared fixture
 from yt_playlist.rec import musical_character, musical_profiles
 from yt_playlist.rec.radio_candidates import POLICY_VERSION
+from yt_playlist.rec.vibe_score_policy import serving_prefix
 
 
 @pytest.mark.parametrize('profile', [None, {}, {'vibes': {'fits': {'energize': {}}}}])
@@ -40,7 +41,10 @@ def test_seed_and_direction_measurement_preserve_profile_provenance_and_unknowns
     from yt_playlist.rec import choice_evidence, measurement
     from yt_playlist.web import radio_session
     controller, _remote, _frames, _workers, pool = poc
-    profile = musical_character.compact(musical_profiles.resolve([], overrides={'energy': .9}))
+    profile = musical_character.compact({**musical_profiles.resolve([]), 'vibes': {
+        'inputs_version': serving_prefix() + 'radio-test',
+        'intensity_fits': {'energize': {'score': .9, 'support': .8, 'source': 'audio_measurement'}},
+    }})
     for track in pool[::2]:
         track['musical'] = deepcopy(profile)
     offers, menus = {}, []
@@ -70,6 +74,9 @@ def test_seed_and_direction_measurement_preserve_profile_provenance_and_unknowns
                 assert context['musical_version'] == profile['version']
                 assert context['musical_digest'] == profile['digest']
                 assert context['intensity'] == .9
+                assert context['intensity_support'] == .8
+                assert context['intensity_vibe'] == 'energize'
+                assert context['intensity_source'] == 'specialist_ensemble'
             else:
                 assert context['musical_version'] is None and context['musical_digest'] is None
                 assert context['intensity'] is None and context['intensity_support'] == 0

@@ -15,8 +15,7 @@ def album_menu(store, writer, *, now_playing, schedule, worker_available, logger
         present=lambda options, now, **kw: choice_evidence.present(writer, 'albums', options, now, **kw),
         close=lambda now, **kw: choice_evidence.close_window(writer, 'albums', now, **kw),
         opportunity=lambda oid: choice_evidence.opportunity(store, oid), schedule=schedule,
-        worker_available=worker_available,
-        writable=lambda: not getattr(writer, '_read_only', False) and not writer.activity_paused, logger=logger)
+        worker_available=worker_available, logger=logger)
 
 
 def note_preparation(store, *, now_playing, clients, now, stage):

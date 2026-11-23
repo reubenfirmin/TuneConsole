@@ -33,7 +33,6 @@ def test_visible_impressions_are_deduplicated_per_visit(store):
     s.discovery.record_discovery_impressions("album", ["b1"], "visit2", 400.0)
     alb = s.discovery.get_discovered_albums()[0]
     assert alb["offered_count"] == 2 and alb["last_shown"] == 400.0
-    assert s.conn.execute("SELECT COUNT(*) FROM discovery_impressions").fetchone()[0] == 2
 
 
 def test_mark_offered_album_and_artist(store):

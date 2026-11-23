@@ -9,33 +9,44 @@ ORIGIN_KEYS = ('radio_session_playlist_ids', 'radio_playlist_ytm', 'radio_playli
 
 
 class RadioCheckpoints:
-    def __init__(self, repository, settings, tracks, files, guard):
-        self.repository, self.settings, self.tracks = repository, settings, tracks
+    def __init__(self, repository, tracks, files, guard):
+        self.repository, self.tracks = repository, tracks
         self.files, self.guard = files, guard
+
+    def launch_receipts(self):
+        return self.repository.launch_receipts()
+
+    def first_sounds(self):
+        return self.repository.first_sounds()
+
+    def save_first_sounds(self, state, *, new=False):
+        self.repository.save_first_sounds(state, new=new)
+
+    def reserve_launch(self, launch_id, episode, *, predecessor=None, clear_seeded=False, seeded_recovery=None):
+        return self.repository.reserve_launch(launch_id, episode, predecessor=predecessor,
+                                              clear_seeded=clear_seeded, seeded_recovery=seeded_recovery)
+
+    def pending_seeded_launch(self):
+        return self.repository.pending_seeded_launch()
+
+    def update_seeded_dispatch(self, launch_id, playlist, *, started, was_started=False):
+        return self.repository.update_seeded_dispatch(launch_id, playlist, started=started, was_started=was_started)
+
+    def take_seeded_launch(self, launch_id):
+        return self.repository.take_seeded_launch(launch_id)
 
     def load(self):
         with self.files.retained():
             facts = self.repository.checkpoint_facts()
-            if facts['native']:
-                header = facts['header']
-                if header is None:
-                    return None, None
-                state = self.files.read(self._reference(header), kind='radio-session', owner=header['id'])
-                policy.project_queue(state, header, facts['queue'])
-                revision = (header['id'], header['revision'])
-                source = header['id']
-            else:
-                raw = self.files.read_prepared(facts['header']) if facts['prepared'] else self.settings.get_setting(SESSION_KEY)
-                state, revision, source = json.loads(raw) if raw else None, None, SESSION_KEY
-            if isinstance(state, dict):
-                operation = self.repository.operation_facts(source, native=facts['native'])
-                if operation is not None:
-                    if operation['native']:
-                        policy.project_operation(state, operation['header'], operation['roles'])
-                    else:
-                        header = operation['header']
-                        captured = self.files.read(self._reference(header), kind='radio-session', owner=header['source'])
-                        policy.project_prepared_operation(state, captured, header, operation['roles'])
+            header = facts['header']
+            if header is None:
+                return None, None
+            state = self.files.read(self._reference(header), kind='radio-session', owner=header['id'])
+            policy.project_queue(state, header, facts['queue'])
+            if state.get('local_id') is None and header.get('local_playlist_id') is not None:
+                state['local_id'] = header['local_playlist_id']
+            revision = (header['id'], header['revision'])
+            policy.restore_operation(state, header['operation_json'])
             return state, revision
 
     def save(self, encoded, *, expected, predecessor=None):
@@ -44,9 +55,6 @@ class RadioCheckpoints:
             owner, account = state.get('episode_id'), state.get('identity')
             facts = self.repository.save_facts(owner if isinstance(owner, str) else None,
                                                account if type(account) is int else None)
-            if not facts['native']:
-                self.settings.set_setting(SESSION_KEY, encoded)
-                return None
             head = facts['head']
             observed = (head['id'], head['revision']) if head else None
             if expected is None and predecessor is not None and observed == (predecessor.get('episode_id'), 1):
@@ -65,17 +73,17 @@ class RadioCheckpoints:
             revision = existing['revision'] + 1 if existing else 1
             phase = radio_checkpoint.normalize(state)['phase'] if state.get('version') == 1 else state.get('phase')
             queue = policy.queue(state)
-            operation = policy.operation(state) if facts['operations'] else None
+            operation = policy.operation(state)
             versions = sorted(radio_policy_roots.queue_versions(state))
-            entries = self.repository.queue_entries([track['video_id'] for track, _ in queue])
-            for track, _ in queue:
-                video = track['video_id']
-                if video not in entries:
-                    identity = self.tracks.observe_track_entry(video, track.get('title', ''), track.get('artist', ''),
-                        preferred_key='@unresolved-video:' + video)
-                    entries[video] = identity
-            # Admission may reconcile aliases; read the final recording references.
-            entries = self.repository.queue_entries([track['video_id'] for track, _ in queue])
+            videos = [track['video_id'] for track, _ in queue]
+            entries = self.repository.queue_entries(videos)
+            missing = {track['video_id']: track for track, _ in queue if track['video_id'] not in entries}
+            for video, track in missing.items():
+                self.tracks.observe_track_entry(video, track.get('title', ''), track.get('artist', ''),
+                    preferred_key='@unresolved-video:' + video)
+            if missing:
+                # Admission may reconcile aliases; read the final recording references.
+                entries = self.repository.queue_entries(videos)
             rows = [(position, *entries[track['video_id']], track['video_id'], status)
                     for position, (track, status) in enumerate(queue)]
             integrity = self.files.describe('radio-session', owner, state)
@@ -89,23 +97,10 @@ class RadioCheckpoints:
         if any(not isinstance(value, str) or not value for value in playlists):
             raise ValueError('Radio origin requires a provider playlist ID')
         with self.guard():
-            facts = self.repository.origin_facts()
-            if facts['native']:
-                self.repository.remember_playlists(playlists, account)
-            else:
-                previous = self._origin_ids(facts)
-                self.settings.set_setting(ORIGIN_KEYS[0], json.dumps(list(dict.fromkeys([*previous, *playlists]))))
+            self.repository.remember_playlists(playlists, account)
 
     def playlist_ids(self):
-        return self._origin_ids(self.repository.origin_facts())
-
-    @staticmethod
-    def _origin_ids(facts):
-        if facts['ids'] is not None:
-            return facts['ids']
-        values = facts['values']
-        return list(dict.fromkeys([*json.loads(values.get(ORIGIN_KEYS[0]) or '[]'),
-            *(values[key] for key in ORIGIN_KEYS[1:] if values.get(key))]))
+        return self.repository.playlist_ids()
 
     @staticmethod
     def _reference(header):

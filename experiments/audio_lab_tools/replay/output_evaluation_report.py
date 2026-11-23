@@ -264,7 +264,8 @@ def report(directory, local, runs):
                 for name, value in restrictions.items()):
             raise ValueError('Paired arms changed explicit restriction cases')
     with closing(sqlite3.connect((directory / 'source.db').as_uri() + '?mode=ro', uri=True)) as conn:
-        identities = dict(conn.execute('SELECT y.video_id,r.identity_key FROM youtube_items y JOIN recordings r ON r.id=y.recording_id'))
+        identities = dict(conn.execute('SELECT s.video_id,r.identity_key FROM track_sources s '
+                                       'JOIN recordings r ON r.id=s.recording_id WHERE s.video_id IS NOT NULL'))
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         artist_table = 'entry_artists' if 'entry_artists' in tables else 'track_artists'
         artist_ids = {}
@@ -273,7 +274,8 @@ def report(directory, local, runs):
             artist_ids.setdefault(key, []).append(artist)
         # An album name is not a globally unique album identity. Qualify it by
         # canonical artist set; missing names cannot connect unrelated tracks.
-        albums = {r[0]: r[1:] for r in conn.execute('SELECT video_id,album,album_browse_id FROM youtube_items')}
+        albums = {r[0]: r[1:] for r in conn.execute(
+            'SELECT video_id,album,album_browse_id FROM track_sources WHERE video_id IS NOT NULL')}
     captures = json.loads((arms['combined'][0] / 'capture-joins.json').read_text())
     joined, missing = [], []
     for row in annotations['rows']:

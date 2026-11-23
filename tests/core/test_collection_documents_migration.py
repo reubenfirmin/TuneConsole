@@ -1,17 +1,16 @@
-"""Import job admission and saved document recovery through a real upgrade."""
+"""Import job admission and saved document recovery."""
 import json
-import sqlite3
 
 import pytest
 
 from yt_playlist.core import collection_recovery, spotify_job_state
-from yt_playlist.core.migrations import current, migrate, registry, MigrationError
+from yt_playlist.core.migrations.playlist_document_storage import RETIRED
 from yt_playlist.web.spotify_import import load_job, save_job
 
 
 def test_stale_import_completion_cannot_replace_report_or_change_account(store):
-    first = store.accounts.upsert_account('First','first.json',None,True)
-    second = store.accounts.upsert_account('Second','second.json',None,False)
+    first = store.accounts.upsert_account('First',None,True)
+    second = store.accounts.upsert_account('Second',None,False)
     job = {'status':'running','identity_id':first}
     save_job(store,job)
     stale = dict(job)
@@ -31,14 +30,11 @@ def test_stale_import_completion_cannot_replace_report_or_change_account(store):
 def test_current_recipe_facets_follow_merge_while_capture_and_backup_remain(store,tmp_path):
     recipe = {'facets':{'genres':['synth pop','Unknown captured','synth pop'],'eras':['1990']}}
     store.playlist_recipes.set_recipe('PLAYLIST',recipe,3)
-    before = store.conn.execute('SELECT * FROM rec_recipes').fetchone()
+    before = store.playlist_recipes.repository.document_facts('recipes', 'PLAYLIST')['header']
     # The installed current references follow the redirect; captured text is immutable.
     with store.conn:
         store.conn.execute("INSERT INTO genre_alias VALUES ('unknown captured','Unknown captured','drum bass','custom')")
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('synth pop','drum bass')")
-        axis = store.conn.execute("INSERT INTO taste_axes(kind,genre_key) VALUES ('genre','drum bass') RETURNING id").fetchone()[0]
-        store.conn.execute("UPDATE playlist_recipe_facets SET axis_id=? WHERE axis_id IN "
-                           "(SELECT id FROM taste_axes WHERE kind='genre' AND genre_key='synth pop')", (axis,))
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='drum bass' WHERE key='synth pop'")
     assert store.playlist_recipes.get_recipe('PLAYLIST')['facets']['genres']==['drum bass','Unknown captured','drum bass']
     assert collection_recovery.read(before['recovery_filename'],before['recovery_digest'],before['recovery_bytes'],
                                     kind='playlist-recipe',owner=before['id'])==recipe
@@ -49,10 +45,6 @@ def test_current_recipe_facets_follow_merge_while_capture_and_backup_remain(stor
     collection_recovery.restore(store.conn,manifest)
     assert store.playlist_recipes.get_cluster_canvas('PLAYLIST')=='canvas'
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-    axis = store.conn.execute("SELECT id FROM taste_axes WHERE kind='genre' LIMIT 1").fetchone()[0]
-    with pytest.raises(sqlite3.IntegrityError,match='axis disagrees'):
-        store.conn.execute("UPDATE playlist_recipe_facets SET axis_id=? WHERE kind='era'",(axis,))
-    store.conn.rollback()
 
 
 def test_explicit_null_recipe_fields_and_empty_canvas_remain_distinct(store):
@@ -61,6 +53,8 @@ def test_explicit_null_recipe_fields_and_empty_canvas_remain_distinct(store):
     assert store.playlist_recipes.get_recipe('EMPTY')=={'media':None,'facets':None}
     assert store.playlist_recipes.get_cluster_canvas('EMPTY')==''
     assert store.playlist_recipes.get_recipe_created_ats()=={'EMPTY':None}
+    placeholders = ','.join('?' for _ in RETIRED)
+    assert not store.conn.execute(f'SELECT 1 FROM sqlite_schema WHERE name IN ({placeholders})', RETIRED).fetchone()
 
 
 def test_recording_alias_rekeys_saved_documents_and_preserves_unknown_formats(store):

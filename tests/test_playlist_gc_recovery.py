@@ -46,7 +46,7 @@ def case(tmp_path, monkeypatch, file_backed_store):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(playlist_backups, "with_retry", lambda fn, **kwargs: fn())
     store = file_backed_store
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Generated", 2, "", 1)
     tids = [store.tracks.upsert_track(v, v, "Artist", None, None, 1) for v in ("a", "b")]
     store.playlists.set_playlist_tracks(pid, tids)
@@ -100,7 +100,7 @@ def test_saved_failure_confirmed_absent_completes_original_without_another_delet
     result = collect(case)
 
     assert len(result)==1 and fao.read(result[0]['backup']).bytes == fao.read(backup).bytes
-    retained = case.store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',(aid,)).fetchone()[0]
+    retained = case.store.actions.repository.backups(aid)[0]['retained_filename']
     assert result[0]['backup']==retained
     assert case.store.actions.get_action(aid).status == "executed"
     assert case.store.playlists.get_playlist(case.pid) is None
@@ -469,7 +469,7 @@ def test_failed_target_does_not_block_healthy_playlist_and_retry_only_leaves_new
     collect(case)
     healthy = Client()
     healthy._tracks['HEALTHY'] = healthy._tracks.pop('SOURCE')
-    other = case.store.accounts.upsert_account("Other", "bridge", "brand", False)
+    other = case.store.accounts.upsert_account("Other", "brand", False)
     pid = case.store.playlists.upsert_playlist(other, "HEALTHY", "Other generated", 2, "", 1)
     case.store.playlists.set_playlist_provenance("HEALTHY", account_id=other,
                                                 origin="tuneconsole", adopted=False)
@@ -484,6 +484,24 @@ def test_failed_target_does_not_block_healthy_playlist_and_retry_only_leaves_new
     assert case.client.writes == []
     state, = playlist_gc_retry.states(case.store).values()
     assert state["identity"] == case.iid and state["attempts"] == 1
+
+
+def test_cleanup_state_on_shared_playlist_keeps_accounts_independent(case):
+    other = case.store.accounts.upsert_account("Other", "brand", False)
+    remote = 'SOURCE'
+    saved = {case.iid: 20, other: 30}
+    for account, deadline in saved.items():
+        state = {'identity': account, 'ytm': remote, 'attempts': 1,
+                 'last_attempt_at': 10, 'next_retry_at': deadline}
+        case.store.playlists.set_cleanup_attempt(account, remote, state)
+    assert set(playlist_gc_retry.deadlines(case.store)) == {
+        (account, remote, deadline) for account, deadline in saved.items()}
+    with pytest.raises(ValueError, match='captured target'):
+        case.store.playlists.set_cleanup_attempt(case.iid, remote, state)
+    assert case.store.playlists.cleanup_attempt(other, remote) == state
+    playlist_gc_retry.clear(case.store, case.iid, remote)
+    assert case.store.playlists.cleanup_attempt(case.iid, remote) is None
+    assert case.store.playlists.cleanup_attempt(other, remote) == state
 
 
 def test_explicit_manual_retry_keeps_existing_semantics_despite_automatic_backoff(case):

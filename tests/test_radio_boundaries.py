@@ -51,8 +51,8 @@ def test_legacy_flags_have_explicit_migration_precedence(changes, phase):
 @pytest.mark.parametrize("replacement", [False, True])
 def test_restart_checks_an_uncertain_write_before_sending_another(poc, monkeypatch, version, replacement):
     c, remote, *_ = poc
-    with c.launch_request('restorable-launch') as cancelled:
-        c.start(cancelled=cancelled)
+    with c.launch_request('restorable-launch') as launch:
+        c.start(launch=launch)
     assert c.session.phase == Phase.AWAITING_PLAYBACK
     play(c, "v1" if replacement else "v3")
     if not replacement:
@@ -97,14 +97,14 @@ def test_restart_checks_an_uncertain_write_before_sending_another(poc, monkeypat
         deferred = PlaylistRadio(c.ctx)
         with deferred.launch_request('pending-new-launch') as pending:
             deferred.stop(launch_id='restorable-launch')
-            assert deferred.session is None and not pending.is_set()
+            assert deferred.session is None and not pending.cancelled.is_set()
 
             def cancelled_read(*args, **kwargs):
                 pytest.fail('Restored a cancelled launch through a remote playlist read')
 
             monkeypatch.setattr(remote, 'get_playlist', cancelled_read)
             deferred.join()
-            assert deferred.session is None and not pending.is_set()
+            assert deferred.session is None and not pending.cancelled.is_set()
             checkpoint = deferred.persistence.load()
             assert checkpoint['launch_id'] == 'restorable-launch'
             assert checkpoint['stopped'] and checkpoint['phase'] == Phase.STOPPED

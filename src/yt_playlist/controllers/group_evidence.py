@@ -8,10 +8,9 @@ from yt_playlist.core.recommendation_outputs import CollectionProgress
 
 
 class GroupEvidence:
-    def __init__(self, repository, ledger, admission, files, output_guard, *, enabled, recommendations):
+    def __init__(self, repository, ledger, admission, files, output_guard):
         self.repository, self.ledger, self.admission = repository, ledger, admission
         self.files, self.output_guard = files, output_guard
-        self.enabled, self.recommendations = enabled, recommendations
         self._orphan_after = ''
 
     def replace_prepared(self, surface, data, at, *, historical=False, resolved_contexts=None):
@@ -20,14 +19,12 @@ class GroupEvidence:
             return self.repository.replace_prepared(*prepared, historical=historical)
 
     def prepare_references(self, surface, data, at, *, historical=False, resolved_contexts=None):
-        if not self.enabled or surface not in PREPARED and not surface.startswith('model_pair:'):
+        if surface not in PREPARED:
             return
         at = time.time() if at is None else at
         data = data if isinstance(data, dict) else {}
-        kind = 'comparison' if surface.startswith('model_pair:') else 'prepared'
-        if kind == 'comparison' and isinstance(data.get('data'), dict):
-            data = data['data']
-        generations = recommendation_references.prepared_generations(surface, data) if self.recommendations else None
+        kind = 'prepared'
+        generations = recommendation_references.prepared_generations(surface, data)
         operations = []
         for field in FIELDS:
             identity = 'proposal:' + surface + ':' + field
@@ -40,7 +37,7 @@ class GroupEvidence:
             if value:
                 try:
                     if resolved_contexts is None:
-                        value = resolve(value, self.ledger(), recommendations=self.recommendations)
+                        value = resolve(value, self.ledger())
                     elif field in resolved_contexts:
                         value = resolved_contexts[field]
                     else:
@@ -52,8 +49,7 @@ class GroupEvidence:
                     unknown = (raw, 'missing_context', at)
                 else:
                     generation, versions = group_evidence.references(value)
-                    if self.recommendations:
-                        references = recommendation_references.references(value)
+                    references = recommendation_references.references(value)
                     if generation is not None or versions:
                         owner = group_evidence.prepare(kind, identity, value, at)
             operations.append((identity, owner, unknown, references))

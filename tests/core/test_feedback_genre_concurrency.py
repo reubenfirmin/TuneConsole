@@ -17,7 +17,7 @@ from yt_playlist.web.app import create_app
 @pytest.mark.parametrize('http', [False, True], ids=['resolver', 'http'])
 def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch, http):
     store, _ = installed
-    store.accounts.upsert_account('Main', 'credentials', None, True)
+    store.accounts.upsert_account('Main', None, True)
     entry = store.tracks.upsert_track('feedback-genre', 'Feedback song', 'Artist', None, 200)
     store.tracks.set_track_genre(entry, 'Synth Pop')
     key = identity_key('Feedback song', 'Artist')
@@ -74,8 +74,8 @@ def test_feedback_ignores_a_concurrent_rolled_back_family(installed, monkeypatch
     assert observed == ['pop']
     assert _feedback_axis(store, None, 'vibe', key) == 'genre:pop'
     if http:
-        assert store.rec_signals.get_theme('genre:pop') < 0
-        assert not store.rec_signals.get_theme('genre:jazz')
+        assert store.rec_model.get_session_weights(now=1000) == {'genre:pop': .85}
+        assert store.rec_model.baseline_weights(now=1000) == {}
         assert key in store.rec_model.suppressed_keys('suggest', now=1001)
     else:
         assert axis == 'genre:pop'

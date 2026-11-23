@@ -16,6 +16,10 @@ def native_position(tracks, heard, playlist, state):
     native, player = state.get('native') or {}, state.get('player') or {}
     ids = native.get('videoIds') or []
     video = player.get('video_id')
+    slot = state.get('savedIndex')
+    if (player.get('playlist_ytm_id') == playlist and video
+            and type(slot) is int and 0 <= slot < len(tracks)):
+        return slot
     expected = [t['video_id'] for t in observed_queue(tracks, heard)]
     if (not native.get('available') or player.get('playlist_ytm_id') != playlist
             or (native.get('playlistIds') and native['playlistIds'] != [playlist])

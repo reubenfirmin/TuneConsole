@@ -12,8 +12,7 @@ on:
       revision:
         default: ''
         type: string
-# Permissions come from the caller: ordinary CI grants read access; only the release
-# coordinator grants packages: write. Fork PR builds never need registry credentials.
+# Permissions come from the caller. Only production candidate jobs can push to GHCR.
 concurrency:
   group: containers-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name != 'push' || !startsWith(github.ref, 'refs/tags/') }}
@@ -62,17 +61,18 @@ jobs:
         if: inputs.stage
         env:
           ARCH: ${{ matrix.arch }}
+          REVISION: ${{ inputs.revision || github.sha }}
         run: |
           image="${IMAGE,,}"
-          candidate="$image:candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
-          docker tag tuneconsole:candidate "$candidate"
-          docker push "$candidate"
-          digest=$(docker inspect --format '{{index .RepoDigests 0}}' "$candidate")
-          python3 -c 'import json,os,sys; json.dump(dict(arch=os.environ["ARCH"],version=os.environ["VERSION"],digest=sys.argv[1]),open("container-"+os.environ["ARCH"]+".json","w"))' "$digest"
+          tag="candidate-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT-$ARCH"
+          docker tag tuneconsole:candidate "$image:$tag"
+          docker push "$image:$tag"
+          python3 packaging/container/receipt.py "$image" "$ARCH" "$VERSION" "$REVISION" "container-$ARCH.json" --tag "$tag"
       - uses: actions/upload-artifact@v4
         if: inputs.stage
         with:
           name: release-container-${{ matrix.arch }}
+          overwrite: true
           retention-days: 30
           path: container-${{ matrix.arch }}.json
           if-no-files-found: error

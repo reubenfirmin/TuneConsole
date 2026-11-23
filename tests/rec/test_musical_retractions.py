@@ -31,9 +31,10 @@ def settled(store):
 
 
 def source_rows(store):
-    return {row['entity_id']: dict(row) for row in store.conn.execute(
-        'SELECT s.*,p.digest FROM rec_musical_sources s '
-        'JOIN rec_musical_source_profiles p USING(source_key) ORDER BY s.source_key')}
+    return {row['entity_id']: dict(row) | {'selected_observations': json.loads(row['selected_observations'])}
+            for row in store.conn.execute(
+        'SELECT *,musical_profile_digest AS digest FROM rec_musical_sources '
+        'WHERE musical_profile_version IS NOT NULL ORDER BY source_key')}
 
 
 def versions(store):
@@ -62,11 +63,22 @@ def test_delivery_contraction_and_replacement_rebuild_from_current_links(store, 
     deliver(store, entry, initial, 'initial')
     settled(store)
     before, counters = source_rows(store), store.prepared_content.counters()
+    historical = store.enrichment_state.metadata_observations('song|artist')
     assert set(versions(store)) == {row['digest'] for row in before.values()}
     deliver(store, entry, corrected, 'corrected')
     assert [row[0] for row in store.prepared_content.pending(32)] == ['song|artist']
+    observations = store.enrichment_state.metadata_observations('song|artist')
+    assert len(observations) == len(initial) + len(corrected)
+    assert observations[:len(initial)] == historical
+    replacement = observations[-1]
+    assert replacement['field'] == 'tags'
+    assert replacement['provenance']['delivery_id'] == 'corrected'
+    assert replacement['provenance']['entity_id'] == corrected[0]
+    expected = dict(before)
     if len(initial) == 2:
-        assert source_rows(store) == before
+        assert before['a']['selected_observations']['tags'] != replacement['id']
+        expected['a'] = before['a'] | {'selected_observations': {'tags': replacement['id']}}
+        assert source_rows(store) == expected
         assert store.musical_profiles.pending() is None
         # Removing a source link invalidates the joint model's masked metadata
         # inputs immediately, even though no source profile needs rebuilding.
@@ -76,7 +88,7 @@ def test_delivery_contraction_and_replacement_rebuild_from_current_links(store, 
     settled(store)
     current = source_rows(store)
     assert set(versions(store)) == {current[entity]['digest'] for entity in corrected}
-    assert all(current[entity] == row for entity, row in before.items())
+    assert current[corrected[0]]['selected_observations'] == {'tags': replacement['id']}
+    assert all(current[entity] == row for entity, row in expected.items())
     assert store.prepared_content.counters() == counters
-    observations = store.enrichment_state.metadata_observations('song|artist')
-    assert len([row for row in observations if row['provider'] == 'fixture-retraction']) == len(initial) + len(corrected)
+    assert store.enrichment_state.metadata_observations('song|artist') == observations

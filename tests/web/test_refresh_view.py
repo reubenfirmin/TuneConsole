@@ -29,7 +29,7 @@ def _client(store, provider, bridge):
 
 
 def _seed_three(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Mix", 3, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", "Alb", 200, 1) for i in range(3)])
     fc = FakeClient(tracks={"PL1": [{"videoId": f"v{i}", "setVideoId": f"sv{i}"} for i in range(3)]})
@@ -62,7 +62,7 @@ def test_disconnected_extension_does_not_break_the_route(store):
 
 def test_failed_op_does_not_fire_refresh_view(store):
     # A nonexistent playlist -> the op raises ValueError -> a toast, no mutation, and no control frame.
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     bridge = _StubBridge()
     c = _client(store, lambda: {}, bridge)
 
@@ -76,7 +76,7 @@ def test_failed_op_does_not_fire_refresh_view(store):
 @pytest.mark.parametrize('disconnected', [False, True], ids=['connected', 'disconnected'])
 def test_add_tracks_posts_refresh_view(store, song_menu, disconnected, caplog):
     import json
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "My Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "Song A", "Artist X", "Alb", 200, 1)])
     bridge = _StubBridge(raises=disconnected)
@@ -100,7 +100,7 @@ def test_add_tracks_posts_refresh_view(store, song_menu, disconnected, caplog):
 
 
 def test_rename_posts_refresh_view(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PL1", "Old Name", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(a, [store.tracks.upsert_track("v0", "S", "X", "Al", 200, 1)])
     bridge = _StubBridge()
@@ -147,7 +147,7 @@ def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypat
     # Undeletable system playlists are only hidden locally: nothing changed on YouTube, so there
     # is nothing to refresh.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(lm, [store.tracks.upsert_track("v1", "S", "X", "Al", 200, 1)])
     bridge = _StubBridge()
@@ -160,8 +160,8 @@ def test_delete_of_system_playlist_hides_only_and_does_not_fire(store, monkeypat
 
 
 def _two_identity_move(store):
-    i1 = store.accounts.upsert_account("main", "c1", None, True)
-    i2 = store.accounts.upsert_account("Alt", "c2", None, False)
+    i1 = store.accounts.upsert_account("main", None, True)
+    i2 = store.accounts.upsert_account("Alt", None, False)
     pid = store.playlists.upsert_playlist(i1, "PL1", "Mix", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pid, [store.tracks.upsert_track("v1", "S", "X", None, None, 1)])
     return i1, i2, pid
@@ -200,10 +200,10 @@ def copy_move_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.library import undo_capture
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, move
+    from yt_playlist.web.routes import app_update, audio_vibes, move
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, move)])
+        module.build(ctx) for module in (app_update, audio_vibes, move)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     capture, pauses = undo_capture.capture_post, []
     # Keep real constrained readback and every retry. Provider pacing is below

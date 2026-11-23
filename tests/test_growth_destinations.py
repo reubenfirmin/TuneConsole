@@ -11,10 +11,10 @@ from tests.home_fixture_support import (
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls)
 from tests.store_fixture_support import file_consumer_store as store
-from tests.onboarding_support import publish_personal_album, publish_personal_mix
+from tests.onboarding_support import publish_live_mix_inputs, publish_personal_album, publish_personal_mix
 from tests.test_tv_stream import video
 from yt_playlist.core.db_writes import atomic_write
-from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into_recently, onboarding, tv
+from yt_playlist.rec import account_growth, choice_evidence, home_prepared, into_recently, tv
 
 
 @pytest.fixture(scope='module')
@@ -40,9 +40,9 @@ def _publish_destinations(store, now):
     store.rec_proposals.put_proposals(home_prepared.DISCOVERY_SURFACE, {
         'discovery_albums': [], 'discovery_artists': [], 'discovery_tracks': tracks}, now)
     master = next((identity for identity in store.accounts.get_accounts() if identity.is_master), None)
-    listener = master.id if master else store.accounts.upsert_account('Main', 'credential', None, True)
+    listener = master.id if master else store.accounts.upsert_account('Main', None, True)
     for i in range(12):
-        if not store.conn.execute('SELECT 1 FROM youtube_items WHERE video_id=?', (f'old-song-{i}',)).fetchone():
+        if not store.conn.execute('SELECT 1 FROM track_sources WHERE video_id=?', (f'old-song-{i}',)).fetchone():
             seed_catalog_track(store, f'old {i}|artist', f'Old favorite {i}', 'Artist', video_id=f'old-song-{i}')
         store.tracks.record_item_rating(listener, f'old-song-{i}', 'LIKE', source='api', now=now)
     store.rec_proposals.put_proposals(home_prepared.REVISIT_SURFACE,
@@ -67,7 +67,7 @@ def publish_journey_prefix(store, now=1000, *, vibe_template=None):
         vibe_template.restore(store)
     if not store.conn.execute("SELECT 1 FROM recordings WHERE identity_key='first|artist'").fetchone():
         early_journey(store)
-    if not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='prepared-0'").fetchone():
+    if not store.conn.execute("SELECT 1 FROM track_sources WHERE video_id='prepared-0'").fetchone():
         publish_personal_mix(store, now=now)
     if vibe_template is None:
         publish_vibe_menus(store)
@@ -90,7 +90,7 @@ def complete_journey(store, now=1000):
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'current-radio', 'tracks': [
             {'key': f'prepared {i}|artist', 'video_id': f'prepared-{i}'} for i in range(4)]}))
-    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], now)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)')], now)
     complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], now)
 
@@ -102,8 +102,7 @@ def publish_full_journey(store, now=1000):
 
 @pytest.fixture
 def mix_count_store(tmp_path, monkeypatch, native_sql_calls):
-    # These synchronous readiness reads consume committed menus. Snapshot
-    # conflict detection and Vibe's genre catalog are independent of mix count.
+    # Snapshot conflict detection and Vibe's genre catalog are independent of live mix count.
     with bounded_consumer_schema((('house', 'House'), ('jazz', 'Jazz')), snapshot_guards=False) as schema:
         with _file_consumer_store(tmp_path, schema, snapshot_guards=False) as database:
             with mock_snapshot_coordinator(database, monkeypatch):
@@ -133,7 +132,7 @@ def test_four_eligible_mixes_are_required_everywhere(
     seed_catalog_track(store, 'first|artist', 'First song', 'Artist', video_id='first')
     publish_personal_album(store, count=2)
     store.settings.set_setting('last_sync_at', '1')
-    publish_personal_mix(store, count=count)
+    publish_live_mix_inputs(store, count=count)
     expected = count == 4
     for _ in range(2):
         home = client.get('/')
@@ -145,11 +144,9 @@ def test_four_eligible_mixes_are_required_everywhere(
         assert setup['complete'] is True  # Long play is an earlier usable format.
         assert 'id="onboarding-feed"' not in home.text
     if expected:
-        seed_dislike(store, 'prepared 0|artist', until=None, now=1000)
-        # Feedback schedules new preparation; serving keeps the published board.
-        assert onboarding.prepared_mixes_ready(store, 1000)
-        assert client.get('/home/growth').json()['ready_formats']['mixes']
-        assert client.get('/home/onboard/status').json()['setup']['mixes_ready']
+        seed_dislike(store, 'live comfort 0|artist 0', until=None, now=1000)
+        assert not client.get('/home/growth').json()['ready_formats']['mixes']
+        assert not client.get('/home/onboard/status').json()['setup']['mixes_ready']
 
 
 def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility(store, monkeypatch):
@@ -182,6 +179,7 @@ def test_new_destinations_require_usable_outputs_and_recheck_current_eligibility
             {'browse_id': f'MPRE{i}', 'title': f'Record {i}', 'artist': f'Artist {i}',
              'classification': 'discovery', 'score': .8} for i in range(2)]}, 1000)
     publish_personal_mix(store)
+    publish_live_mix_inputs(store)
     complete_journey(store)
     assert all(areas().values())
     store.rec_model.record_feedback('for_you', 'new 0|new artist 0', 'dismiss', now=1000)
@@ -256,7 +254,7 @@ def test_retained_access_matches_the_existing_journey_without_claiming_ready_out
     from tests.home_fixture_support import returning_listener
 
     if format == 'tv':
-        store.settings.set_setting('tv_draw', '1')
+        store.tv_preparation.record_draw([])
     elif format:
         returning_listener(store, format)
     state = account_growth.view(store, 1000)
@@ -304,6 +302,7 @@ def vibe_journey(vibe_journey_store, monkeypatch):
     from tests.home_fixture_support import publish_menu
     from tests.musical_support import prepare_profiles
     from tests.recommendation_support import seed_publication_subjects
+    from tests.test_growth_readiness import record_vibe_menu_observations
 
     store = vibe_journey_store
     # This coordinator consumes completed Foundation and Vibe pool decisions.
@@ -313,8 +312,10 @@ def vibe_journey(vibe_journey_store, monkeypatch):
     monkeypatch.setattr(account_growth.growth_readiness, 'foundation', lambda *args: True)
     monkeypatch.setattr(account_growth.growth_readiness, 'vibes', lambda *args: True)
     publish_menu(store, tracks_per_card=1)
-    seed_catalog_track(store, 'measured|artist', 'Measured', 'Artist', video_id='measured',
-                       genre='Jazz', energy=.1, mood_relaxed=.9, mood_happy=.8)
+    publish_live_mix_inputs(store)
+    key = 'measured|artist'
+    entry = seed_catalog_track(store, key, 'Measured', 'Artist', video_id='measured', genre='Jazz')
+    record_vibe_menu_observations(store, {key: entry}, {key: {'mood_relaxed': .9, 'mood_happy': .8}})
     prepare_profiles(store)
     store.rec_proposals.put_proposals('album_prepared', {'built_at': 1000, 'context': {}, 'items': [
         {'browse_id': f'MPRE{i}', 'title': f'Record {i}', 'artist': f'Artist {i}',
@@ -337,6 +338,8 @@ def assert_vibe_access_agrees(store, monkeypatch, expected, now=1000, radio=None
         patch.setattr(into_recently, 'load', lambda *a, **k: pytest.fail('Vibe access loaded articles'))
         patch.setattr(account_growth.deepseek, 'settings', lambda *a, **k: pytest.fail('Vibe access loaded bonuses'))
         assert account_growth.vibe_access(store, now, radio) is expected
+        if radio is not None:
+            assert account_growth.vibe_access(store, now, lambda: radio) is expected
 
 
 @pytest.mark.parametrize('radio_case', ['prepared', 'empty-offer', 'short-offer', 'no-offer'])
@@ -361,11 +364,45 @@ def test_tv_history_keeps_prefix_but_never_invents_vibe_output(vibe_journey, mon
     assert_vibe_access_agrees(store, monkeypatch, True)
     store.rec_proposals.put_proposals(tv.SURFACE, {}, 1001)
     assert_vibe_access_agrees(store, monkeypatch, False, now=1001)
-    store.settings.set_setting('tv_draw', '1')
+    store.tv_preparation.record_draw([])
     assert_vibe_access_agrees(store, monkeypatch, True, now=1002)
     with store.conn:
-        store.conn.execute('DELETE FROM recording_vibes')
+        store.conn.execute("UPDATE recordings SET acousticbrainz_estimates='{}' WHERE acousticbrainz_estimates<>'{}'")
     assert_vibe_access_agrees(store, monkeypatch, False, now=1003)
+
+
+@pytest.mark.parametrize(('mixes_ready', 'prior_vibe', 'expected'), [
+    (False, False, False), (True, False, True), (False, True, True),
+])
+def test_direct_recent_links_follow_vibe_progression(recent_growth_store, monkeypatch, mixes_ready, prior_vibe, expected):
+    from tests.test_onboarding_routes import _client
+
+    store = recent_growth_store
+    _, client = _client(store)
+    with client:
+        store.settings.set_setting('last_sync_at', '1')
+        publish_destinations(store)
+        store.tv_preparation.record_draw([entry['video_id'] for entry in tv.queue(store, 1000)])
+        # Control the ordinary Mix Tapes producer, keeping real Vibe menus,
+        # story groups, and all route and progression decisions in the check.
+        monkeypatch.setattr(account_growth.onboarding_outputs, 'mixes_ready', lambda *_: mixes_ready)
+        if prior_vibe:
+            option = {'id': 'chosen', 'label': 'A Jazz mix', 'intent': 'energy_arc', 'genres': ['Jazz']}
+            offer = choice_evidence.issue(store, 'mixes', [option], 997, context={}, vibe='relax')
+            for action, at in (('choice', 998), ('start', 999)):
+                assert choice_evidence.respond(store, offer, action, at, option_id='chosen', synchronous=True)
+            assert choice_evidence.compile_report(store, 1000)['home_format']['vibe_episodes'] == 1
+            assert account_growth.retained_access(store, 'vibes')
+        assert account_growth.vibe_access(store, 1000) is expected
+        for query in ('', '?navigation=true'):
+            assert client.get('/home/growth' + query).json()['ready_areas']['recent'] is expected
+        status = 200 if expected else 409
+        assert client.get('/home/into-recently').status_code == status
+        assert client.post('/home/into-recently/impressions', json={'subjects': []}).status_code == (
+            204 if expected else 409)
+        fragment = client.get('/?panel=recent&fragment=1')
+        assert fragment.status_code == status
+        assert ('class="into-story' in fragment.text) is expected
 
 
 def test_real_vibe_choice_start_and_withdrawal_control_earned_access(vibe_journey_store, monkeypatch):

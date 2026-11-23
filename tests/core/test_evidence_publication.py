@@ -23,7 +23,8 @@ def test_pinned_preparation_reader_publishes_context_through_the_original_writer
         assert not store.conn.in_transaction
         assert snapshot.store.rec_ledger.evidence().get('artifact', frozen['artifact']) == value
         with closing(sqlite3.connect(store._db_path)) as observer:
-            assert observer.execute("SELECT count(*) FROM evidence_file_writes WHERE file_status='ready'").fetchone()[0]
+            assert observer.execute("SELECT count(*) FROM collection_file_writes WHERE kind='listening-evidence' "
+                                    "AND file_status='ready'").fetchone()[0]
     assert store.rec_ledger.evidence().get('artifact', frozen['artifact']) == value
 
 
@@ -38,7 +39,8 @@ def test_pending_evidence_is_hidden_after_file_and_sql_interruptions_and_reopens
     def interrupted(path, *args, **kwargs):
         assert not store.conn.in_transaction
         with closing(sqlite3.connect(store._db_path)) as observer:
-            pending = observer.execute("SELECT id FROM evidence_file_writes WHERE file_status='pending' ORDER BY id DESC").fetchone()[0]
+            pending = observer.execute("SELECT file_address FROM collection_file_writes WHERE kind='listening-evidence' "
+                                       "AND file_status='pending' ORDER BY file_address DESC").fetchone()[0]
         assert path == record_path(ledger.directory, 'response', pending)
         observed.append(pending)
         raise OSError('evidence file interrupted')
@@ -48,14 +50,16 @@ def test_pending_evidence_is_hidden_after_file_and_sql_interruptions_and_reopens
         patch.setattr(fao, 'prepare', interrupted)
         with pytest.raises(OSError, match='evidence file interrupted'):
             ledger.put('response', 'new', {'id': 'new'})
-    store.conn.execute("CREATE TEMP TRIGGER reject_evidence_completion BEFORE UPDATE OF file_status ON evidence_file_writes "
-                       "WHEN NEW.file_status='ready' BEGIN SELECT RAISE(ABORT,'evidence head interrupted'); END")
+    store.conn.execute("CREATE TEMP TRIGGER reject_evidence_completion BEFORE UPDATE OF file_status ON collection_file_writes "
+                       "WHEN NEW.kind='listening-evidence' AND NEW.file_status='ready' "
+                       "BEGIN SELECT RAISE(ABORT,'evidence head interrupted'); END")
     with pytest.raises(sqlite3.IntegrityError, match='evidence head interrupted'):
         ledger.put('response', 'new', {'id': 'new'})
     store.conn.execute('DROP TRIGGER reject_evidence_completion')
     assert ledger.get('response', 'new') is None
     assert ledger.records('response') == [good]
-    pending = [row[0] for row in store.conn.execute("SELECT id FROM evidence_file_writes WHERE file_status='pending'")]
+    pending = [row[0] for row in store.conn.execute("SELECT file_address FROM collection_file_writes "
+                                                   "WHERE kind='listening-evidence' AND file_status='pending' ORDER BY file_address")]
     assert len(pending) == 2
     assert record_path(ledger.directory, 'response', pending[-1]).is_file()
     store.conn.close()

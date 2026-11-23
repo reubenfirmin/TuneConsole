@@ -1,18 +1,25 @@
-"""Retained playlist backup paths derived from their SQL file record IDs."""
+"""Paths for retained playlist backups."""
 from pathlib import Path
 
 
 def record_path(root, identity):
-    if type(identity) is not int or identity <= 0:
+    if type(identity) is int and identity > 0:
+        shard = f'{identity % 256:02x}'
+    elif isinstance(identity, str) and len(identity) == 32 and all(c in '0123456789abcdef' for c in identity):
+        shard = identity[:2]
+    else:
         raise ValueError('Invalid action backup file ID')
-    return Path(root) / 'backups' / f'{identity % 256:02x}' / f'{identity}.json'
+    return Path(root) / 'backups' / shard / f'{identity}.json'
 
 
 def record_id(path):
     path = Path(path)
-    if path.parent.parent.name != 'backups' or not path.stem.isascii() or not path.stem.isdecimal():
+    if path.parent.parent.name != 'backups':
         return None
-    identity = int(path.stem)
-    if identity <= 0 or path != record_path(path.parent.parent.parent, identity):
+    stem = path.stem
+    identity = int(stem) if len(stem) < 32 and stem.isascii() and stem.isdecimal() else stem
+    try:
+        expected = record_path(path.parent.parent.parent, identity)
+    except ValueError:
         return None
-    return identity
+    return identity if path == expected else None

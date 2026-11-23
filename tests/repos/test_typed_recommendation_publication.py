@@ -11,7 +11,7 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls,
     reuse_reporting_reader, without_query_timing,
 )
-from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from yt_playlist.core import recommendation_custody, recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing, WorkBudgetExceeded
 from yt_playlist.repos import group_retention, recommendation_publication as publication
 
@@ -53,7 +53,7 @@ def recommendation_reads(recommendations, monkeypatch):
 
 def plan(store, key='one', *, candidates=None, fingerprint='a' * 64, group=1):
     policy = store.conn.execute('SELECT policy_version FROM group_generations WHERE id=1').fetchone()[0]
-    pool = pools.prepare('wheelhouse', policy, None, fingerprint, 'card',
+    pool = pools.prepare('wheelhouse', policy, fingerprint, 'card',
                          candidates if candidates is not None else [pools.Candidate(1, .9), pools.Candidate(2, .7)])
     return publication.Plan(key, policy, group, 1, 10,
         (publication.Slot('home', 'all', 'wheelhouse', pool), publication.Slot('home', 'small-genre', 'wheelhouse', pool)),
@@ -98,7 +98,7 @@ def test_partial_rows_are_hidden_until_one_atomic_head_switch(recommendation_rea
     assert [row['key'] for row in store.recommendations.page('home', 'genre-17', 'wheelhouse')] == ['one', 'two']
     assert len(store.recommendations.selections('home', 'wheelhouse')) == 20
     assert store.recommendations.output('home', 'framing') == {'title': 'one'}
-    assert not store.conn.execute('SELECT 1 FROM recommendation_builds').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE build_owner IS NOT NULL').fetchone()
     assert store.conn.execute('SELECT count(*) FROM recommendation_pools').fetchone()[0] == 1
     assert store.conn.execute('SELECT count(*) FROM recommendation_candidates').fetchone()[0] == 2
 
@@ -114,7 +114,8 @@ def test_queried_bundle_framing_is_typed_and_frozen_with_its_generation(recommen
     actual = store.recommendations.framing('home')
     assert actual['generation_id'] == build.generation_id
     assert (actual['year_low'], actual['year_high'], actual['comfort_pool'], actual['radio_space']) == (1987, 2004, 17, 'embedding-space')
-    for sql in ('UPDATE recommendation_bundle_framing SET comfort_pool=0', 'DELETE FROM recommendation_bundle_framing'):
+    for sql in ('UPDATE recommendation_generations SET comfort_pool=0',
+                'UPDATE recommendation_generations SET presence=NULL'):
         with pytest.raises(sqlite3.IntegrityError), store.conn:
             store.conn.execute(sql)
     with pytest.raises(ValueError, match='framing'):
@@ -232,7 +233,7 @@ def test_changed_pool_does_not_replace_unchanged_ranking_facts(recommendations):
     publish(store, first)
     unchanged = store.recommendations.pool('home', 'all', 'wheelhouse')['id']
     original = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY rank')]
-    changed = pools.prepare('explore', first.policy_version, None, 'b' * 64, 'card', [pools.Candidate(2, .8)])
+    changed = pools.prepare('explore', first.policy_version, 'b' * 64, 'card', [pools.Candidate(2, .8)])
     second = replace(first, external_key='two', input_revision=2, slots=first.slots +
                      (publication.Slot('home', 'all', 'explore', changed),))
     publish(store, second)
@@ -251,7 +252,7 @@ def test_live_owner_fences_takeover_and_expired_takeover_fences_stale_completion
     with pytest.raises(WorkBudgetExceeded, match='another worker'):
         store.recommendations.claim(prepared)
     with store.conn:
-        store.conn.execute('UPDATE recommendation_builds SET expires_at=0')
+        store.conn.execute('UPDATE recommendation_generations SET build_expires_at=0 WHERE build_owner IS NOT NULL')
     replacement = store.recommendations.claim(prepared)
     assert replacement.owner != original.owner
     store.recommendations.stage(prepared, replacement)
@@ -275,12 +276,13 @@ def test_late_snapshot_conflict_and_late_sql_failure_leave_last_good_head(recomm
         assert not snapshot.publish_ordered(lambda: store.recommendations.publish(build, 12))
     assert store.recommendations.head('home')['id'] == previous.generation_id
     with store.conn:
-        store.conn.execute("CREATE TEMP TRIGGER controlled_head_failure BEFORE INSERT ON recommendation_heads "
+        store.conn.execute("CREATE TEMP TRIGGER controlled_head_failure BEFORE UPDATE OF selected "
+                           "ON recommendation_generation_surfaces WHEN NEW.selected=1 "
                            "BEGIN SELECT RAISE(ABORT,'controlled head failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='controlled head failure'):
         store.recommendations.publish(build, 12)
     assert store.recommendations.head('home')['id'] == previous.generation_id
-    assert store.conn.execute('SELECT owner FROM recommendation_builds WHERE generation_id=?',
+    assert store.conn.execute('SELECT build_owner FROM recommendation_generations WHERE id=?',
                               (build.generation_id,)).fetchone()[0] == build.owner
     with store.conn:
         store.conn.execute('DROP TRIGGER controlled_head_failure')
@@ -317,7 +319,7 @@ def test_changed_inputs_during_output_files_stop_staging_and_keep_last_good_head
                 prepared, build, still_current=snapshot.is_current) is False
         assert changed == [True]
         staged = store.conn.execute(
-            'SELECT chunk_key FROM prepared_outputs WHERE generation_id=?', (build.generation_id,)).fetchall()
+            'SELECT chunk_key FROM recommendation_chunks WHERE generation_id=?', (build.generation_id,)).fetchall()
         assert 0 < len(staged) < len(documents), 'Obsolete work must stop before staging every output'
         assert not snapshot.publish_ordered(lambda: store.recommendations.publish(build, 12))
     assert store.recommendations.head('home')['id'] == previous.generation_id
@@ -343,7 +345,8 @@ def test_published_rows_cannot_mutate_and_seal_requires_exact_complete_membershi
     build = publish(store, plan(store))
     for sql in ("UPDATE recommendation_generations SET status='ready'", 'UPDATE recommendation_candidates SET score=0',
                 'DELETE FROM recommendation_candidates', 'UPDATE recommendation_surface_pools SET pool_id=999',
-                'DELETE FROM prepared_outputs', 'UPDATE prepared_outputs SET chunk_key=\'different\'',
+                'DELETE FROM collection_file_writes WHERE chunk_id IS NOT NULL',
+                "UPDATE collection_file_writes SET owner_id=json_set(owner_id,'$[3]','different') WHERE chunk_id IS NOT NULL",
                 'DELETE FROM recommendation_generations'):
         with pytest.raises(sqlite3.IntegrityError), store.conn:
             store.conn.execute(sql)
@@ -378,7 +381,7 @@ def test_radio_membership_and_typed_filters_have_no_global_head_cutoff(recommend
         store.conn.executemany('INSERT INTO recordings(id,identity_key) VALUES (?,?)',
                                [(i, f'recording-{i}') for i in range(3, 1003)])
     prepared = plan(store)
-    radio = pools.prepare('style-radio', prepared.policy_version, None, 'c' * 64, 'radio',
+    radio = pools.prepare('style-radio', prepared.policy_version, 'c' * 64, 'radio',
         [pools.Candidate(i, None, 12 if i > 950 else 40, 'rare' if i > 950 else 'common') for i in range(1, 1003)])
     publish(store, replace(prepared, slots=(publication.Slot('radio', 'style', 'membership', radio),), outputs=()))
     assert store.recommendations.pool('radio', 'style', 'membership')['eligible_count'] == 1002
@@ -397,26 +400,30 @@ def test_missing_historical_recordings_keep_exact_raw_rank_without_inventing_an_
     publish(store, prepared)
     assert store.recommendations.pool('home', 'all', 'wheelhouse')['eligible_count'] == 3
     assert [(row['key'], row['rank']) for row in store.recommendations.page('home', 'all', 'wheelhouse')] == [('one', 0), ('two', 2)]
-    unknown = store.conn.execute('SELECT raw_key,rank,score,reason FROM unresolved_recommendation_candidates').fetchone()
-    assert tuple(unknown) == ('removed-old-key', 1, .8, 'missing_recording')
+    unknown = store.conn.execute('SELECT raw_key,rank,score,recording_id FROM recommendation_candidates '
+                                 'WHERE raw_key IS NOT NULL').fetchone()
+    assert tuple(unknown) == ('removed-old-key', 1, .8, None)
     assert store.conn.execute("SELECT 1 FROM recordings WHERE identity_key='removed-old-key'").fetchone() is None
     pools.verify(store.conn, store.recommendations.pool('home', 'all', 'wheelhouse')['id'], prepared.slots[0].pool)
     with pytest.raises(sqlite3.IntegrityError), store.conn:
-        store.conn.execute('UPDATE unresolved_recommendation_candidates SET rank=0')
+        store.conn.execute('UPDATE recommendation_candidates SET rank=0 WHERE raw_key IS NOT NULL')
 
 
 def test_recommendation_generation_protects_group_history_without_a_permanent_parent_chain(recommendations):
     store = recommendations
     prepared = plan(store)
-    publish(store, prepared)
+    first = publish(store, prepared)
     enable(store)
-    from yt_playlist.core.group_reads import retention_closure
-    assert 1 in retention_closure(store.conn)[0]
+    assert store.recommendations.head('home')['id'] == first.generation_id
+    assert store.conn.execute('SELECT group_generation_id FROM recommendation_generations WHERE id=?',
+                              (first.generation_id,)).fetchone()[0] == prepared.group_generation_id
     drain(store)
     assert store.taste_groups.definition('first-leaf', generation='first') is not None
     publish(store, replace(plan(store, 'two'), group_generation_id=2))
     collect(store)
     drain(store)
+    assert not store.conn.execute('SELECT 1 FROM recommendation_generations WHERE id=?',
+                                  (first.generation_id,)).fetchone()
     assert store.taste_groups.definition('first-leaf') is None
 
 
@@ -426,15 +433,14 @@ def test_prepared_context_can_retain_recommendations_without_group_roots(recomme
     generation = store.recommendations.head('home')['id']
     store.group_evidence.replace_prepared('home_prepared', {'context': {'recommendation_generations': [generation]}}, 10)
     identity = 'proposal:home_prepared:context'
-    assert [row[0] for row in store.conn.execute('SELECT generation_id FROM recommendation_generation_refs '
-        "WHERE kind='prepared' AND external_key=?", (identity,))] == [generation]
-    assert not store.conn.execute('SELECT 1 FROM group_evidence_owners WHERE external_key=?', (identity,)).fetchone()
+    assert recommendation_custody.retainers(store.conn, 'prepared', identity) == [generation]
+    assert not store.conn.execute('SELECT 1 FROM group_evidence_contexts WHERE external_key=?', (identity,)).fetchone()
 
 
 def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recommendations, tmp_path):
     store = recommendations
     first = publish(store, plan(store))
-    old_filename = store.conn.execute('SELECT filename FROM prepared_outputs WHERE generation_id=?',
+    old_filename = store.conn.execute('SELECT filename FROM recommendation_chunks WHERE generation_id=?',
                                       (first.generation_id,)).fetchone()[0]
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
@@ -449,9 +455,9 @@ def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recom
     with store.read_snapshot() as snapshot:
         reader = snapshot.store
         manifest = outputs.export(reader.conn, tmp_path / 'recommendation-backup')
-    before = [tuple(row) for row in store.conn.execute('SELECT * FROM prepared_outputs')]
+    before = [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_chunks')]
     outputs.restore(store.conn, manifest)
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM prepared_outputs')] == before
+    assert [tuple(row) for row in store.conn.execute('SELECT * FROM recommendation_chunks')] == before
     assert store.recommendations.output('home', 'framing') == {'title': 'two'}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -460,4 +466,4 @@ def test_output_files_survive_old_reader_and_backup_relocates_exact_owners(recom
     pools.Candidate(1, float('inf')), pools.Candidate(1, 1, True, 'genre'), pools.Candidate(1, 1, 51, 'genre')])
 def test_invalid_candidate_rejected_before_any_database_write(candidate):
     with pytest.raises(ValueError):
-        pools.prepare('pool', 'policy', None, 'a' * 64, 'radio', [candidate])
+        pools.prepare('pool', 'policy', 'a' * 64, 'radio', [candidate])

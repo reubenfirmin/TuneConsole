@@ -12,7 +12,7 @@ def _track(store, vid, title, artist, **kw):
 
 def _play(store, identity_key, n=1):
     # Enrichment uses listening-day counts, independently of exact replay frequency.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for day in range(n):
         store.history.record_history_plays(iid,day*86400+43200,[identity_key],source_timezone='UTC')
 
@@ -23,7 +23,7 @@ def _names(batch):
 
 def test_tiers_ordered_new_played_container_orphan(store):
     from yt_playlist.util.matching import identity_key
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # a played song (tier 1)
     played = _track(store, "v1", "Played", "A", created_at=10.0)
     _play(store, identity_key("Played", "A"), 5)
@@ -34,7 +34,7 @@ def test_tiers_ordered_new_played_container_orphan(store):
     # an orphan (zero-play, no played container) -> tier 3
     orphan = _track(store, "v3", "Orphan", "C", created_at=10.0)
     # a brand-new arrival (created after caught-up) -> tier 0, jumps everything
-    store.settings.set_setting("enrich_caught_up_at", "100.0")
+    store.enrichment_queue.save_caught_up_at(100)
     newbie = _track(store, "v4", "NewArrival", "D", created_at=200.0)
 
     order = _names(store.enrichment_queue.next_enrich_batch(10))
@@ -45,7 +45,7 @@ def test_tiers_ordered_new_played_container_orphan(store):
 
 def test_played_songs_sorted_by_playcount(store):
     from yt_playlist.util.matching import identity_key
-    store.settings.set_setting("enrich_caught_up_at", "100")    # tracks below are not "new" -> tier 1
+    store.enrichment_queue.save_caught_up_at(100)    # tracks below are not new
     a = _track(store, "v1", "Low", "X", created_at=1.0)
     b = _track(store, "v2", "High", "Y", created_at=1.0)
     _play(store, identity_key("Low", "X"), 2)
@@ -54,7 +54,7 @@ def test_played_songs_sorted_by_playcount(store):
 
 
 def test_batch_excludes_processed_and_respects_limit(store):
-    store.settings.set_setting("enrich_caught_up_at", "0")
+    store.enrichment_queue.save_caught_up_at(0)
     t1 = _track(store, "v1", "One", "A", created_at=1.0)
     _track(store, "v2", "Two", "B", created_at=1.0)
     complete_entries(store, [t1], now=5.0)                  # One is now processed
@@ -71,8 +71,36 @@ def test_coverage_stats_and_queue_remaining(store):
     complete_entries(store, [t1], now=5.0)
     cov = store.enrichment_reports.coverage_stats()
     assert cov["total"] == 2 and cov["processed"] == 1
-    assert cov["genre"] == 1 and cov["year"] == 1 and cov["bpm"] == 1 and cov["energy"] == 0
+    assert cov["genre"] == 1 and cov["year"] == 1 and cov["bpm"] == 1 and cov["danceability"] == 0
     assert store.enrichment_reports.queue_remaining() == 1                # Two still unprocessed
+
+
+def test_pending_status_covers_library_discovery_and_queued_provider_work(store):
+    reports = store.enrichment_reports
+    assert not reports.has_pending_tracks()
+    entry = _track(store, 'v1', 'Library track', 'Artist')
+    assert reports.has_pending_tracks()
+    complete_entries(store, [entry], now=5)
+    assert not reports.has_pending_tracks()
+
+    key = 'discovery track|artist'
+    store.discovery.upsert_discovered_track(key, 'v2', 'Discovery track', 'Artist',
+                                           None, None, None, None, 'radio:s', 1)
+    assert reports.has_pending_tracks()
+    complete_discovered(store, [key], now=5)
+    assert not reports.has_pending_tracks()
+
+    store.enrichment_state.reconcile_provider_configuration({'deezer': {'fingerprint': 'setup', 'status': 'available'}})
+    with store.conn:
+        store.conn.execute('''
+            INSERT INTO enrichment_provider_state(recording_id,provider,cycle,at,status,failures,retry_at,error,queued)
+            SELECT recording_id,'deezer',-1,0,'queued',0,0,'',1 FROM track_sources WHERE id=?
+        ''', (entry,))
+    assert reports.queue_remaining() > 0
+    assert reports.has_pending_tracks()
+    store.enrichment_state.reconcile_provider_configuration({'deezer': {'fingerprint': 'setup', 'status': 'disabled'}})
+    assert reports.queue_remaining() == 0
+    assert not reports.has_pending_tracks()
 
 
 def test_resweep_selects_stale_incomplete_only(store):
@@ -80,7 +108,7 @@ def test_resweep_selects_stale_incomplete_only(store):
     t2 = _track(store, "v2", "Fresh", "B")
     t3 = _track(store, "v3", "Complete", "C")
     seed_enrichment(store, t3, "Rock", "1999")     # complete-ish
-    seed_audio(store, t3, bpm=120.0, energy=0.5, danceability=0.5)
+    seed_audio(store, t3, bpm=120.0, danceability=0.5)
     complete_entries(store, [t1], now=1.0)                 # stale + incomplete
     complete_entries(store, [t2], now=1000.0)              # fresh
     complete_entries(store, [t3], now=1.0)                 # stale but complete
@@ -110,7 +138,7 @@ def test_re_enrichment_extends_the_chart_without_counting_another_first_pass(sto
 def test_one_priority_order_applies_to_both_sources_before_limit_and_offset(store):
     from yt_playlist.util.matching import identity_key
 
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     _track(store, "lib-new", "Newest library", "A", created_at=400.0)
     _track(store, "lib-old", "Old library", "B", created_at=1.0)
     store.discovery.upsert_discovered_track("new|c", "disc-new", "New discovery", "C", None, None,
@@ -128,7 +156,7 @@ def test_one_priority_order_applies_to_both_sources_before_limit_and_offset(stor
 def test_discovery_uses_artist_engagement_in_shared_priority(store):
     from yt_playlist.util.matching import identity_key
 
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     played = _track(store, "played", "Played", "Artist", created_at=1.0)
     _play(store, identity_key("Played", "Artist"), 5)
     complete_entries(store, [played], 10.0)
@@ -141,7 +169,7 @@ def test_discovery_uses_artist_engagement_in_shared_priority(store):
 def test_container_counts_deduplicate_recordings_and_retries_yield_fairly(store):
     from yt_playlist.util.matching import identity_key
 
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     store.enrichment_state.reconcile_provider_configuration({
         "deezer": {"fingerprint": "test", "status": "available"}})
     playlist_anchor = _track(store, "anchor", "Playlist anchor", "P", created_at=1)
@@ -153,7 +181,7 @@ def test_container_counts_deduplicate_recordings_and_retries_yield_fairly(store)
     playlist_candidate = _track(store, "playlist", "Playlist candidate", "Playlist artist", created_at=1)
     store.discovery.upsert_discovered_track(identity_key("Playlist candidate", "Playlist artist"),
         "playlist", "Playlist candidate", "Playlist artist", None, None, None, None, "radio:s", 1)
-    identity = store.accounts.upsert_account("main", "cred", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     playlist = store.playlists.upsert_playlist(identity, "PL", "Mix", 4, "h", 1)
     store.playlists.set_playlist_tracks(playlist, [playlist_anchor, alternate, additional, playlist_candidate])
     album_anchor = _track(store, "album-anchor", "Album anchor", "Album anchor artist",
@@ -193,7 +221,7 @@ def test_combined_coverage_processed_list_activity_and_timeline(store):
     seed_discovered_audio(store, "new|b", bpm=128.0)
     assert store.enrichment_reports.queue_remaining() == 1
     assert store.enrichment_reports.coverage_stats(include_discovery=True) == {
-        "total": 2, "processed": 1, "genre": 1, "year": 1, "bpm": 1, "energy": 0, "danceability": 0}
+        "total": 2, "processed": 1, "genre": 1, "year": 1, "bpm": 1, "danceability": 0}
     complete_discovered(store, ["new|b"], 20.0)
     assert store.enrichment_reports.queue_remaining() == 0
     assert [track["title"] for track in store.enrichment_reports.enriched_tracks()] == ["Discovery", "Library"]
@@ -212,6 +240,6 @@ def test_resweep_selects_both_sources_by_oldest_check(store):
                                       None, None, "radio:s", 1.0)
         complete_discovered(store, [title], timestamp)
     seed_discovered_enrichment(store, "Complete", "techno", "2024")
-    seed_discovered_audio(store, "Complete", bpm=128.0, energy=.8, danceability=.7)
+    seed_discovered_audio(store, "Complete", bpm=128.0, danceability=.7)
     assert _names(store.enrichment_queue.resweep_batch(10, stale_before=500.0)) == ["Stale", "Library"]
     assert store.enrichment_queue.resweep_batch(1, stale_before=500.0)[0]["identity_key"] == "Stale"

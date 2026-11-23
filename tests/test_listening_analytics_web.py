@@ -5,6 +5,7 @@ import subprocess
 from fastapi.testclient import TestClient
 import pytest
 
+from yt_playlist.core import recommendation_impressions
 from yt_playlist.web.app import create_app
 from yt_playlist.rec.choice_capture import CaptureQueue
 
@@ -54,9 +55,9 @@ def test_editorial_exposure_is_queued_only_for_current_edition_stories(store):
         assert client.post('/charts/listening-impressions',json={'edition':'current','stories':['lead','support','unknown']}).status_code==204
         assert len(offered)==1
         assert set(offered[0].args[0])=={'lead','hero:lead','support'}
-        assert store.conn.execute("SELECT COUNT(*) FROM rec_impressions WHERE surface='listening_editorial'").fetchone()[0]==0
+        assert not recommendation_impressions.counts(store.conn, recommendation_impressions.EDITORIAL)
         offered[0].run()
-        assert store.conn.execute("SELECT COUNT(*) FROM rec_impressions WHERE surface='listening_editorial'").fetchone()[0]==3
+        assert len(recommendation_impressions.counts(store.conn, recommendation_impressions.EDITORIAL)) == 3
         assert client.post('/charts/listening-impressions',json={'edition':'current','stories':[1]}).status_code==400
 
 

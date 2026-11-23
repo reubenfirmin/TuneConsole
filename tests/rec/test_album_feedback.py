@@ -11,7 +11,7 @@ from yt_playlist.core import album_feedback_storage
 
 @pytest.fixture(autouse=True)
 def feedback_account(store):
-    store.accounts.upsert_account('Main','main.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
 
 
 def feedback_history(store):

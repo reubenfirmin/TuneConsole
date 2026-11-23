@@ -21,7 +21,7 @@ def test_album_selection_and_fetch_history_use_committed_data(file_backed_store)
             store.conn.execute('BEGIN IMMEDIATE')
             try:
                 store.conn.execute("UPDATE genre_catalog SET family_key='jazz' WHERE key='synth pop'")
-                discovery_checkpoints.remember(store.conn, 'owned-album')
+                discovery_checkpoints.remember(store.conn, ('owned-album',))
                 assert pool.submit(select).result(timeout=5) == (['owned-album'], set())
                 assert store.conn.in_transaction
             finally:

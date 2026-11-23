@@ -13,6 +13,8 @@ from yt_playlist.core.bridge import BridgeError, BridgeReply
 from yt_playlist.core.bridge_session import BridgeSession
 from yt_playlist.core.identities import build_client
 from yt_playlist.integrations import youtube_music as yt
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
+from yt_playlist.rec import onboarding
 
 BASE = 'https://music.youtube.com/youtubei/v1/'
 
@@ -39,8 +41,11 @@ def access(browser):
 
 def test_fresh_clients_share_policy_and_keep_brand_context_and_credentials_in_browser():
     browser = Browser()
-    main = build_client(SimpleNamespace(brand_account_id=None), browser)
-    brand = build_client(SimpleNamespace(brand_account_id='brand-id'), browser)
+    main_access = build_client(SimpleNamespace(brand_account_id=None), browser)
+    brand_access = build_client(SimpleNamespace(brand_account_id='brand-id'), browser)
+    assert isinstance(main_access, YouTubeMusicAccess)
+    assert isinstance(brand_access, YouTubeMusicAccess)
+    main, brand = main_access._provider, brand_access._provider
     assert main._session._access is brand._session._access is yt.for_bridge(browser)
     main._session._access.min_interval = 0
     for client, endpoint in [(main, 'browse'), (brand, 'search'), (brand, 'next'),
@@ -52,6 +57,33 @@ def test_fresh_clients_share_policy_and_keep_brand_context_and_credentials_in_br
     session.post(BASE + 'browse', json={}, headers={'Authorization': 'private-secret'},
                  cookies={'SAPISID': 'private-secret'})
     assert 'private-secret' not in json.dumps(browser.calls)
+
+
+def test_onboarding_radio_reads_home_through_the_account_integration(store):
+    browser = Browser()
+    song = {'musicTwoRowItemRenderer': {
+        'navigationEndpoint': {'watchEndpoint': {'videoId': 'starter'}},
+        'title': {'runs': [{'text': 'Starter song'}]},
+        'subtitle': {'runs': [{'text': 'Starter artist'}]},
+    }}
+    section = {'sectionListRenderer': {'contents': [
+        {'musicCarouselShelfRenderer': {'contents': [song, song]}},
+    ]}}
+    browser.result = BridgeReply(200, json.dumps({'contents': {'singleColumnBrowseResultsRenderer': {
+        'tabs': [{'tabRenderer': {'content': section}}],
+    }}}))
+    account = store.accounts.upsert_account('main', 'brand-id', True)
+    client = build_client(SimpleNamespace(brand_account_id='brand-id'), browser)
+
+    sample = onboarding.sample(store, 'onboard_radio', lambda: {account: client}, now=1)
+
+    assert [(row['video_id'], row['title'], row['artist']) for row in sample['tracks']] == [
+        ('starter', 'Starter song', 'Starter artist'),
+    ]
+    [(method, url, body)] = browser.calls
+    assert method == 'POST' and url.startswith(BASE + 'browse?')
+    assert body['browseId'] == 'FEmusic_home'
+    assert body['context']['user']['onBehalfOfUser'] == 'brand-id'
 
 
 @pytest.mark.parametrize('endpoint,mutation', [

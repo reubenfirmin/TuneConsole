@@ -8,9 +8,11 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
 import io
 import json
+import math
 from pathlib import Path
 import shutil
 import socket
+import struct
 import subprocess
 import time
 from types import SimpleNamespace
@@ -34,26 +36,32 @@ HTML = Path(__file__).with_name("fixtures") / "music_player.html"
 def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, request):
     if shutil.which("openssl") is None:
         pytest.fail("OpenSSL is required for the local Music TLS fixture")
-    bridge = Bridge()
-    main = store.accounts.upsert_account("main", "bridge", None, True)
-    brand = store.accounts.upsert_account("band", "bridge", "brand-A", False)
-    ctx = SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)
+    main = store.accounts.upsert_account("main", None, True)
+    brand = store.accounts.upsert_account("band", "brand-A", False)
     bootstrap = getattr(request, "param", "current")
-    if bootstrap == 'full_app':
-        from tests.conftest import FakeClient
-        from yt_playlist.web.app import create_app
-        app = create_app(store, lambda: {main: FakeClient()}, now_fn=lambda: 1, bridge=bridge)
-    else:
-        app = FastAPI()
-        app.include_router(build(ctx))
     owners = ExitStack()
     request.addfinalizer(owners.close)
-    # Bind before starting the server so another test/process cannot take the chosen port.
-    listener = owners.enter_context(socket.socket())
-    listener.bind(("127.0.0.1", 0))
-    port = listener.getsockname()[1]
-    server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
-    owners.enter_context(LiveServer(server, sockets=[listener], startup_timeout=5))
+    backend = owners.enter_context(ExitStack())
+
+    def start_backend(port=0):
+        bridge = Bridge()
+        if bootstrap == 'full_app':
+            from tests.conftest import FakeClient
+            from yt_playlist.web.app import create_app
+            app = create_app(store, lambda: {main: FakeClient()}, now_fn=lambda: 1, bridge=bridge)
+        else:
+            app = FastAPI()
+            app.include_router(build(SimpleNamespace(bridge=bridge, store=store, now_fn=time.time)))
+        # Keep the extension URL fixed across restarts with a fresh ASGI app and Bridge.
+        listener = backend.enter_context(socket.socket())
+        listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        listener.bind(("127.0.0.1", port))
+        port = listener.getsockname()[1]
+        server = uvicorn.Server(uvicorn.Config(app, log_level="warning"))
+        backend.enter_context(LiveServer(server, sockets=[listener], startup_timeout=5))
+        return bridge, server, port
+
+    bridge, server, port = start_backend()
 
     # Change only the local test endpoint/permission in a copy; the source manifest and
     # production endpoint remain untouched. Retain the real unpacked extension identity.
@@ -71,10 +79,15 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     data = json.loads(manifest.read_text())
     data["host_permissions"] = [s.replace(":8765", f":{port}") for s in data["host_permissions"]]
     manifest.write_text(json.dumps(data))
-    audio = io.BytesIO()
-    with wave.open(audio, "wb") as wav:
-        wav.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
-        wav.writeframes(b"\0\0" * 8000 * 30)
+    def wav_data(cycle):
+        audio = io.BytesIO()
+        with wave.open(audio, "wb") as wav:
+            wav.setparams((1, 2, 8000, 0, "NONE", "not compressed"))
+            wav.writeframes(cycle * (8000 * 30 // (len(cycle) // 2)))
+        return audio.getvalue()
+
+    silent_audio = wav_data(b"\0\0")
+    tone = wav_data(struct.pack("<32h", *(int(6000 * math.sin(math.tau * i / 32)) for i in range(32))))
     requests = []
     # An extension-created tab can start its first navigation before Playwright attaches
     # request interception. A local TLS origin also covers that initial browser request.
@@ -87,8 +100,8 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
     music_app = FastAPI()
 
     @music_app.get("/fixture.wav")
-    def fixture_audio():
-        return Response(audio.getvalue(), media_type="audio/wav")
+    def fixture_audio(audible: bool = False):
+        return Response(tone if audible else silent_audio, media_type="audio/wav")
 
     @music_app.post("/youtubei/v1/{endpoint:path}")
     async def fixture_api(endpoint: str, request: Request):
@@ -110,8 +123,10 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
         def launch():
             browser_context = playwright.chromium.launch_persistent_context(
                 tmp_path / "profile", **{**browser_type_launch_args, "channel": "chromium"},
+                # Keep Chromium's audible-tab signal while routing samples to a fake output stream.
+                ignore_default_args=["--mute-audio"],
                 args=[f"--disable-extensions-except={extension}", f"--load-extension={extension}",
-                      "--autoplay-policy=no-user-gesture-required", "--ignore-certificate-errors",
+                      "--disable-audio-output", "--autoplay-policy=no-user-gesture-required", "--ignore-certificate-errors",
                       "--no-proxy-server", f"--host-resolver-rules=MAP music.youtube.com 127.0.0.1:{tls_port}, "
                       "MAP lh3.googleusercontent.com ~NOTFOUND"],
             )
@@ -154,6 +169,17 @@ def installed_bridge(playwright, browser_type_launch_args, tmp_path, store, requ
             eventually(lambda: bridge.connected, "restarted extension did not connect")
 
         harness.restart = restart
+
+        def restart_backend():
+            nonlocal bridge, server
+            backend.close()
+            assert not bridge.connected
+            bridge, server, _ = start_backend(port)
+            harness.bridge = bridge
+            eventually(lambda: bridge.connected and bridge.playback_confirmation,
+                       "the extension did not connect to the new backend")
+
+        harness.restart_backend = restart_backend
         eventually(lambda: bridge.connected, "installed extension did not connect")
         yield harness
     finally:
@@ -378,6 +404,59 @@ def test_multiple_tabs_control_routing_navigation_and_removal(installed_bridge):
     browsing.wait_for_function("!document.querySelector('video').paused")
     h.eventually(lambda: any(p["video_id"] == "browsing" for p in _plays(h)))
     assert browsing.evaluate("fixture.clicks") == ["playpause"]
+
+
+@pytest.mark.parametrize('path', ['native', 'missing', 'injection-rejected', 'ignored'])
+def test_radio_launch_dispatches_in_the_loaded_tab_and_traces_playback(installed_bridge, caplog, path):
+    import logging
+
+    h = installed_bridge
+    caplog.set_level(logging.INFO, logger='yt_playlist.web.routes.bridge')
+    music = _music(h, '?playing=true&v=prior')
+    h.eventually(lambda: any(play['video_id'] == 'prior' for play in _plays(h)))
+    if path in ('native', 'ignored'):
+        music.evaluate('''handle => {
+          const app = document.createElement('ytmusic-app');
+          app.polymerController = {};
+          document.body.append(app);
+          if (!handle) return;
+          app.addEventListener('yt-navigate', event => {
+            const {watchEndpoint, commandMetadata} = event.detail.endpoint;
+            window.nativeWatch = watchEndpoint;
+            history.pushState({}, '', commandMetadata.webCommandMetadata.url);
+            fixture.videoId = watchEndpoint.videoId;
+            fixture.playlist = watchEndpoint.playlistId;
+            fixture.setBar(); fixture.setMedia(); fixture.sample();
+          });
+        }''', path == 'native')
+    elif path == 'injection-rejected':
+        h.worker.evaluate('''() => {
+          const execute = chrome.scripting.executeScript.bind(chrome.scripting);
+          chrome.scripting.executeScript = details => details.args?.[0]?.includes('starting-song')
+            ? Promise.reject(new Error('MAIN-world injection unavailable')) : execute(details);
+        }''')
+    target = 'https://music.youtube.com/watch?playing=true&v=starting-song&list=PL_radio'
+    h.bridge.send_control({'type': 'navigate', 'url': target, 'radioLaunchId': 'loaded-radio-test'})
+    music.wait_for_url(target, wait_until='load')
+    h.eventually(lambda: any(play['video_id'] == 'starting-song' and play['playlist_ytm_id'] == 'PL_radio'
+                             for play in _plays(h)))
+    h.eventually(lambda: any('loaded-radio-test' in record.getMessage() and 'stage=playing' in record.getMessage()
+                             for record in caplog.records))
+    assert len(h.worker.evaluate('tuneConsole.tabs.list()')) == 1
+    if path == 'native':
+        assert music.evaluate('window.nativeWatch') == {'videoId': 'starting-song', 'playlistId': 'PL_radio'}
+    trace = [record.getMessage() for record in caplog.records if 'loaded-radio-test' in record.getMessage()]
+    assert sum('stage=websocket_sent' in entry for entry in trace) == 1
+    method = 'loaded-tab' if path in ('native', 'ignored') else 'tab-update'
+    assert sum(f'stage=browser method={method}' in entry for entry in trace) == 1
+    assert sum('stage=playing' in entry and 'source=media-' in entry for entry in trace) == 1
+    recovery = [entry for entry in trace if 'stage=recovery' in entry]
+    version = h.worker.evaluate('chrome.runtime.getManifest().version')
+    assert all(entry.endswith(f'extension_version={version}') for entry in recovery)
+    if path == 'ignored':
+        assert [entry.split('action=')[1].split()[0] for entry in recovery] == ['navigate', 'activate']
+    elif path == 'native':
+        assert len(recovery) == 1 and 'action=confirmed-' in recovery[0]
 
 
 def test_dislike_updates_native_thumb_then_skips_the_radio_queue(installed_bridge):

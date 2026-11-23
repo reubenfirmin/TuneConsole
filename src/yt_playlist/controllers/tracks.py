@@ -1,5 +1,4 @@
 """Resolve recording matches, rating transitions and catalog operations."""
-import json
 from uuid import uuid4
 
 from yt_playlist.core import track_policy
@@ -15,12 +14,16 @@ class Tracks:
         self.albums, self.keys = albums, keys
         self.associate_item = associate_item
 
-    def remember_playback_alternate(self, account_id, requested, accepted, *, evidence, now):
+    def remember_playback_upload(self, requested, accepted, *, evidence, now):
         original, actual = requested['video_id'], accepted['video_id']
-        if original != actual:
-            self.repository.store_playback_alternate(account_id, original, actual,
-                same_recording=track_policy.equivalent_upload(requested, accepted),
-                evidence_json=json.dumps(evidence, sort_keys=True), now=now)
+        if original == actual or not track_policy.equivalent_upload(requested, accepted):
+            return None
+        entry = self.repository.entry_for_source(original, None)
+        if entry is None:
+            return None
+        self.associate_youtube_item(actual, entry['recording_id'], source='youtube_playback_substitution',
+            evidence={**evidence, 'requested_video_id': original}, now=now, same_recording=True)
+        return self.repository.prefer_playback_upload(original, actual)
 
     def match_recording(self, title, artist):
         return track_policy.match_recording(self.repository.recording_match_rows(identity_key(title, artist)), title, artist)
@@ -31,12 +34,13 @@ class Tracks:
     def record_item_rating(self, account_id, video_id, status, *, source, now):
         self.record_item_ratings(account_id, {video_id: status}, source=source, now=now)
 
-    def record_item_ratings(self, account_id, statuses, *, source, now):
+    def record_item_ratings(self, account_id, statuses, *, source, now, **playback):
         with self.repository.rating_transaction():
             previous, unbanned = self.repository.item_rating_inputs(account_id, statuses)
             observations, actions = track_policy.item_rating_changes(
                 account_id, statuses, previous, unbanned, source=source, now=now)
-            self.repository.write_item_ratings(observations, actions)
+            self.repository.write_item_ratings(observations, actions, **playback)
+            return bool(actions)
 
     def recording_ratings(self, keys):
         return track_policy.combined_ratings(self.repository.rating_rows(keys))
@@ -47,11 +51,8 @@ class Tracks:
         return track_policy.pending_rating_projections(
             rows, self.recording_ratings(keys), self.repository.rating_feedback_rows(keys))
 
-    def playback_alternate(self, account_id, video_id):
-        return self.repository.playback_alternate(account_id, video_id)
-
-    def playback_alternates(self, account_id, video_ids):
-        return self.repository.playback_alternates(account_id, video_ids)
+    def preferred_playback_uploads(self, video_ids):
+        return self.repository.preferred_playback_uploads(video_ids)
 
     def track_detail(self, video_id):
         return self.repository.track_detail(video_id)
@@ -140,6 +141,9 @@ class Tracks:
     def identity_keys_for_videos(self, video_ids):
         return self.repository.identity_keys_for_videos(video_ids)
 
+    def video_identity_and_availability(self, video_ids):
+        return self.repository.video_identity_and_availability(video_ids)
+
     def thumbnail_for_video(self, video_id):
         return self.repository.thumbnail_for_video(video_id)
 
@@ -172,6 +176,9 @@ class Tracks:
 
     def metadata_for_video(self, video_id):
         return self.repository.metadata_for_video(video_id)
+
+    def effective_genre_key(self, track_id):
+        return self.repository.effective_genre_key(track_id)
 
     def update_metadata(self, video_id, values, *, observation):
         current = self.repository.metadata_for_video(video_id)

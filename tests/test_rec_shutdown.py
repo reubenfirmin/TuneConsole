@@ -34,18 +34,24 @@ def test_quit_interrupts_rollup_sql_rolls_back_and_releases_waiting_request(
     caplog.set_level(logging.INFO, logger=__name__)
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 1), debounce_s=0)
-    store.accounts.upsert_account('Listener','c',None,True)
+    store.accounts.upsert_account('Listener',None,True)
     store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
-    store.trends.refresh_first_play()
     entered, request_waiting = threading.Event(), threading.Event()
     store.conn.create_function("query_started", 0, lambda: (entered.set(), 0)[1])
 
-    # Exercise the real first-play refresh savepoint: cancellation must retain its
-    # previously published data, even if SQLite rolls back the savepoint itself.
+    # Keep the normal track read available to the waiting request after the
+    # expensive artist calculation is cancelled.
     if operation == "first-play":
-        monkeypatch.setattr(store.trends.repository, "_replace_first_play",
-                            lambda: store.conn.execute(SLOW_SQL).fetchone())
-        calculate = store.trends.refresh_first_play
+        original = store.trends.repository.first_play_map
+
+        def first_plays(kind):
+            if kind == "artist":
+                with store._lock:
+                    return store.conn.execute(SLOW_SQL).fetchone()
+            return original(kind)
+
+        monkeypatch.setattr(store.trends.repository, "first_play_map", first_plays)
+        calculate = lambda: store.trends.first_play_map("artist")
     else:
         monkeypatch.setattr(store.rec_model, "get_rec_content_vectors",
                             lambda: store.conn.execute(SLOW_SQL).fetchone())

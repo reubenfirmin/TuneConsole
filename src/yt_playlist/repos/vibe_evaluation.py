@@ -2,36 +2,38 @@
 import sqlite3
 
 from yt_playlist.core import audio_annotations, catalog_keys
+from yt_playlist.core.vibe_model_queries import album_facts, training_rows
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.repos.vibe_models import album_facts, training_rows
 
 
 class VibeEvaluationRepo(Repo):
     @synchronized
     def annotation_rows(self, limit):
         return [dict(row) for row in self.conn.execute(
-            'SELECT id,run_id,legacy_run_key,kind,taxonomy_version,revision,state,'
-            'created_at,supersedes_id,resolution_status,unresolved_sample_count FROM audio_annotations '
-            'WHERE sealed=1 ORDER BY created_at,id LIMIT ?', (limit + 1,))]
+            'SELECT a.id,r.run_key AS run_id,CASE WHEN r.run_key IS NULL THEN a.run_key END AS legacy_run_key,'
+            'a.kind,a.taxonomy_version,a.revision,a.state,a.created_at,a.supersedes_id,'
+            "CASE WHEN r.run_key IS NULL THEN 'legacy_missing_run' ELSE 'resolved' END AS resolution_status,"
+            'a.unresolved_sample_count FROM audio_annotations a LEFT JOIN audio_annotations r '
+            "ON r.run_key=a.run_key AND r.kind='playback' WHERE a.kind<>'playback' "
+            'ORDER BY a.created_at,a.id LIMIT ?', (limit + 1,))]
 
     @synchronized
     def annotation_values(self, annotation_id, run):
+        annotation = audio_annotations.read(self.conn, annotation_id)
         return {
             'videos': [row[0] for row in self.conn.execute(
-                'SELECT video_id FROM audio_vibe_runs WHERE run_id=? '
+                "SELECT video_id FROM audio_annotations WHERE run_key=? AND kind='playback' "
                 'UNION SELECT video_id FROM sample_attributes WHERE run_id=?', (run, run)) if row[0]],
-            'labels': [row[0] for row in self.conn.execute('SELECT vibe FROM audio_annotation_vibes '
-                'WHERE annotation_id=? ORDER BY position', (annotation_id,))],
-            'sample_ids': [row[0] for row in self.conn.execute('SELECT sample_id FROM audio_annotation_samples '
-                'WHERE annotation_id=? ORDER BY position', (annotation_id,))],
-            'evaluation': audio_annotations.evaluation(self.conn, annotation_id),
+            'labels': annotation['vibes'],
+            'sample_ids': annotation['sample_ids'],
+            'evaluation': audio_annotations.evaluation(annotation['archive'].get('prediction')),
         }
 
     @synchronized
     def video_recordings(self, videos):
         result = {}
         for video in videos:
-            row = self.conn.execute('SELECT recording_id FROM youtube_items WHERE video_id=?', (video,)).fetchone()
+            row = self.conn.execute('SELECT recording_id FROM track_sources WHERE video_id=?', (video,)).fetchone()
             if row is not None and row[0] is not None:
                 result[video] = catalog_keys.resolve_recording(self.conn, row[0])
         return result
@@ -41,7 +43,7 @@ class VibeEvaluationRepo(Repo):
         result = {}
         for recording in recordings:
             artists = [row[0] for row in self.conn.execute(
-                'SELECT DISTINCT a.artist_id FROM catalog_entries e '
+                'SELECT DISTINCT a.artist_id FROM track_sources e '
                 f'JOIN {self.entry_artists_table} a ON a.entry_id=e.id WHERE e.recording_id=? '
                 'ORDER BY a.artist_id LIMIT ?', (recording, artist_limit))]
             genre, = self.conn.execute('SELECT genre_key FROM recordings WHERE id=?', (recording,)).fetchone()
@@ -65,8 +67,7 @@ class VibeEvaluationRepo(Repo):
     def storage_statistics(self):
         try:
             sizes = [dict(row) for row in self.conn.execute('SELECT name,sum(pgsize) AS bytes '
-                'FROM dbstat WHERE name IN (\'measurements\',\'recording_vibes\',\'predictions\',\'vibe_versions\','
-                "'prediction_model_generations','prediction_model_generation') GROUP BY name")]
+                "FROM dbstat WHERE name IN ('measurements','recording_vibes','predictions','vibe_versions') GROUP BY name")]
         except sqlite3.OperationalError:
             sizes = None
         return {'sql_owner_bytes': sizes,

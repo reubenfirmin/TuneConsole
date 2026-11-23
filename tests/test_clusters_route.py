@@ -3,6 +3,7 @@ import json
 import math
 
 import numpy as np
+import pytest
 from fastapi.testclient import TestClient
 
 from yt_playlist.util.matching import identity_key
@@ -11,7 +12,7 @@ from tests.conftest import FakeClient, _track
 
 
 def _client(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), iid
 
@@ -74,11 +75,75 @@ def test_expand_empty_without_model(store):
     assert ring == []
 
 
+def seed_cluster_discoveries(store):
+    seed, seed_vector = _modelled_track(store, 'seed', 'Seed', 'Seed Artist', _unit(0))
+    discoveries = [('first|artist', 'first-upload', 'First', _unit(0)),
+                   ('second|artist', 'second-upload', 'Second', _unit(20))]
+    for key, video, title, _ in discoveries:
+        store.discovery.upsert_discovered_track(key, video, title, 'Artist', None, None, 'Metal', None, None, 1.)
+    store.rec_model.replace_rec_vectors([seed_vector])
+    assert store.rec_model.publish_content_generation(
+        [seed_vector], [(key, np.array(vector, dtype=np.float32).tobytes()) for key, _, _, vector in discoveries],
+        json.dumps({'cat': {'genre:metal': 0, 'genre:ambient': 1}, 'ncat': 2, 'cont': []}),
+        'test', 'discovery-availability', '')
+    return seed
+
+
+def mark_cluster_upload_unavailable(store, use_alternate=False):
+    with store.conn:
+        if use_alternate:
+            store.conn.execute("INSERT INTO track_sources (recording_id,video_id,available,title,artist) "
+                               "SELECT recording_id,'alternate-upload',1,title,artist FROM track_sources "
+                               "WHERE video_id='first-upload'")
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='first-upload'")
+
+
+def test_expand_uses_current_discovery_availability_with_the_same_content_generation(store):
+    client, _ = _client(store)
+    seed = seed_cluster_discoveries(store)
+    generation = store.rec_model.content_generation()['generation']
+
+    def uploads():
+        response = client.post('/clusters/expand', json={'pos_keys': [seed], 'include_new': True, 'k': 2})
+        assert response.status_code == 200
+        return [row['video_id'] for row in response.json()['ring']]
+
+    assert uploads() == ['first-upload', 'second-upload']
+    mark_cluster_upload_unavailable(store)
+    assert store.rec_model.content_generation()['generation'] == generation
+    assert uploads() == ['second-upload']
+
+
 def _save_client(store, *, catalog=None):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient(catalog=catalog)
     app = create_app(store, lambda: {iid: fc}, now_fn=lambda: 1.0)
     return TestClient(app, base_url="http://127.0.0.1"), fc
+
+
+@pytest.mark.parametrize('use_alternate', [False, True], ids=['omit', 'alternate'])
+def test_save_resolves_current_uploads_for_the_original_recordings(store, use_alternate):
+    seed = seed_cluster_discoveries(store)
+    uploads = ['first-upload', 'second-upload', 'alternate-upload']
+    client, provider = _save_client(store, catalog={
+        video: _track(video, video, 'Artist', set_video_id=f'set-{video}') for video in uploads
+    })
+    expansion = client.post('/clusters/expand', json={'pos_keys': [seed], 'include_new': True, 'k': 2})
+    assert expansion.status_code == 200
+    ring = expansion.json()['ring']
+    assert [row['video_id'] for row in ring] == uploads[:2]
+    keys = [row['key'] for row in ring]
+    mark_cluster_upload_unavailable(store, use_alternate)
+
+    result = client.post('/clusters/save', data={
+        'name': 'Retained cluster', 'keep_keys': json.dumps(keys), 'journey': 'shuffle',
+    })
+    assert result.status_code == 200
+    assert result.headers['HX-Trigger'] == 'cluster-saved'
+    expected = ['alternate-upload', 'second-upload'] if use_alternate else ['second-upload']
+    playlist, saved = provider.added[0]
+    assert sorted(saved) == expected
+    assert store.playlist_recipes.get_recipe(playlist)['journey'] == 'shuffle'
 
 
 def test_save_resolves_keys_to_tracks(store, caplog):
@@ -124,6 +189,44 @@ def test_save_always_folds_in_central_tracks(store):
     # The "Include central tracks" toggle is gone: central seed tracks are always folded into the save.
     c.post("/clusters/save", data={"name": "With Central", "keep_keys": keep, "central_keys": central})
     assert "vc" in fc.added[0][1]
+
+
+@pytest.mark.parametrize('journey, order', [
+    ('time_machine', ['old', 'new']), ('throwback', ['new', 'old']),
+])
+def test_save_applies_era_direction_to_two_discoveries(store, journey, order):
+    catalog = {video: _track(video, video, 'Artist', set_video_id=f'set-{video}') for video in order}
+    client, provider = _save_client(store, catalog=catalog)
+    keys = {video: store.discovery.upsert_discovered_track(
+        f'{video}|artist', video, video, 'Artist', None, None, 'Techno', year, None, 1.)
+        for video, year in [('old', '1982'), ('new', '2022')]}
+    response = client.post('/clusters/save', data={
+        'name': 'Two eras', 'keep_keys': json.dumps([keys[video] for video in reversed(order)]),
+        'central_keys': '[]', 'journey': journey,
+    })
+    assert response.headers['HX-Trigger'] == 'cluster-saved'
+    playlist_id, written = provider.added[0]
+    assert written == order
+    assert store.playlist_recipes.get_recipe(playlist_id)['journey'] == journey
+
+
+def test_save_spaces_canonical_credits_on_discoveries(store):
+    solo = {'name': 'Solo', 'id': 'solo-id'}
+    songs = [('solo', 'Solo', [solo]), ('duet', 'Solo & Partner', [solo, {'name': 'Partner', 'id': 'partner-id'}]),
+             ('separator', 'Other', [{'name': 'Other', 'id': 'other-id'}])]
+    catalog = {video: _track(video, video, artist, set_video_id=f'set-{video}') for video, artist, _ in songs}
+    client, provider = _save_client(store, catalog=catalog)
+    keys = {video: store.discovery.upsert_discovered_track(
+        identity_key(video, artist), video, video, artist, None, None, 'Techno', None, None, 1., credits=credits)
+        for video, artist, credits in songs}
+    response = client.post('/clusters/save', data={
+        'name': 'Shared artist', 'keep_keys': json.dumps(list(keys.values())),
+        'central_keys': '[]', 'journey': 'shuffle',
+    })
+    assert response.headers['HX-Trigger'] == 'cluster-saved'
+    _, written = provider.added[0]
+    assert set(written) == set(keys)
+    assert written[1] == 'separator'
 
 
 def test_save_rejects_empty(store):

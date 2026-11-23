@@ -1,9 +1,4 @@
 .album-choice-board { container:albums / inline-size; padding:0 0 3rem; }
-.page-home .dash-navigation { display:flex; align-items:center; gap:1rem; margin-block-end:clamp(1.2rem,3vw,2rem); }
-.page-home .dash-navigation .dash-nav { flex:1; min-width:0; margin-block-end:0; }
-.album-tune { display:grid; place-items:center; flex:0 0 2.75rem; width:2.75rem; height:2.75rem; padding:.5rem; border:1.5px solid currentColor; border-radius:50%; background:transparent; color:var(--radio-queue-2); }
-.album-tune svg { display:block; width:1.6rem; height:1.3rem; fill:none; stroke:currentColor; stroke-width:2; stroke-linecap:round; }
-.album-tune:is(:hover,:focus-visible) { color:var(--text); box-shadow:0 0 0 3px color-mix(in srgb,var(--radio-queue-2) 30%,transparent); }
 .album-editorial { display:flex; flex-direction:column; gap:1.5rem; }
 .album-choice { position:relative; isolation:isolate; display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1.3fr); gap:0 clamp(2rem,4cqw,4rem); align-items:center; min-width:0; padding:clamp(1.5rem,4cqw,4rem); background:var(--surface-sunk); }
 .album-story-scene { position:absolute; inset:0; z-index:-1; overflow:hidden; pointer-events:none; }

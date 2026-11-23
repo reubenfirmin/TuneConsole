@@ -1,7 +1,6 @@
 """Ranking freshness consumes choice decay without restoring unrelated learned evidence."""
 import hashlib
 import json
-import sqlite3
 
 import pytest
 
@@ -9,8 +8,9 @@ from tests.core.test_predecessor_writes import installed
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as store, native_sql_calls,
 )
-from yt_playlist.core import mix_choices
+from yt_playlist.core import choice_learning_state, mix_choices
 from yt_playlist.rec import album_feedback_state, candidate_refresh, choice_learning, rec_params
+from yt_playlist.rec.radio_intensity import VERSION as RADIO_INTENSITY_VERSION
 
 
 @pytest.fixture(autouse=True)
@@ -27,15 +27,25 @@ def _pristine_current_schema():
 def test_refresh_input_keeps_empty_typed_owners_and_real_guards(_pristine_current_schema):
     assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('SELECT 1 FROM choice_interest_contexts').fetchone()
+    assert not _pristine_current_schema.execute("SELECT 1 FROM settings WHERE key GLOB 'choice_learned:*'").fetchone()
     assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def full_fingerprint(store, now):
+    from yt_playlist.library import mix_listening
+
     ranking = candidate_refresh.ranking_configuration(store)
-    decaying = any(row['weight'] != 1 and row['updated_at'] is not None
-                   and not (axis.startswith('genre:') and row['weight'] == 0)
-                   for axis, row in ranking['records'].items())
+    ranking['listener_layers'] = candidate_refresh.listener_inputs(store, now)
+    ranking['radio_intensity_version'] = RADIO_INTENSITY_VERSION
+    if ranking['listener_layers']['permanent'] is None:
+        ranking['startup_weight_policy'] = 'exclude-legacy-dislikes'
+    ranking['recording_exclusions'] = sorted({row['item_key'] for row in store.rec_model.list_dislikes()
+                                              if row['until'] is None or row['until'] > now})
+    ranking['mix_listening'] = mix_listening.rank_input(store, now)
+    decaying = ranking['listener_layers']['permanent'] is None and any(
+        row['weight'] != 1 and row['updated_at'] is not None
+        and not (axis.startswith('genre:') and row['weight'] == 0)
+        for axis, row in ranking['records'].items())
     choices = store.rec_proposals.get_proposals('choice_interests') or {}
     bandit = store.rec_proposals.get_proposals('choice_bandit') or {}
     transient = any(sum(row['layer_weights'][layer] for layer in ('now', 'session', 'recent')) >= .001
@@ -44,10 +54,10 @@ def full_fingerprint(store, now):
                      'bandit': bandit.get('state_version'),
                      'bandit_active': bandit.get('expires_at') is None or now < bandit['expires_at'],
                      'album_feedback': album_feedback_state.state(store),
-                     'models': {key: store.settings.get_setting(key) for key in
-                                ('rec_content_generation', 'rec_fit_inputs', 'rec_mode_fit_inputs')},
+                     'models': {'content': store.rec_model.recording_state().generation,
+                                'collaborative': store.rec_model.recording_state().fit_fingerprint,
+                                'groups': store.taste_groups.head_generation()},
                      'card_views': store.rec_ledger.card_views('cards'),
-                     'mode_offers': store.modes.impression_counts(),
                      'home': {'genre_request': store.rec_proposals.get_proposals('home_genre_request'),
                               'vibe': store.settings.get_setting('home_mix_vibe'),
                               'tuning_at': store.settings.get_setting('home_mix_tuning_updated_at')},
@@ -55,7 +65,7 @@ def full_fingerprint(store, now):
     return hashlib.sha256(json.dumps(configuration, sort_keys=True).encode()).hexdigest()
 
 
-def test_refresh_skips_vectors_tracks_estimates_and_album_history(store):
+def test_refresh_skips_vectors_tracks_estimates_and_album_history(store, monkeypatch):
     context = {'format': 'albums', 'option_id': 'release', 'at': 100, 'days': 3,
                'episode_support': .5, 'feature': [.25] * 600, 'keys': ['unknown|artist']}
     store.rec_proposals.put_proposals('choice_interests', {
@@ -65,16 +75,17 @@ def test_refresh_skips_vectors_tracks_estimates_and_album_history(store):
         'state_version': 'current-bandit', 'expires_at': 3600,
         'rows': [{'mode_id': 999, 'estimate': .5}]}, 100)
     expected = full_fingerprint(store, 1000)
-    denied = {'choice_interest_features', 'choice_interest_tracks', 'choice_mode_estimates',
-              'choice_group_estimates', 'choice_album_interests', 'choice_album_track_days'}
+    def reject_full_publication(*args, **kwargs):
+        pytest.fail('Ranking freshness loaded a full choice publication')
+
+    monkeypatch.setattr(choice_learning_state, 'read', reject_full_publication)
     with store.read_view() as reader:
-        def authorize(action, table, *rest):
-            return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table in denied else sqlite3.SQLITE_OK
-        reader.conn.set_authorizer(authorize)
-        try:
-            assert candidate_refresh.preferences(reader, 1000) == expected
-        finally:
-            reader.conn.set_authorizer(None)
+        interests, bandit = reader.rec_proposals.choice_refresh_inputs()
+        assert interests == {'interest_version': 'current', 'contexts': [
+            {'format': 'albums', 'at': 100, 'days': 3, 'episode_support': .5}
+        ] * 12}
+        assert bandit == {'state_version': 'current-bandit', 'expires_at': 3600}
+        assert candidate_refresh.preferences(reader, 1000) == expected
 
 
 def test_refresh_preserves_transient_boundaries_future_and_mix_precision(store, native_sql_calls):
@@ -149,9 +160,6 @@ def test_tracked_refresh_rechecks_replacement_choice_publications(file_backed_st
         assert bandit != changed
         assert candidate_refresh.preferences(reader, now) == full_fingerprint(reader, now)
     store.modes.log_impressions(5, [('wheelhouse', 101)], now)
-    offers = candidate_refresh.preferences(store, now)
-    assert offers != bandit
-    store.modes.log_impressions(5, [('wheelhouse', 101)], now)
-    assert candidate_refresh.preferences(store, now) == offers, 'Repeated logging is not a new exposure'
+    assert candidate_refresh.preferences(store, now) == bandit
     store.rec_ledger.bump_card_view('cards', now)
-    assert candidate_refresh.preferences(store, now) != offers
+    assert candidate_refresh.preferences(store, now) != bandit

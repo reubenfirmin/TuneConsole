@@ -27,8 +27,9 @@ def test_catalog_configuration_batches_redirect_reads_and_keeps_current_keys(sto
     store.genres.add_genre('Current custom jazz')
     old, current = 'old custom jazz', 'current custom jazz'
     with store.conn:
-        store.conn.execute('INSERT INTO genre_redirects VALUES (?,?)', (old, current))
-        store.conn.execute('DELETE FROM genre_preferences WHERE genre_key IN (?,?)', (old, current))
+        store.conn.execute('UPDATE genre_catalog SET redirect_key=? WHERE key=?', (current, old))
+        store.conn.execute('UPDATE genre_catalog SET enabled=0,preference_origin=NULL WHERE key IN (?,?)',
+                           (old, current))
     record = {**genre_catalog.catalog()[0]['jazz'], 'key': old, 'name': 'Old custom jazz'}
     family = record['family']
     families = {family: genre_catalog.family_labels()[family]} if family else {}
@@ -43,8 +44,6 @@ def test_catalog_configuration_batches_redirect_reads_and_keeps_current_keys(sto
         store.conn.set_trace_callback(None)
     assert store.conn.execute('SELECT genre_key FROM genre_alias WHERE label_key=?',
                               ('old custom alias',)).fetchone()[0] == current
-    assert store.conn.execute('SELECT genre_key FROM genre_external_id WHERE external_id=?',
-                              (record['mbid'],)).fetchone()[0] == current
-    assert list(map(tuple, store.conn.execute('SELECT genre_key,enabled FROM genre_preferences '
-        'WHERE genre_key IN (?,?)', (old, current)))) == [(current, 1)]
-    assert sum(query.startswith('SELECT retired_key,genre_key FROM genre_redirects') for query in queries) == 2
+    assert list(map(tuple, store.conn.execute('SELECT key,enabled FROM genre_catalog '
+        'WHERE key IN (?,?) AND preference_origin IS NOT NULL', (old, current)))) == [(current, 1)]
+    assert sum(query.startswith('SELECT key,redirect_key FROM genre_catalog') for query in queries) == 1

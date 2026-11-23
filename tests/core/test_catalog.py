@@ -7,7 +7,7 @@ from tests.enrichment_support import complete_entries, seed_audio, seed_enrichme
 
 def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_likes(store):
     s = store
-    iid = s.accounts.upsert_account('main','cred',None,True)
+    iid = s.accounts.upsert_account('main',None,True)
     a = s.tracks.upsert_track('a','Song','Artist','Original',200,True)
     assert s.tracks.upsert_track('a','Changed title','Changed credit','Original',201,True) == a
     b = s.tracks.upsert_track('b','Song (Live)','Artist','Live',250,True)
@@ -31,9 +31,9 @@ def test_exact_uploads_versions_and_verified_grouping_keep_item_choices_and_like
     assert s.enrichment_state.enrichment_attempts(s.tracks.catalog_subject(a)['identity_key'])['provider']['fields'] == {'danceability':.7}
     assert s.conn.execute('SELECT danceability FROM catalog_tracks WHERE id=?',(a,)).fetchone()[0] == .7
     seed_enrichment(s, a, 'House', None)
-    seed_audio(s, c, energy=.5)
+    seed_audio(s, c, danceability=.5)
     assert s.tracks.get_track_enrichment(a) == ('House','1990')
-    assert s.tracks.get_track_enrichment(c) == ('','2020')
+    assert s.tracks.get_track_enrichment(c) == ('House','2020')
     s.playlists.set_song_liked(iid,'a',False)
     assert s.playlists.get_playlist_track_ids(pid) == [b,c]
     assert len(s.enrichment_queue.next_enrich_batch(20)) == 2
@@ -56,7 +56,7 @@ def test_discovery_promotion_expiry_and_attempts_share_catalog_without_ownership
     assert not s.discovery.get_discovered_tracks()
     assert s.tracks.identity_key_for_video('cold') == key
     assert s.enrichment_state.enrichment_attempts(key)['provider']['status'] == 'no_match'
-    assert s.conn.execute('SELECT COUNT(*) FROM youtube_items').fetchone()[0] == 1
+    assert s.conn.execute('SELECT COUNT(*) FROM track_sources WHERE video_id IS NOT NULL').fetchone()[0] == 1
 
 
 def test_missing_video_entries_are_repeatable_album_scoped_and_unplayable(store):
@@ -64,19 +64,19 @@ def test_missing_video_entries_are_repeatable_album_scoped_and_unplayable(store)
     assert store.tracks.upsert_track('', 'Song','Artist','Album A',200,album_browse_id='A') == a
     b = store.tracks.upsert_track(None,'Song','Artist','Album B',200,album_browse_id='B')
     assert a != b
-    assert not store.conn.execute('SELECT * FROM youtube_items').fetchall()
-    assert store.conn.execute('SELECT SUM(available) FROM tracks').fetchone()[0] == 0
+    assert not store.conn.execute('SELECT 1 FROM track_sources WHERE video_id IS NOT NULL').fetchone()
+    assert store.conn.execute('SELECT SUM(available) FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)').fetchone()[0] == 0
 
 
 def test_catalog_constraints_and_current_schema_are_checked(store):
     from yt_playlist.core.schema_contract import MigrationError
     import sqlite3
     with pytest.raises(sqlite3.IntegrityError):
-        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id) VALUES ('',1)")
+        store.conn.execute("INSERT INTO track_sources(video_id,recording_id) VALUES ('',1)")
     store.conn.rollback()
-    store.conn.execute('DROP TRIGGER playlist_items_position_insert')
+    store.conn.execute('DROP TRIGGER playlist_items_active_owner_insert')
     store.conn.commit()
-    with pytest.raises(MigrationError,match='playlist_items_position_insert'):
+    with pytest.raises(MigrationError,match='playlist_items_active_owner_insert'):
         store.init_schema()
 
 
@@ -97,7 +97,7 @@ def test_confirmed_recording_has_one_coverage_count_and_a_coherent_playable_item
 
 
 def test_alias_disambiguation_and_verified_association_preserve_event_counts_and_state(store):
-    iid = store.accounts.upsert_account('main','credential',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     a = store.tracks.upsert_track('a','Song','Artist',None,200)
     original = store.tracks.catalog_subject(a)['identity_key']
     store.history.record_play_event(iid,original,'a',10)
@@ -129,16 +129,16 @@ def test_repeated_observation_of_an_ambiguous_alias_keeps_rebuilt_vectors(store)
     assert store.rec_model.get_rec_vectors() == [(key,vector)]
 
 
-@pytest.mark.parametrize('retire_source', [False, True])
-def test_upload_correction_invalidates_both_derived_owners_atomically(store, monkeypatch, retire_source):
+@pytest.mark.parametrize('keep_sibling', [False, True])
+def test_upload_correction_invalidates_both_derived_owners_atomically(store, keep_sibling):
     from yt_playlist.core import catalog, prepared_inputs
 
     old_entry = store.tracks.upsert_track('old-upload', 'Old', 'Artist', None, 200)
     target_entry = store.tracks.upsert_track('target-upload', 'Target', 'Artist', None, 200)
     old = store.tracks.catalog_subject(old_entry)
     target = store.tracks.catalog_subject(target_entry)
-    if not retire_source:
-        store.tracks.upsert_track('retained-upload', 'Retained', 'Artist', None, 200)
+    if keep_sibling:
+        sibling = store.tracks.upsert_track('retained-upload', 'Retained', 'Artist', None, 200)
         with store.conn:
             catalog.associate_item(store.conn, 'retained-upload', old['recording_id'],
                                    source='fixture', evidence={'verified': True}, now=201)
@@ -150,19 +150,26 @@ def test_upload_correction_invalidates_both_derived_owners_atomically(store, mon
             prepared_inputs.upsert(store.conn, subject['identity_key'],
                 {'library': {'genre': 'Rock', 'year': None, 'audio': {}}, 'discovered': None},
                 'a' * 64, 202, 1)
+    prepared_query = 'SELECT * FROM prepared_recording_inputs ORDER BY recording_id'
+    prepared = store.conn.execute(prepared_query).fetchall()
+    assert len(prepared) == 2
     serial = store.taste_groups.serial()
-    finish = catalog.finish_reassociation
-    def interrupted(*args, **kwargs):
+
+    def interrupted(conn, video_id, *_args, **_kwargs):
+        assigned = conn.execute('SELECT recording_id FROM track_sources WHERE video_id=?', (video_id,)).fetchone()
+        assert assigned[0] == target['recording_id']
+        assert not conn.execute('SELECT 1 FROM recording_embedding_files').fetchone()
+        assert not conn.execute(prepared_query).fetchall()
         raise RuntimeError('controlled correction interruption')
-    monkeypatch.setattr(catalog, 'finish_reassociation', interrupted)
+
     with pytest.raises(RuntimeError, match='controlled correction interruption'), store.conn:
         catalog.associate_item(store.conn, 'old-upload', target['recording_id'],
-                               source='fixture', evidence={'corrected': True}, now=203)
+                               source='fixture', evidence={'corrected': True}, now=203,
+                               finish_discovery=interrupted)
     assert store.rec_model.get_rec_vectors() == expected
-    assert store.conn.execute('SELECT count(*) FROM prepared_recording_inputs').fetchone()[0] == 2
+    assert store.conn.execute(prepared_query).fetchall() == prepared
     assert store.taste_groups.serial() == serial
     assert store.tracks.catalog_subject(old_entry)['recording_id'] == old['recording_id']
-    monkeypatch.setattr(catalog, 'finish_reassociation', finish)
     with store.conn:
         catalog.associate_item(store.conn, 'old-upload', target['recording_id'],
                                source='fixture', evidence={'corrected': True}, now=203)
@@ -170,12 +177,13 @@ def test_upload_correction_invalidates_both_derived_owners_atomically(store, mon
     assert not store.conn.execute('SELECT 1 FROM prepared_recording_inputs').fetchone()
     assert store.taste_groups.serial() == serial + 2
     assert store.tracks.catalog_subject(old_entry)['recording_id'] == target['recording_id']
-    assert bool(store.conn.execute('SELECT 1 FROM recording_redirects WHERE retired_id=?',
-                                  (old['recording_id'],)).fetchone()) == retire_source
+    assert store.tracks.resolve_identity_key(old['identity_key']) == old['identity_key']
+    if keep_sibling:
+        assert store.tracks.catalog_subject(sibling)['recording_id'] == old['recording_id']
 
 
 def test_enrichment_priority_counts_confirmed_recording_once_per_artist(store):
-    iid = store.accounts.upsert_account('main','credential',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     a = store.tracks.upsert_track('a','Song','Artist',None,200,created_at=1)
     b = store.tracks.upsert_track('b','Song','Artist',None,200,created_at=1)
     other = store.tracks.upsert_track('other','Other song','Other artist',None,200,created_at=1)
@@ -188,7 +196,7 @@ def test_enrichment_priority_counts_confirmed_recording_once_per_artist(store):
     complete_entries(store, [a, b, other], 3)
     preferred = store.tracks.upsert_track('other-new','New song','Other artist',None,200,created_at=10)
     store.tracks.upsert_track('artist-new','New song','Artist',None,200,created_at=20)
-    store.settings.set_setting('enrich_caught_up_at','30')
+    store.enrichment_queue.save_caught_up_at(30)
     assert store.enrichment_queue.next_enrich_batch(1)[0]['id'] == preferred
 
 
@@ -201,13 +209,30 @@ def test_identity_changes_preserve_but_refuse_incompatible_model_rollback(store)
         store.model_selection.restore_model_selection(run,3)
 
 
+def test_unavailable_last_upload_keeps_its_recording_and_history(store):
+    account = store.accounts.upsert_account('main', None, True)
+    video = 'only-upload'
+    entry = store.tracks.upsert_track(video, 'Song', 'Artist', None, 200, True)
+    original = store.tracks.catalog_subject(entry)
+    key = original['identity_key']
+    store.history.record_history_plays(account, 86400, [key])
+
+    store.tracks.upsert_track(video, 'Song', 'Artist', None, 200, False)
+
+    current = store.tracks.catalog_subject(entry)
+    assert current['recording_id'] == original['recording_id']
+    assert store.tracks.track_detail(video)['available'] == 0
+    assert store.tracks.resolve_identity_key(key) == key
+    assert store.history.listening_day_counts(account) == {key: 1}
+
+
 def test_retired_keys_deduplicate_ingestion_without_losing_exact_upload_plays(store):
-    iid = store.accounts.upsert_account('main','credential',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     a = store.tracks.upsert_track('a','Song','Artist',None,200)
     b = store.tracks.upsert_track('b','Song','Artist',None,200)
     retired = store.tracks.catalog_subject(b)['identity_key']
     store.tracks.associate_youtube_item('b',store.tracks.catalog_subject(a)['recording_id'],
-                                source='verified',evidence={'review':'same recording'},now=1)
+                                source='verified',evidence={'review':'same recording'},now=1,same_recording=True)
     assert store.history.import_play_events(iid,[(retired,'b',100)]) == 1
     assert store.history.import_play_events(iid,[(retired,'b',100)]) == 0
     assert not store.history.record_play_event(iid,retired,'b',101)
@@ -223,7 +248,7 @@ def test_retired_keys_deduplicate_ingestion_without_losing_exact_upload_plays(st
 
 @pytest.mark.parametrize('video_id',[None,'',' ','unknown-upload'])
 def test_play_observations_only_use_text_when_video_is_missing(store,video_id):
-    iid = store.accounts.upsert_account('main','credential',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     tid = store.tracks.upsert_track('known','Song','Artist',None,200)
     subject = store.tracks.catalog_subject(tid)
     store.history.import_play_events(iid,[(subject['identity_key'],video_id,100)])
@@ -235,7 +260,7 @@ def test_play_observations_only_use_text_when_video_is_missing(store,video_id):
 
 
 def test_later_catalog_observation_only_resolves_history_for_the_exact_video(store):
-    iid = store.accounts.upsert_account('main','credential',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     store.history.import_play_events(iid,[('song|artist','unknown-upload',100)])
     known = store.tracks.upsert_track('known','Song','Artist',None,200)
     assert store.tracks.catalog_subject(known)['identity_key'] not in dict(store.history.recent_plays_with_ts())

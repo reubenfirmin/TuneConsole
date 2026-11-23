@@ -12,10 +12,8 @@ def cold_store(no_database):
     store = transient_repository_store(
         discovery={'get_discovered_tracks': []},
         artists={'track_keys': {}, 'name_keys': {}},
-        rec_model={'get_rec_vectors': [], 'get_rec_artist_vectors': [],
-                   'suppressed_keys': set(), 'muted_artists': set(),
-                   'get_weights': {}, 'get_lean': 1.},
-        rec_query={'track_content': {}, 'track_audio_features': {}},
+        rec_model={'get_rec_vectors': [], 'content_generation': {'model': None, 'library': [], 'discovered': []},
+                   'suppressed_keys': set(), 'muted_artists': set()},
         genres={'feature_axes': {'Techno': ('techno', None)}},
         values={'read_view': lambda: nullcontext(store)},
     )

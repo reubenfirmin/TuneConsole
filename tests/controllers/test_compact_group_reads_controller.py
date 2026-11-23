@@ -6,11 +6,10 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.compact_taste_groups import CompactTasteGroups
-from yt_playlist.controllers.group_retention import GroupRetention
-from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.group_documents import GroupFiles
 from yt_playlist.core.profile_files import ProfileFiles
 from yt_playlist.repos.compact_taste_groups import CompactTasteGroupsRepo
+from yt_playlist.repos.group_retention import GroupRetentionRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -38,7 +37,7 @@ def groups():
 
     files.read.side_effect = document
     return CompactTasteGroups(repository, files, create_autospec(ProfileFiles, instance=True, spec_set=True),
-                              create_autospec(GroupRetention, instance=True, spec_set=True))
+                              create_autospec(GroupRetentionRepo, instance=True, spec_set=True))
 
 
 def test_head_uses_exact_sql_membership_and_parent_aliases(groups):
@@ -47,8 +46,8 @@ def test_head_uses_exact_sql_membership_and_parent_aliases(groups):
                   'document': {'leaf': True, 'group_id': 'obsolete', 'version': 'obsolete'}}
     groups.repository.head.return_value = {
         'external_key': 'generation-2', 'input_fingerprint': 'input', 'created_at': 5, 'input_serial': 9,
-        'recording_inputs': {'recording': 'digest'}, 'policy': 'policy-reference',
-        'document': {'diagnostics': {}, 'recording_inputs': {'obsolete': 'old'}}, 'groups': [definition],
+        'policy': 'policy-reference',
+        'document': {'diagnostics': {}, 'recording_inputs': {'recording': 'digest'}}, 'groups': [definition],
     }
     assert groups.head(members=True) == {
         'generation': 'generation-2', 'fingerprint': 'input', 'created_at': 5, 'serial': 9,
@@ -78,20 +77,6 @@ def test_absent_publications_do_not_attempt_file_reads(groups, method, args):
     assert getattr(groups, method)(*args) is None
     groups.files.read.assert_not_called()
     groups.files.policy.assert_not_called()
-
-
-@pytest.mark.parametrize('limit', [-1, True, 8193, '10'])
-def test_invalid_lineage_budget_is_rejected_before_sql(groups, limit):
-    with pytest.raises(ValueError, match='page size'):
-        groups.successors('alias', limit=limit)
-    groups.repository.successors.assert_not_called()
-
-
-def test_lineage_overflow_is_not_silently_truncated_or_decoded(groups):
-    groups.repository.successors.return_value = [{}, {}]
-    with pytest.raises(WorkBudgetExceeded):
-        groups.successors('alias', limit=1)
-    groups.files.read.assert_not_called()
 
 
 def test_learning_head_exposes_the_hierarchy_and_genres_without_diagnostic_payload(groups):

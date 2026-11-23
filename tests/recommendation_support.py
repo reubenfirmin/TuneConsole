@@ -12,14 +12,14 @@ def seed_library_favorites(store, tracks, *, now=1):
     account = store.conn.execute('SELECT id FROM accounts WHERE label=?',
                                  ('prepared favorites',)).fetchone()
     if account is None:
-        account_id = store.accounts.upsert_account('prepared favorites', 'fixture', None, False)
+        account_id = store.accounts.upsert_account('prepared favorites', None, False)
         with store.conn:
             store.conn.execute('UPDATE accounts SET active=0 WHERE id=?', (account_id,))
     else:
         account_id = account['id']
     playlist = store.playlists.get_playlist_for_account(account_id, 'LM')
     ids = store.playlists.get_playlist_track_ids(playlist.id) if playlist else []
-    ids.extend(store.conn.execute('SELECT id FROM tracks WHERE identity_key=?',
+    ids.extend(store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?',
                                  (track['key'],)).fetchone()[0] for track in tracks)
     ids = list(dict.fromkeys(ids))
     playlist_id = store.playlists.upsert_playlist(account_id, 'LM', 'Liked Music', len(ids),
@@ -52,11 +52,6 @@ def seed_compact_group_history(store):
                 old_share=1, new_share=1, overlap=1, compatible=True)))] if at == 2 else [],
             _stage_parent='first' if at == 2 else None)
         store.taste_groups.publish(prepared)
-        with store.conn:
-            store.conn.execute('INSERT INTO group_assignments(generation_id,recording_id,group_version_id,'
-                'similarity,support,profile_digest,prepared_at) SELECT g.id,2,a.group_version_id,.7,.6,?,? '
-                'FROM group_generations g JOIN group_version_aliases a ON a.external_version=? '
-                'WHERE g.external_key=?', ('profile-digest', at, generation + '-leaf', generation))
     return prepared
 
 
@@ -66,6 +61,9 @@ def seed_publication_subjects(store, items, *, discoveries=(), unowned=(), now=1
     These owners require real catalog membership, identities and metadata,
     rather than provider ingestion, artist inference or metadata delivery files.
     """
+    from yt_playlist.core import discovery_candidates
+    from yt_playlist.core.track_sources import folded, save_to_library
+
     items = {item['key']: item for item in items}
     discovered = set(discoveries)
     unowned = set(unowned)
@@ -86,18 +84,28 @@ def seed_publication_subjects(store, items, *, discoveries=(), unowned=(), now=1
             [(rid, item['key'], item['title'], item['artist'], item.get('created_at')) +
              ((resolved[item.get('genre')][0],) if genre_input else ())
              for rid, item in subjects])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist,'
-            'album,mb_year,duration_s) VALUES (?,?,?,?,?,?,?,?,?)',
-            [(item['video_id'], rid, item['title'], item['artist'], item['title'], item['artist'],
-              item.get('album'), item.get('year'), item.get('duration_s')) for rid, item in subjects])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-                               [(rid, rid, item['video_id']) for rid, item in subjects])
+        source_columns = 'video_id,recording_id,title,artist,orig_title,orig_artist,album,mb_year,duration_s'
+        sources = [(item['video_id'], rid, item['title'], item['artist'], item['title'], item['artist'],
+                    item.get('album'), item.get('year'), item.get('duration_s')) for rid, item in subjects]
+        if folded(store.conn):
+            store.conn.executemany(f'INSERT INTO track_sources(id,{source_columns}) VALUES (?,?,?,?,?,?,?,?,?,?)',
+                                   [(source[1], *source) for source in sources])
+        else:
+            store.conn.executemany(f'INSERT INTO youtube_items({source_columns}) VALUES (?,?,?,?,?,?,?,?,?)', sources)
+            store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+                                   [(rid, rid, item['video_id']) for rid, item in subjects])
         store.conn.executemany("INSERT INTO recording_aliases VALUES (?,?,'fixture')",
                                [(item['key'], rid) for rid, item in subjects])
-        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
-                               [(rid,) for rid, item in subjects if item['key'] not in discovered | unowned])
-        store.conn.executemany('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?)',
-                               [(rid, rid, now) for rid, item in subjects if item['key'] in discovered])
+        save_to_library(store.conn, (rid for rid, item in subjects if item['key'] not in discovered | unowned),
+                        None, origin='fixture')
+        if discovered:
+            if discovery_candidates.tracks_folded(store.conn):
+                for rid, item in subjects:
+                    if item['key'] in discovered:
+                        discovery_candidates.admit_track(store.conn, rid, rid, now)
+            else:
+                store.conn.executemany('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?)',
+                                       [(rid, rid, now) for rid, item in subjects if item['key'] in discovered])
 
 
 def seed_bundle_subjects(store, bundle, *, fresh=()):
@@ -119,7 +127,7 @@ def seed_bundle_subjects(store, bundle, *, fresh=()):
         if key in owned or key in discovered:
             continue
         video = item.get('video_id') or 'fixture-' + key
-        existing = store.conn.execute('SELECT r.identity_key FROM youtube_items y JOIN recordings r '
+        existing = store.conn.execute('SELECT r.identity_key FROM track_sources y JOIN recordings r '
                                       'ON r.id=y.recording_id WHERE y.video_id=?', (video,)).fetchone()
         if existing and existing[0] != key:
             video = 'fixture-' + key

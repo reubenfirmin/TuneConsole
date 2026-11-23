@@ -7,6 +7,7 @@ const date = day => new Date(day + 'T00:00:00Z');
 const stamp = d => d.toISOString().slice(0,10);
 const shift = (day,n) => { const d=date(day); d.setUTCDate(d.getUTCDate()+n); return stamp(d); };
 const values = value => Array.isArray(value) ? value : value ? [value] : [];
+class SelectionError extends RangeError {}
 function bucket(day,period) {
     const d=date(day);
     if (period === 'month') d.setUTCDate(1);
@@ -17,7 +18,7 @@ function range(data,filters) {
     const n={'7d':7,'30d':30,'90d':90}[filters.window];
     const valid = value => /^\d{4}-\d{2}-\d{2}$/.test(value || '') && !isNaN(date(value)) && stamp(date(value))===value;
     if(filters.window === 'custom' && (!valid(filters.start) || !valid(filters.end) || filters.end<=filters.start))
-        throw new RangeError('Choose valid dates with an end date after the start date. The end date itself is not included.');
+        throw new SelectionError('Choose valid dates with an end date after the start date. The end date itself is not included.');
     const start=filters.window === 'custom' && valid(filters.start) ? filters.start : n ? shift(data.today,1-n) : null;
     const end=filters.window === 'custom' && valid(filters.end) ? filters.end : shift(data.today,1);
     return {start,end};
@@ -76,7 +77,7 @@ function summarize(data,filters) {
         if(period === 'month') cursor.setUTCMonth(cursor.getUTCMonth()+1);
         else cursor.setUTCDate(cursor.getUTCDate()+(period === 'week' ? 7 : 1));
     }
-    if(stamp(cursor)<=end) throw new RangeError('This selection has more than 12,000 periods. Choose a shorter range or a wider grouping.');
+    if(stamp(cursor)<=end) throw new SelectionError('This selection has more than 12,000 periods. Choose a shorter range or a wider grouping.');
     const overlays=[...groups.values()].filter(g=>measure === 'minutes' ? g.seconds : g[historyMetric])
         .sort((a,b)=>(measure === 'minutes' ? b.seconds-a.seconds : b[historyMetric]-a[historyMetric]) || a.name.localeCompare(b.name)).slice(0,30)
         .map(g=>({...g,count:measure === 'minutes' ? g.seconds/60 : g[historyMetric],values:series.map(s=>{
@@ -111,21 +112,24 @@ function summarize(data,filters) {
         start:bounds.start || earliest,end:bounds.end,compare:!!(filters.compare && selectedSpan),
         comparisonPartial:bounds.end>data.today,timezone:data.timezone || 'UTC',builtAt:data.built_at,today:data.today};
 }
-let manifest, request=0;
+let manifest, pending;
 const cache=new Map(); let bytes=0;
-async function prepared(filters,id) {
+async function prepared(filters,signal) {
     const bounds=range(manifest,filters);
     let start=bounds.start;
     if(filters.compare && start) start=shift(start,-Math.max(1,(date(bounds.end)-date(start))/86400000));
     const chunks=manifest.chunks.filter(c=>(!start || c.until>=start) && c.from<bounds.end);
     const data={...manifest,rows:[],catalog:{}};
     for(const chunk of chunks) {
-        if(id!==request) return null;
+        signal.throwIfAborted();
         let item=cache.get(chunk.key);
         if(!item) {
-            const response=await fetch('/charts/listening-chunk/'+chunk.key, {signal: AbortSignal.timeout(20000)});
-            if(!response.ok) throw new Error('Generation changed');
-            const encoded=await response.text(); item={data:JSON.parse(encoded),bytes:encoded.length*2};
+            const deadline=AbortSignal.any([signal,AbortSignal.timeout(20000)]);
+            const response=await fetch('/charts/listening-chunk/'+chunk.key, {signal:deadline});
+            if(!response.ok) throw new Error('Listening chunk read failed: '+response.status);
+            const encoded=await response.text();
+            deadline.throwIfAborted();
+            item={data:JSON.parse(encoded),bytes:encoded.length*2};
             if(item.bytes>1048576) throw new Error('Oversized listening partition');
             cache.set(chunk.key,item); bytes+=item.bytes;
         } else { cache.delete(chunk.key); cache.set(chunk.key,item); }
@@ -137,12 +141,23 @@ async function prepared(filters,id) {
     return summarize(data,filters);
 }
 if(typeof self!=='undefined') self.onmessage=async event=>{
-    const {id,encoded,filters}=event.data; request=id;
+    pending?.abort();
+    const controller=pending=new AbortController(), signal=controller.signal;
+    const {id,encoded,filters}=event.data;
     try {
         if(encoded) manifest=JSON.parse(encoded);
         if(!manifest || manifest.schema!==2) throw new Error('Unsupported listening data');
-        const result=await prepared(filters,id);
-        if(result && id===request) self.postMessage({id,result});
-    } catch(error) { if(id===request) self.postMessage({id,error:error instanceof RangeError ? error.message : 'Could not read listening data. Reload the selection.'}); }
+        const result=await prepared(filters,signal);
+        if(!signal.aborted) self.postMessage({id,result});
+    } catch(error) {
+        if(signal.aborted) return;
+        if(error instanceof SelectionError) self.postMessage({id,error:error.message});
+        else {
+            console.debug('[Listening analytics] chart read unavailable',error);
+            self.postMessage({id,unavailable:true});
+        }
+    } finally {
+        if(pending===controller) pending=null;
+    }
 };
 if(typeof module!=='undefined') module.exports={summarize,range};

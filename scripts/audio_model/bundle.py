@@ -8,11 +8,10 @@ import shutil
 
 MODEL = Path(__file__).resolve().parents[2] / 'extension/audio_model'
 SCRIPTS = ('model_worker.js', 'runtime_loader.js', 'features.js', 'embedding_graph.js', 'audio_attributes.js')
-HEADS = ('relaxed', 'aggressive', 'happy', 'sad', 'deam')
 VENDOR_FILES = frozenset({
     'tf.min.js', 'meyda.min.js', 'meyda-LICENSE', 'essentia-LICENSE', 'model-LICENSE',
-} | {f'{head}/{name}' for head in ('musicnn', *HEADS)
-     for name in ('model.json', 'group1-shard1of1.bin', 'metadata.json')})
+    'musicnn/model.json', 'musicnn/group1-shard1of1.bin', 'musicnn/metadata.json',
+})
 
 
 def verified_files(source):
@@ -21,7 +20,6 @@ def verified_files(source):
     bundle = json.loads((vendor / 'bundle.json').read_text())
     runtime = json.loads((vendor / 'runtime.json').read_text())
     if (bundle.get('schema') != 1 or runtime.get('schema') != 1
-            or {head['id'] for head in bundle.get('mood_heads', [])} != set(HEADS)
             or bundle.get('meyda_version') != '5.6.3'
             or runtime.get('runtime') != 'essentia-csp-audio-2'
             or '-sDYNAMIC_EXECUTION=0' not in runtime.get('flags', [])):
@@ -37,6 +35,8 @@ def verified_files(source):
             path = PurePosixPath(name)
             if path.is_absolute() or '..' in path.parts or not path.parts:
                 raise ValueError('Invalid audio artifact path: ' + name)
+            if manifest is bundle and name not in VENDOR_FILES:
+                continue
             artifact = vendor / name
             if artifact.is_symlink() or not artifact.is_file():
                 raise ValueError('Missing audio artifact: ' + name)
@@ -51,6 +51,9 @@ def verified_files(source):
             raise ValueError('Empty audio worker source: ' + name)
         files.add(name)
         workers.append({'path': name, 'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest()})
+    bundle.pop('mood_heads', None)
+    bundle['files'] = [row for row in bundle['files'] if row['path'] in VENDOR_FILES]
+    bundle['total_bytes'] = sum(row['bytes'] for row in bundle['files'])
     return files, {**bundle, 'purpose': 'tuneconsole_audio', 'worker_sources': workers}
 
 

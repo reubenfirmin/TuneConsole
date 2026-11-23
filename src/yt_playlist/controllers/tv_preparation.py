@@ -1,28 +1,25 @@
 """Guarded TV preparation with explicit snapshot, publication and worker ports."""
 from threading import RLock
-from yt_playlist.core import recommendation_work
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
 
 
 class TVPreparation:
     """Publish preparation outcomes through the installed storage owner."""
-    def __init__(self, repository, proposals):
+    def __init__(self, repository):
         self.repository = repository
-        self.proposals = proposals
 
     def state(self):
-        if self.repository.available():
-            return self.repository.state()
-        return self.proposals.get_proposals('tv_preparation')
+        return self.repository.state()
 
     def record(self, failed, now):
-        value = {'failed': failed, 'at': now}
-        row = recommendation_work.parse('tv_preparation', value, now)
-        if self.repository.available():
-            self.repository.record(value, row, now)
-        else:
-            self.proposals.put_proposals('tv_preparation', value, now)
+        self.repository.record(failed, now)
+
+    def draw(self):
+        return self.repository.draw()
+
+    def record_draw(self, videos):
+        self.repository.record_draw(videos)
 
 
 class TVPoolPreparation:

@@ -33,16 +33,17 @@ def test_familiarity_is_owned_by_onboarding(readiness):
 
 
 def test_vibe_counts_share_the_usable_evidence_criteria(readiness):
+    patterns = ('measurement*', 'prediction*', 'acousticbrainz*')
     readiness.repository.has_vibe_evidence.return_value = True
     readiness.repository.vibe_evidence.return_value = (2, 5)
-    assert readiness.has_vibe_evidence('v1:')
-    assert readiness.vibe_evidence('v1:') == (2, 5)
+    assert readiness.has_vibe_evidence(patterns)
+    assert readiness.vibe_evidence(patterns) == (2, 5)
     readiness.repository.has_vibe_evidence.assert_called_once_with(
-        'v1:', sources=('audio_measurement', 'provider_measurement', 'artist_genre', 'artist', 'genre'),
+        patterns, sources=('audio_measurement', 'artist_genre', 'artist', 'genre', 'acousticbrainz_estimate'),
         minimum_support=0)
     readiness.repository.vibe_evidence.assert_called_once_with(
-        'v1:', measured_sources=('audio_measurement', 'provider_measurement'),
-        proxy_sources=('artist_genre', 'artist', 'genre'), minimum_support=0)
+        patterns, measured_sources=('audio_measurement',),
+        proxy_sources=('artist_genre', 'artist', 'genre', 'acousticbrainz_estimate'), minimum_support=0)
 
 
 def test_provider_completion_criteria_are_explicit(readiness):

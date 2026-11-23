@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from yt_playlist.rec import embed, rec_params
+from yt_playlist.rec import cluster_ranking, rec_params
 
 
 def test_parameter_overrides_persist_and_resets_preserve_unrelated_settings(store):
@@ -62,11 +62,11 @@ def test_registry_defaults_constants_and_groups():
     store = SimpleNamespace(settings=Mock(get_setting=Mock(return_value=None)))
     expected = {
         "comfort_recency_full_days": 30, "comfort_min_plays": 4,
-        "cluster_content_weight": .30, "cluster_beta": embed.CLUSTER_BETA,
-        "cluster_seed_spread": embed.SEED_FANOUT, "discovery_gc_days": 30,
+        "cluster_content_weight": .30, "cluster_beta": cluster_ranking.CLUSTER_BETA,
+        "cluster_seed_spread": cluster_ranking.SEED_FANOUT, "discovery_gc_days": 30,
         "ppr_alpha": .85, "ppr_iters": 50, "ppr_tol": 1e-6,
         "ppr_rank_depth": 200, "ppr_ab_share": .5,
-        "play_transient_w": .30, "like_transient_w": .45, "dislike_transient_w": 1.5,
+        "play_transient_w": .30, "like_transient_w": .45,
         "facet_gain": .35, "recent_play_limit": 50, "facet_mult_min": .35,
         "facet_mult_max": 2.5, "mood_alpha": .35, "dislike_suppress_days": 365,
         "theme_threshold": 1.2, "graduate_up": 1.05, "graduate_down": .95,

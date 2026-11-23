@@ -35,7 +35,7 @@ def _pristine_current_schema():
 
 @pytest.fixture
 def db(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     return store
 
 
@@ -64,7 +64,7 @@ def shown(db, request, at):
 
 
 def test_22_unrelated_same_name_in_other_account_does_not_block_import(db):
-    other_identity = db.accounts.upsert_account("other", "other-bridge", None, False)
+    other_identity = db.accounts.upsert_account("other", None, False)
     tid = db.tracks.upsert_track("unrelated", "Unrelated song", "Another artist", "", 200)
     pid = db.playlists.upsert_playlist(other_identity, "OTHER", "Road songs", 1, "hash", 1)
     db.playlists.set_playlist_tracks(pid, [tid])
@@ -175,14 +175,14 @@ def test_44_cold_discovery_long_mix_is_excluded_before_saving(db):
 
 def test_86_boosting_cold_genre_does_not_lower_its_rank(db, monkeypatch):
     class Projection:
-        def predict(self, genre, year=None, audio=None, artist=None):
+        def predict(self, genre, year=None, audio=None, artist=None, *, genre_axes=None):
             return {"Jazz": np.array([-.5, np.sqrt(.75)]),
                     "Ambient": np.array([-.6, .8])}[genre]
 
     for key, genre in [("one|a", "jazz"), ("two|b", "ambient")]:
         db.discovery.upsert_discovered_track(key, key[0], key, key[-1], "", None,
                                    genre, None, "source", 100)
-    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, store: Projection()))
+    monkeypatch.setattr(discover.ContentProjection, "fit", classmethod(lambda cls, store, **kwargs: Projection()))
     monkeypatch.setattr(surfaces, "playlist_taste", lambda store, *, now: scoring.PlaylistTaste(
         ["context"], np.array([[1., 0.]]), np.array([1.])))
     before = [t.key for t in surfaces.cold_candidates(db, 100)]

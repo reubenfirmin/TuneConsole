@@ -5,7 +5,6 @@ do not supply track-level taste evidence until explicit adoption; membership
 must never suppress a track that remains eligible for recommendations.
 """
 import json
-from tests.enrichment_support import seed_audio
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -18,7 +17,8 @@ from yt_playlist.web.app import create_app
 from yt_playlist.library import playlist_generated
 from tests.conftest import FakeClient
 from tests.playlist_fixture_support import remote_catalog
-from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
+from tests.home_fixture_support import home_routes_only, returning_listener, without_metadata_providers
+from tests.onboarding_support import publish_live_mix_inputs
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator, native_sql_calls)
 
@@ -38,7 +38,7 @@ def _seed_generated(store, iid, n=3):
 
 
 def test_generated_excluded_until_promoted(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid, ytm, gkeys = _seed_generated(store, iid, n=2)
     dao = store.rec_eligibility
 
@@ -59,7 +59,7 @@ def test_generated_excluded_until_promoted(store):
 
 
 def test_generated_tracks_in_no_basket_until_promoted(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _pid, ytm, gkeys = _seed_generated(store, iid, n=3)
     dao = store.rec_evidence
 
@@ -75,7 +75,7 @@ def test_generated_tracks_in_no_basket_until_promoted(store):
 
 
 def test_generate_endpoint_creates_and_groups(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient()
     c = _client(store, lambda: {iid: fc})
     tracks = json.dumps([{"video_id": "v1", "title": "S1", "artist": "A", "album": "", "thumbnail": ""},
@@ -101,7 +101,7 @@ def test_generate_endpoint_creates_and_groups(store):
 
 def test_generate_result_play_and_redirect(store):
     """Save & play opens the normal playlist without an intermediate success screen."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient()
     c = _client(store, lambda: {iid: fc})
     tracks = json.dumps([{"video_id": "v1", "title": "S1", "artist": "A", "album": "", "thumbnail": ""}])
@@ -117,13 +117,36 @@ def test_generate_result_play_and_redirect(store):
     assert "genComplete(" in r.text                          # close the request's loading window
 
 
+def test_generate_resolves_current_uploads_in_selection_order(store):
+    iid = store.accounts.upsert_account('main', None, True)
+    store.tracks.upsert_track('preview', 'Song', 'Artist', 'Album', 180)
+    store.tracks.upsert_track('second', 'Other song', 'Artist', 'Album', 190)
+    recording, second = [store.tracks.track_detail(video)['recording_id'] for video in ('preview', 'second')]
+    with store.conn:
+        store.conn.execute('INSERT INTO track_sources(recording_id,video_id,title,artist,duration_s) '
+                           'VALUES (?,?,?,?,?)', (recording, 'replacement', 'Song', 'Artist', 180))
+        store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id='preview'")
+    fc = FakeClient(catalog=remote_catalog([
+        {'video_id': 'replacement', 'title': 'Song', 'artist': 'Artist'},
+        {'video_id': 'second', 'title': 'Other song', 'artist': 'Artist'},
+    ]))
+    c = _client(store, lambda: {iid: fc})
+
+    response = c.post('/home/generate', data={'name': 'Mix', 'tracks': json.dumps([
+        {'recording_id': second, 'video_id': 'second'}, {'recording_id': recording, 'video_id': 'preview'},
+    ])})
+
+    assert response.status_code == 200
+    assert fc.added[0][1] == ['second', 'replacement']
+
+
 @pytest.mark.parametrize("recipe", [{"model": "fresh"},
                                     {"model": "mode", "lane": "fresh", "mode_id": 1}])
 def test_fresh_creation_starts_enrichment_and_page_rejoins(store, monkeypatch, recipe):
     from yt_playlist.providers import musicbrainz
     from tests.conftest import only_provider
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     only_provider(store, "musicbrainz")
     started, release = threading.Event(), threading.Event()
 
@@ -216,7 +239,7 @@ def test_fresh_acceptance_drains_enrichment_on_early_failure(store, monkeypatch,
 
 
 def test_non_fresh_creation_does_not_start_playlist_enrichment(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     c = _client(store, lambda: {iid: FakeClient(catalog=remote_catalog([
         {'video_id': 'v1', 'title': 'Song', 'artist': 'Artist'}]))})
     response = c.post("/home/generate", data={
@@ -232,7 +255,7 @@ def test_non_fresh_creation_does_not_start_playlist_enrichment(store):
 def test_save_button_opens_generating_screen(store):
     """The Save & play button opens the cool generating screen during the click (a user gesture), so
     the browser does not block it."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", None, 1)
     pl = store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 1.0)
     store.playlists.set_playlist_tracks(pl, [t])
@@ -250,7 +273,7 @@ def test_save_button_opens_generating_screen(store):
 
 
 def test_generated_membership_is_retained_without_suppressing_candidates(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "Art", None, None, 1) for i in range(2)]
     gen = store.playlists.upsert_playlist(iid, "PLG", "From your catalog - June 21 2026", 2, "h", 1.0)
     store.playlists.set_playlist_tracks(gen, t)
@@ -264,7 +287,7 @@ def test_generated_membership_is_retained_without_suppressing_candidates(store):
 
 
 def test_generate_endpoint_rejects_empty(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     c = _client(store, lambda: {iid: FakeClient()})
     r = c.post("/home/generate", data={"name": "x", "tracks": "[]"})
     assert r.status_code == 200 and "Couldn't save" in r.text
@@ -283,20 +306,17 @@ def generated_card_store(tmp_path, monkeypatch, native_sql_calls):
 def test_home_renders_generated_cards(
         generated_card_store, unlocked_home_controls, home_routes_only, without_metadata_providers):
     store = generated_card_store
-    # Cards are lazy-loaded via /home/cards; assert against that endpoint instead of /.
-    import numpy as np
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.settings.set_setting("last_sync_at", "1.0")        # synced -> the rec feed (generated cards) renders
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
-    ], retired_ids=[], now=1.0)
-    publish_menu(store, 1, count=2, mode_ids=(1, 1),
-                 labels=('Comfort listening', 'More in your wheelhouse'))
+    iid = store.accounts.upsert_account("main", None, True)
+    returning_listener(store, 'mixes', now=1)
+    store.settings.set_setting("last_sync_at", "1.0")
+    publish_live_mix_inputs(store, now=1, count=2)
     with _client(store, lambda: {iid: FakeClient()}) as c:
         r = c.get("/home/cards")
         assert r.status_code == 200
-        assert "More in your wheelhouse" in r.text and "Play this mix" in r.text
+        assert "Comfort listening" in r.text and "More in your wheelhouse" in r.text
+        for lane in ('comfort', 'wheelhouse'):
+            assert f'hx-post="/home/generate" hx-target="#gen-{lane}"' in r.text
+        assert r.text.count('title="Play this mix"') == 2
 
 
 def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
@@ -307,7 +327,7 @@ def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
     from yt_playlist.rec import home_cards as home
     from yt_playlist.rec import recipes
     from yt_playlist.rec.surfaces import ForYouItem
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     spec = ([("Hermanos", "Latin")] * 4 + [("Younger", "Electronica")] * 3
             + [("Ritmo", "Electronica")] * 2 + [("Supertramp", "Rock")])   # arrives artist-clustered
     items = []
@@ -330,7 +350,7 @@ def test_comfort_proto_card_dj_ordered_with_genre(store, monkeypatch):
 
 def test_create_generated_playlist_stores_recipe_and_versions(store):
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient()
     tracks = [{"video_id": f"v{i}", "title": f"S{i}", "artist": "A" if i % 2 else "B"} for i in range(4)]
     fc._catalog.update(remote_catalog(tracks))
@@ -348,7 +368,7 @@ def test_create_generated_playlist_stores_recipe_and_versions(store):
 def test_create_and_record_logs_the_save_action_only_when_something_was_added(store, monkeypatch):
     from yt_playlist.rec import measurement
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = FakeClient()
     tracks = [{"video_id": "v0", "title": "S0", "artist": "A"}]
     fc._catalog.update(remote_catalog(tracks))
@@ -379,7 +399,7 @@ def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
     from yt_playlist.util.action_kinds import is_undoable
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)   # 10d old, never played
     fc = FakeClient()
@@ -396,7 +416,7 @@ def test_gc_deletes_stale_unplayed_generated(store, monkeypatch, tmp_path):
 def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 2 * day)   # still inside the grace window
     fc = FakeClient()
@@ -408,7 +428,7 @@ def test_gc_keeps_young_generated(store, monkeypatch, tmp_path):
 def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
     store.history.record_history_plays(iid, now - day, list(keys), source_timezone="UTC")
@@ -420,7 +440,7 @@ def test_gc_keeps_generated_played_since_creation(store, monkeypatch, tmp_path):
 def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     pid, _ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
     half = [identity_key(f"PLGT{i}", "GenArt") for i in (0, 1)]            # 2 of 4 = 50% played since creation
@@ -431,7 +451,7 @@ def test_gc_keeps_generated_when_at_least_half_played(store, monkeypatch, tmp_pa
 
 
 def test_gc_counts_live_generated_playback_without_feeding_organic_history(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     day, now = 86400.0, 100 * 86400.0
     pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
     for i in (0, 1):
@@ -445,7 +465,7 @@ def test_gc_counts_live_generated_playback_without_feeding_organic_history(store
 def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day, n=4)
     store.history.record_history_plays(iid, now - day, [identity_key("PLGT0", "GenArt")], source_timezone="UTC")
@@ -458,7 +478,7 @@ def test_gc_deletes_generated_when_under_half_played(store, monkeypatch, tmp_pat
 def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, keys = _seed_generated_at(store, iid, created=now - 10 * day)
     store.history.record_history_plays(iid, now - 20 * day, list(keys), source_timezone="UTC")
@@ -471,7 +491,7 @@ def test_gc_ignores_plays_before_creation(store, monkeypatch, tmp_path):
 def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     t = store.tracks.upsert_track("v1", "S", "A", None, None, 1)
     pl = store.playlists.upsert_playlist(iid, "PLN", "Normal", 1, "h", now - 30 * day)   # old + unplayed, but real
@@ -485,7 +505,7 @@ def test_gc_ignores_non_generated_playlists(store, monkeypatch, tmp_path):
 def test_gc_deletion_is_undoable(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     from yt_playlist.library import executor, playlist_undo
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0; now = 100 * day
     _pid, ytm, _ = _seed_generated_at(store, iid, created=now - 10 * day)
     fc = FakeClient()
@@ -501,10 +521,10 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     """_carded must order the proto by the recipe's journey. Force 'warm_up' and assert the preview
     rises in energy thirds (and still spaces artists / carries genre)."""
     from yt_playlist.rec import home_cards as home
-    from tests.musical_support import prepare_profiles
+    from tests.musical_support import publish_intensities
     from yt_playlist.rec import musical_character, recipes
     from yt_playlist.rec.surfaces import ForYouItem
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     # mellow vs intense families, interleaved so source order is NOT already sorted.
     spec = [("ambient", "Calm"), ("metal", "Loud"), ("classical", "Calm"), ("punk", "Loud"),
             ("folk", "Calm"), ("dnb", "Loud"), ("jazz", "Calm"), ("trance", "Loud"),
@@ -513,10 +533,9 @@ def test_carded_orders_by_recipe_journey(store, monkeypatch):
     for i, (genre, artist) in enumerate(spec):
         tid = store.tracks.upsert_track(f"v{i}", f"S{i}", artist, "", None, 1)
         store.tracks.set_track_genre(tid, genre)
-        seed_audio(store, tid, energy=0 if artist == "Calm" else 1)
         items.append(ForYouItem(f"S{i}", artist, "", f"v{i}", None, 1, "r",
                                 identity_key(f"S{i}", artist), "comfort"))
-    prepare_profiles(store)
+    publish_intensities(store, {track.key: 0 if track.artist == 'Calm' else 1 for track in items})
     monkeypatch.setattr(recipes, "roll_recipe",
                         lambda *a, **k: {"facets": {}, "journey": "warm_up", "dj": {"seed": 1}})
 

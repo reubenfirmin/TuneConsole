@@ -12,14 +12,14 @@ from .evidence_ledger import canonical
 from .file_collection import retained_reader
 from .policy_config import BASE_FIELD
 from .policy_paths import record_id
-from . import fao, file_pack
+from . import fao, file_pack, policy_bodies, policy_impressions
 from .fao import _try_file_lock
 
 FORMAT = 'recommendation-policy-1'
 MAX_BYTES = file_pack.MAX_BYTES
 PACK_BYTES = 256 * 1024
 PACK_HEADER = b'TuneConsole recommendation policies 1\n'
-OWNERS = ('recommendation_policy_bodies', 'recommendation_policies')
+OWNERS = (policy_bodies.VIEW, 'recommendation_policies')
 
 
 def root_for_database(path, memory_key):
@@ -48,9 +48,9 @@ def publish(root, configuration):
     return _publish_encoded(root, encoded, digest), digest, len(encoded)
 
 
-def _publish_encoded(root, encoded, digest, *, age=None):
+def _publish_encoded(root, encoded, digest, *, age=None, max_bytes=MAX_BYTES):
     path = Path(root) / digest[:2] / (digest + '.json')
-    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=MAX_BYTES))
+    fao.write(path, fao.Content(encoded, metadata=age, max_bytes=max_bytes))
     return str(path)
 
 
@@ -72,11 +72,11 @@ def pack_header(header, age):
     return header + b'Custody clocks 1 ' + canonical([age.mtime_ns, age.ctime_ns]) + b'\n'
 
 
-def pack_encoded(root, records, *, header, pack_bytes, age=None):
+def pack_encoded(root, records, *, header, pack_bytes, age=None, max_bytes=MAX_BYTES):
     """Publish bounded packs; paths and custody remain this owner's concern."""
     header = pack_header(header, age)
-    for pack in file_pack.encode(records, header=header, target_bytes=pack_bytes, max_bytes=MAX_BYTES):
-        filename = _publish_encoded(root, pack.raw, hashlib.sha256(pack.raw).hexdigest(), age=age)
+    for pack in file_pack.encode(records, header=header, target_bytes=pack_bytes, max_bytes=max_bytes):
+        filename = _publish_encoded(root, pack.raw, hashlib.sha256(pack.raw).hexdigest(), age=age, max_bytes=max_bytes)
         for record in pack.records:
             yield filename, record.digest, record.size, record.offset
 
@@ -179,7 +179,8 @@ def _record(version, raw, created):
     return value, hashlib.sha256(encoded).hexdigest()
 
 
-def install(conn, rows, bases=(), *, memory_key=None):
+def install(conn, rows, bases=(), *, memory_key=None, history_reader=None,
+            resolve_impressions=policy_impressions.resolve):
     """Install immutable configurations in the caller's publication transaction.
 
     Retain the existing compact message format at the fitter boundary. No JSON
@@ -188,7 +189,10 @@ def install(conn, rows, bases=(), *, memory_key=None):
     """
     if not conn.in_transaction:
         raise ValueError('Policy publication requires an outer transaction')
-    conn.execute('UPDATE settings SET value=value WHERE 0')
+    from . import policy_history_read
+    if history_reader is None:
+        history_reader = policy_history_read.document
+    conn.execute('UPDATE recommendation_policies SET version=version WHERE 0')
     prepared = {owner: {} for owner in OWNERS}
     for version, raw, size, created in bases:
         value, digest = _record(version, raw, created)
@@ -210,19 +214,22 @@ def install(conn, rows, bases=(), *, memory_key=None):
     pending = []
     for owner, records in prepared.items():
         for version, (_value, digest, _created, base) in records.items():
-            existing = conn.execute(f'SELECT content_digest FROM {owner} WHERE version=?', (version,)).fetchone()
-            if existing is not None and existing[0] != digest:
+            if owner == policy_bodies.VIEW:
+                body = policy_bodies.read(conn, version)
+                existing_digest = body['content_digest'] if body is not None else None
+            else:
+                row = conn.execute('SELECT content_digest FROM recommendation_policies WHERE version=?',
+                                   (version,)).fetchone()
+                existing_digest = row[0] if row is not None else None
+            if existing_digest is not None and existing_digest != digest:
                 raise ValueError(f'Conflicting immutable recommendation policy: {version!r}')
-            if existing is None and owner==OWNERS[1]:
-                from . import policy_history_read
-                if policy_history_read.available(conn):
-                    historical = policy_history_read.document(conn,version)
-                    if historical is not None and historical['configuration'] != _value:
-                        raise ValueError(f'Conflicting immutable historical policy: {version!r}')
-            if (base is not None and base not in prepared[OWNERS[0]] and not conn.execute(
-                    'SELECT 1 FROM recommendation_policy_bodies WHERE version=?', (base,)).fetchone()):
+            if existing_digest is None and owner == OWNERS[1]:
+                historical = history_reader(conn, version)
+                if historical is not None and historical['configuration'] != _value:
+                    raise ValueError(f'Conflicting immutable historical policy: {version!r}')
+            if base is not None and base not in prepared[OWNERS[0]] and policy_bodies.read(conn, base) is None:
                 raise ValueError(f'Missing shared recommendation policy body: {base!r}')
-            if existing is None:
+            if existing_digest is None:
                 pending.append((owner, version, _value, digest, _created, base))
     root = directory(conn, memory_key)
     for (owner, version, value, digest, created, base), (filename, copied, size, offset) in zip(
@@ -231,17 +238,15 @@ def install(conn, rows, bases=(), *, memory_key=None):
             raise ValueError('Policy publication changed a configuration')
         columns = 'version,configuration_filename,content_digest,byte_size,configuration_offset,created_at'
         data = (version, filename, digest, size, offset, created)
-        if owner == OWNERS[1]:
-            columns += ',base_version'
-            data += (base,)
-        conn.execute(f'INSERT INTO {owner}({columns}) VALUES (' + ','.join('?' for _ in data)
-                     + ') ON CONFLICT(version) DO NOTHING', data)
-    versions = list(prepared[OWNERS[1]])
-    for start in range(0, len(versions), 256):
-        batch = versions[start:start + 256]
-        conn.execute('UPDATE recommendation_impression_policies SET policy_version=raw_version,resolution_reason=NULL '
-                     "WHERE resolution_reason='missing_policy' AND raw_version IN ("
-                     + ','.join('?' for _ in batch) + ')', batch)
+        if owner == policy_bodies.VIEW:
+            policy_bodies.save(conn, *data)
+        else:
+            conn.execute(f'INSERT INTO recommendation_policies({columns},base_version) VALUES (?,?,?,?,?,?,?) '
+                         'ON CONFLICT(version) DO NOTHING', (*data, base))
+    if resolve_impressions is not None:
+        versions = list(prepared[OWNERS[1]])
+        for start in range(0, len(versions), 256):
+            resolve_impressions(conn, versions[start:start + 256])
 
 
 def configuration(conn, version, *, memory_key=None):
@@ -267,11 +272,11 @@ def configuration(conn, version, *, memory_key=None):
         if result.pop(BASE_FIELD, None) != row[2]:
             raise ValueError('Policy configuration does not match its shared-body reference')
         if row[2] is not None:
-            body = conn.execute('SELECT configuration_filename,content_digest,configuration_offset,byte_size '
-                                'FROM recommendation_policy_bodies WHERE version=?', (row[2],)).fetchone()
+            body = policy_bodies.read(conn, row[2])
             if body is None:
                 raise ValueError(f'Missing shared recommendation policy body: {row[2]}')
-            result = {**read(body[0], body[1], offset=body[2], size=body[3]), **result}
+            result = {**read(body['configuration_filename'], body['content_digest'],
+                             offset=body['configuration_offset'], size=body['byte_size']), **result}
         return result
 
 
@@ -289,12 +294,12 @@ def captured(conn, versions, *, memory_key=None):
                 raise ValueError('Policy configuration does not match its shared-body reference')
             rows.append((version, canonical(value).decode(), row[3]))
             if row[2] is not None and row[2] not in bases:
-                base = conn.execute('SELECT configuration_filename,content_digest,created_at,configuration_offset,byte_size '
-                                    'FROM recommendation_policy_bodies WHERE version=?', (row[2],)).fetchone()
+                base = policy_bodies.read(conn, row[2])
                 if base is None:
                     raise ValueError(f'Missing captured policy body: {row[2]}')
-                raw = canonical(read(base[0], base[1], offset=base[3], size=base[4])).decode()
-                bases[row[2]] = (row[2], raw, len(raw.encode()), base[2])
+                raw = canonical(read(base['configuration_filename'], base['content_digest'],
+                                     offset=base['configuration_offset'], size=base['byte_size'])).decode()
+                bases[row[2]] = (row[2], raw, len(raw.encode()), base['created_at'])
     return rows, list(bases.values())
 
 

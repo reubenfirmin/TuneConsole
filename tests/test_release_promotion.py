@@ -119,6 +119,14 @@ def test_failed_platform_or_missing_artifact_never_writes_a_public_destination(c
     assert backend.calls == []
 
 
+def test_default_macos_download_must_match_arm64(candidate):
+    (candidate / "TuneConsole-macos.dmg").write_bytes(b"changed")
+    backend = FakeBackend()
+    with pytest.raises(ValueError, match="Default macOS download must match the validated ARM64 archive"):
+        promotion.promote(candidate, "v1.2.3", IMAGE, backend)
+    assert backend.calls == []
+
+
 @pytest.mark.parametrize("failure", ["stage", "version-images", "flatpak", "latest-image", "publish"])
 def test_failures_keep_github_draft_and_restore_changed_channels(candidate, failure):
     backend = FakeBackend(fail=failure)

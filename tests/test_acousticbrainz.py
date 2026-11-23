@@ -20,11 +20,6 @@ LOWLEVEL = {"rhythm": {"bpm": 128.0}, "tonal": {"key_key": "A", "key_scale": "mi
             "lowlevel": {"average_loudness": 0.9, "dynamic_complexity": 3.2}}
 
 
-def test_derive_energy_blends_mood_models():
-    # 0.5*0.87 + 0.3*0.30 + 0.2*0.92 = 0.435 + 0.09 + 0.184 = 0.709
-    assert ab.derive_energy(HIGHLEVEL["highlevel"]) == 0.709
-
-
 def test_enrich_returns_feature_dict(monkeypatch):
     def fake_get_json(url):
         if url.endswith("/high-level"):
@@ -35,7 +30,7 @@ def test_enrich_returns_feature_dict(monkeypatch):
     monkeypatch.setattr(ab, "_get_json", fake_get_json)
     feat = ab.enrich("mbid-1")
     assert feat["bpm"] == 128.0
-    assert feat["energy"] == 0.709
+    assert "energy" not in feat
     assert feat["danceability"] == 0.92
     assert feat["music_key"] == "A"
     assert feat["music_scale"] == "minor"
@@ -63,7 +58,7 @@ def test_enrich_none_when_no_data(monkeypatch):
 def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypatch):
     from yt_playlist.providers import musicbrainz
     from yt_playlist.providers.waterfall import run_waterfall
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t1 = store.tracks.upsert_track("v1", "Song", "Artist", "Alb", 200)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1000.0)
     store.playlists.set_playlist_tracks(pid, [t1])
@@ -77,7 +72,7 @@ def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypa
     monkeypatch.setattr(musicbrainz, "recording_mbid", lambda *args, **kwargs: "mbid-live")
     run_waterfall(store, store.tracks.tracks_for_waterfall(pid),
                   [{"name": "acousticbrainz", "enabled": True}], events.append)
-    assert store.tracks.get_track_audio(t1) == (130.0, 0.6, 0.8)
+    assert store.tracks.get_track_audio(t1) == (130.0, 0.8)
     assert store.tracks.track_for_waterfall(t1)['mb_recording_id'] == 'mbid-live'
     # Audio is complete; missing genre/year/artwork still warrants another provider pass.
     assert [row['id'] for row in store.tracks.tracks_for_waterfall(pid)] == [t1]
@@ -86,12 +81,12 @@ def test_waterfall_resolves_mbid_then_fills_and_records_evidence(store, monkeypa
     assert attempt["status"] == "found" and attempt["fields"]["mb_recording_id"] == "mbid-live"
     observations = store.enrichment_state.metadata_observations('song|artist')
     assert {row['field'] for row in observations} == {
-        'bpm', 'mood_party', 'mood_aggressive', 'danceability', 'energy'}
+        'bpm', 'mood_party', 'mood_aggressive', 'danceability'}
     assert all(row['provenance']['match_evidence'] == {
         'method': 'musicbrainz_lookup', 'recording_mbid': 'mbid-live'} for row in observations)
 
 
-def test_probe_retains_native_units_versions_and_correlated_derivation(monkeypatch):
+def test_probe_retains_native_units_and_versions(monkeypatch):
     high, low = deepcopy(HIGHLEVEL), deepcopy(LOWLEVEL)
     high['metadata'] = {'version': {'essentia': '2.1', 'extractor': 'high-v1'}}
     low['metadata'] = {'version': {'essentia': '2.0', 'extractor': 'low-v2'}}
@@ -116,9 +111,7 @@ def test_probe_retains_native_units_versions_and_correlated_derivation(monkeypat
     assert observations['dynamic_complexity']['unit'] == 'essentia.dynamic_complexity'
     assert observations['loudness']['provider_version'] == low['metadata']['version']
     assert observations['loudness']['model_version'] is None
-    assert observations['energy']['kind'] == 'derived'
-    assert observations['energy']['derivation_version'] == 'acousticbrainz-energy-v1'
-    assert observations['energy']['dependencies'] == ['mood_party', 'mood_aggressive', 'danceability']
+    assert 'energy' not in observations
     assert all('confidence' not in o and 'reliability' not in o for o in observations.values())
 
 
@@ -126,10 +119,11 @@ def test_probe_retains_native_units_versions_and_correlated_derivation(monkeypat
 def test_missing_component_is_unknown_instead_of_zero(missing):
     high = deepcopy(HIGHLEVEL['highlevel'])
     del high[missing]
-    assert ab.derive_energy(high) is None
+    assert ab.project({}, 'mbid', {}, {'highlevel': high}).observations
+    assert missing not in {o.field for o in ab.project({}, 'mbid', {}, {'highlevel': high}).observations}
     for model in HIGHLEVEL['highlevel']:
         high[model] = {'all': {label: 0 for label in HIGHLEVEL['highlevel'][model]['all']}}
-    assert ab.derive_energy(high) == 0
+    assert {o.field: o.value for o in ab.project({}, 'mbid', {}, {'highlevel': high}).observations}[missing] == 0
 
 
 @pytest.mark.parametrize('invalid', [True, float('nan'), float('inf'), -0.1, 1.1, 'bad', None])
@@ -151,7 +145,7 @@ def test_malformed_low_level_does_not_lose_valid_predictions(monkeypatch):
     low = {'rhythm': None, 'tonal': {'key_key': ['A']}, 'metadata': None, 'lowlevel': []}
     monkeypatch.setattr(ab, '_get_json', lambda url: HIGHLEVEL if url.endswith('/high-level') else low)
     result = ab.probe({'mb_recording_id': 'mbid'})
-    assert result.fields['energy'] == 0.709
+    assert result.fields['danceability'] == 0.92
     assert 'bpm' not in result.fields and 'music_key' not in result.fields
 
 
@@ -169,7 +163,7 @@ def test_partial_failure_keeps_previous_evidence_and_retries_for_both_catalogs(s
     else:
         store.discovery.upsert_discovered_track('song|artist', 'video', 'Song', 'Artist', '',
                                                 '', None, None, None, 10)
-        tid = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='video'").fetchone()[0]
+        tid = store.conn.execute("SELECT id FROM track_sources WHERE video_id='video'").fetchone()[0]
     monkeypatch.setattr(ab.musicbrainz, 'recording_mbid', lambda *args, **kwargs: 'mbid')
     phase = ['healthy']
 
@@ -195,14 +189,14 @@ def test_partial_failure_keeps_previous_evidence_and_retries_for_both_catalogs(s
     assert run('partial', 2000) == []
     after = store.enrichment_state.metadata_observations('song|artist')
     assert after[:len(before)] == before
-    assert store.tracks.get_track_audio(tid) == (140, 0.709, 0.92)
+    assert store.tracks.get_track_audio(tid) == (140, 0.92)
     state = store.enrichment_state.enrichment_provider_state(
         store.tracks.catalog_subject(tid)['recording_id'])['acousticbrainz']
     assert state['status'] == 'retry' and state['retry_at'] > 2000
     assert {row['field'] for row in after[len(before):]} == {'bpm'}
     phase[0] = 'healthy'
     assert run('recovery', 10000) == [tid]
-    assert store.tracks.get_track_audio(tid) == (128, 0.709, 0.92)
+    assert store.tracks.get_track_audio(tid) == (128, 0.92)
 
 
 def test_malformed_endpoint_is_retryable_without_losing_successful_half(store, monkeypatch):
@@ -213,6 +207,6 @@ def test_malformed_endpoint_is_retryable_without_losing_successful_half(store, m
     monkeypatch.setattr(ab, '_get_json', lambda url: [] if url.endswith('/high-level') else LOWLEVEL)
     assert run_waterfall(store, [store.tracks.track_for_waterfall(tid)],
                          [{'name': 'acousticbrainz', 'enabled': True}], lambda e: None) == []
-    assert store.tracks.get_track_audio(tid) == (128, None, None)
+    assert store.tracks.get_track_audio(tid) == (128, None)
     assert len(store.enrichment_state.metadata_observations('song|artist')) == 5
     assert store.enrichment_state.enrichment_attempts('song|artist')['acousticbrainz']['status'] == 'retry'

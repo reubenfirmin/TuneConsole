@@ -68,8 +68,9 @@ def test_large_album_and_artist_pools_reuse_family_feedback(discovery_store, mon
     store.discovery.get_discovered_albums.return_value = albums
     store.discovery.get_discovered_artists.return_value = artists
     calls = []
-    monkeypatch.setattr(discover, "discovery_facet_weight",
-                        lambda s, family, now: calls.append(family) or 1.0)
+    monkeypatch.setattr(discover, "discovery_album_facet_weights",
+                        lambda s, families, now, recent: {f: calls.append(f) or 1.0 for f in families})
+    monkeypatch.setattr(discover, "discovery_facet_weight", lambda s, family, now: calls.append(family) or 1.0)
     assert len(discover.pick_discovered_albums(store, 15, now=1)) == 15
     assert len(discover.pick_discovered_artists(store, 10, now=1)) == 10
     assert calls == ["house", "house"]

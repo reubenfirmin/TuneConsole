@@ -12,7 +12,7 @@ from yt_playlist.web.radio_listening import RadioListening
 
 
 def test_repeated_fresh_account_seed_requests_have_no_measurement_or_saved_menu(store, caplog):
-    identity = store.accounts.upsert_account('main', 'controlled-credential', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     app = create_app(store, lambda: {identity: FakeClient()}, background_work=False)
     with caplog.at_level(logging.WARNING, logger='yt_playlist.rec.choice_evidence'):
         with TestClient(app, base_url='http://127.0.0.1') as client:

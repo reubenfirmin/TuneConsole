@@ -283,9 +283,9 @@ def test_capacity_tracks_library_growth_without_counting_discovery_or_duplicate_
     store.tracks.observe_track_entry('discovery', 'Other song', 'Other artist')
     with store.conn:
         duplicate = store.conn.execute(
-            "INSERT INTO catalog_entries(recording_id,source_ref) "
-            "SELECT recording_id,'second-source' FROM catalog_entries WHERE id=?", (entry,)).lastrowid
-        store.conn.execute("INSERT INTO library_memberships VALUES (?,'second-source',1)", (duplicate,))
+            "INSERT INTO track_sources(recording_id,source_ref) "
+            "SELECT recording_id,'second-source' FROM track_sources WHERE id=?", (entry,)).lastrowid
+        store.conn.execute("UPDATE track_sources SET library_origin='second-source',library_added_at=1 WHERE id=? AND library_origin IS NULL", (duplicate,))
     grown = store.rec_ledger.evidence()
     assert grown.byte_budget == library_byte_budget(1)
     assert grown.get('response', 'kept') == {'choice': 'A'}
@@ -372,8 +372,7 @@ def test_pending_write_reclaims_old_optional_graphs_but_preserves_learning_and_s
     ledger.byte_budget = used + 100
     required_record = {'id': 'choice', 'opportunity_id': 'held', 'kind': 'choice',
                        'observed_at': 11, 'details': 'x' * 300}
-    kwargs = dict(protected_artifacts={shared}, protected_runs={'active-trial'},
-                  protected_opportunities={'held'}, orphan_before=10,
+    kwargs = dict(protected_artifacts={shared}, protected_opportunities={'held'}, orphan_before=10,
                   compacted_contexts=set(checkpoints), context_before=0,
                   context_byte_budget=int(ledger.byte_budget * .1))
     ordinary = ledger.maintain(0, **kwargs)

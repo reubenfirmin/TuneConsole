@@ -1,60 +1,43 @@
-"""SQL references and revision guards for editorial demand and note output."""
+"""Editorial demand and guarded note publication."""
 from contextlib import contextmanager
 
 from yt_playlist.core import album_note_outputs, album_note_requests
-from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, lookup_read, snapshot_read, synchronized
-from . import recommendation_file_writes
 
 
 class AlbumNotesRepo(Repo):
-    @synchronized
-    def reserve_file(self, browse, integrity):
-        with self.conn.atomic():
-            return recommendation_file_writes.reserve(self.conn, 'album_note_outputs', 'album_notes', browse, integrity)
-
-    @lookup_read
-    def native_outputs(self):
-        return self._store._album_note_demand
-
     @snapshot_read
     def output_document(self):
-        with keyed_reads(self._store, 'rec_proposals', ('album_notes',)):
-            if self._store._album_note_demand:
-                return None, [dict(row) for row in self.conn.execute(
-                    'SELECT browse_id,filename,content_digest,byte_size FROM album_note_outputs ORDER BY id')]
-            row = self.conn.execute("SELECT payload FROM rec_proposals WHERE surface='album_notes'").fetchone()
-            return row[0] if row else None, None
+        return album_note_outputs.read(self.conn)
 
     @lookup_read
     def outputs_present(self):
-        with keyed_reads(self._store, 'rec_proposals', ('album_notes',)):
-            if self._store._album_note_demand:
-                return self.conn.execute('SELECT 1 FROM album_note_outputs LIMIT 1').fetchone() is not None
-            return self.conn.execute("SELECT 1 FROM rec_proposals WHERE surface='album_notes' "
-                                     "AND payload NOT IN ('null','{}')").fetchone() is not None
+        return self.conn.execute('SELECT 1 FROM album_provider_ids WHERE note_json IS NOT NULL LIMIT 1').fetchone() is not None
 
     @synchronized
-    def replace_outputs(self, durable, now):
+    def replace_outputs(self, prepared):
         with self.conn.atomic(join=True):
-            self.conn.execute('DELETE FROM album_note_outputs')
-            for browse, identity, reference in durable:
-                recommendation_file_writes.complete(self.conn, identity, 'album_note_outputs', 'album_notes', browse, reference)
-                album_note_outputs._insert(self.conn, browse, *reference, now)
+            self.conn.execute('UPDATE album_provider_ids SET note_json=NULL WHERE note_json IS NOT NULL')
+            for browse, raw in prepared:
+                album_note_outputs.store(self.conn, browse, raw)
 
     @synchronized
-    def publish_output(self, browse, identity, reference, now, limit, *, expected_request=None):
+    def publish_output(self, browse, raw, *, expected_request=None):
         with self.conn.atomic():
+            self.conn.execute('UPDATE album_provider_ids SET note_json=note_json WHERE 0')
             if expected_request is not None and not album_note_requests.matches(self.conn, browse, expected_request):
                 return False
-            recommendation_file_writes.complete(self.conn, identity, 'album_note_outputs', 'album_notes', browse, reference)
-            self.replace_output(browse, reference, now, limit)
+            album_note_outputs.store(self.conn, browse, raw)
+            self.conn.execute('UPDATE album_provider_ids SET note_json=NULL WHERE provider=\'youtube\' '
+                'AND provider_id IN (SELECT provider_id FROM album_provider_ids WHERE note_json IS NOT NULL '
+                'ORDER BY note_output_order DESC LIMIT -1 OFFSET ?)', (album_note_outputs.MAX_NOTES,))
             album_note_requests.complete(self.conn, browse, expected_request)
             return True
 
     @contextmanager
     def transaction(self):
         with self._lock, self.conn.atomic(join=True):
+            self.conn.execute('UPDATE album_provider_ids SET note_json=note_json WHERE 0')
             yield
 
     @snapshot_read
@@ -65,36 +48,10 @@ class AlbumNotesRepo(Repo):
     def next_request(self):
         return album_note_requests.next_request(self.conn)
 
-    @lookup_read
-    def matches(self, browse, expected):
-        return album_note_requests.matches(self.conn, browse, expected)
+    @synchronized
+    def remove_request(self, browse):
+        album_note_requests.complete(self.conn, browse)
 
     @synchronized
-    def remove_request(self, browse, expected=None):
-        album_note_requests.complete(self.conn, browse, expected)
-
-    @synchronized
-    def store_request(self, fields, now, *, changed_work):
-        browse = fields[0]
-        previous = self.conn.execute('SELECT * FROM album_note_requests WHERE browse_id=?', (browse,)).fetchone()
-        if previous is None:
-            album_note_requests._insert(self.conn, fields, now)
-            return
-        reference, reason = album_note_requests._reference(self.conn, browse)
-        current = album_note_requests._album(previous)
-        old_fields = album_note_requests.parse({browse: current})[0]
-        if old_fields == fields and previous['album_provider_id'] == reference:
-            return
-        changed_work = changed_work or previous['album_provider_id'] != reference
-        fence = ',work_revision=work_revision+?' if 'work_revision' in previous.keys() else ''
-        values = (reference, reason, *fields[1:], *([int(changed_work)] if fence else []), now, previous['id'])
-        self.conn.execute('UPDATE album_note_requests SET album_provider_id=?,unresolved_reason=?,artist=?,title=?,'
-            'year_text=?,year_number=?,thumbnail=?,requested_until=?,revision=revision+1' + fence + ',updated_at=? '
-            'WHERE id=?', values)
-
-    @synchronized
-    def replace_output(self, browse, reference, now, limit):
-        self.conn.execute('DELETE FROM album_note_outputs WHERE browse_id=?', (browse,))
-        self.conn.execute('DELETE FROM album_note_outputs WHERE id IN '
-            '(SELECT id FROM album_note_outputs ORDER BY id DESC LIMIT -1 OFFSET ?)', (limit - 1,))
-        album_note_outputs._insert(self.conn, browse, *reference, now)
+    def store_request(self, fields):
+        album_note_requests.store(self.conn, fields)

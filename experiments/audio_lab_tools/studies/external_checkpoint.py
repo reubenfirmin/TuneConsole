@@ -44,6 +44,27 @@ def dictionaries(conn, sql):
     return [dict(row) for row in conn.execute(sql)]
 
 
+def prediction_evidence(conn):
+    from yt_playlist.core import vibe_provenance
+
+    fits = dictionaries(conn, 'SELECT * FROM vibe_recording_fits ORDER BY recording_id,vibe')
+    predictions = dictionaries(conn, 'SELECT * FROM vibe_predictions WHERE id IN '
+        '(SELECT prediction_id FROM recording_vibes WHERE prediction_id IS NOT NULL) ORDER BY id')
+    inputs, artists = [], []
+    for pid, provenance in vibe_provenance.read_many(conn, (row['id'] for row in predictions)):
+        if provenance is not None:
+            inputs.extend({'prediction_id': pid, 'measurement_id': mid} for mid in provenance['inputs'])
+            artists.extend({'prediction_id': pid, 'artist_id': aid} for aid in provenance['artists'])
+    measurement_ids = {fit['measurement_id'] for fit in fits if fit['measurement_id'] is not None}
+    measurement_ids.update(link['measurement_id'] for link in inputs)
+    measurements = [dict(row) for row in conn.execute('''
+        SELECT m.id,m.recording_id,m.vibe,m.score,m.support,m.source,v.value AS model_version,m.input_digest,m.measured_at
+        FROM measurements m JOIN vibe_versions v ON v.id=m.model_version_id ORDER BY m.id''')
+        if row['id'] in measurement_ids]
+    return {'recording_vibes': fits, 'predictions': predictions, 'prediction_inputs': inputs,
+            'prediction_artists': artists, 'measurements': measurements}
+
+
 def freeze(database):
     from ..training import train_vibes
     from ..training.external_training import folds
@@ -82,23 +103,13 @@ def freeze(database):
         annotation_snapshot = None
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='audio_annotations'").fetchone():
             labels, _ = audio_annotations.training_rows(conn, train_vibes.TAXONOMY_VERSION)
-            annotation_snapshot = audio_annotations.export_snapshot(conn, target / 'annotation-documents')
+            annotation_snapshot = audio_annotations.export_snapshot(conn)
         else:
             labels = dictionaries(conn, 'SELECT * FROM audio_session_labels ORDER BY updated_at,run_id')
         library = {'captured_at': stamp(), 'labels': labels,
             'recordings': dictionaries(conn, 'SELECT id,identity_key,title,artist FROM recordings '
                 'WHERE id IN (SELECT recording_id FROM recording_vibes UNION SELECT recording_id FROM sample_attributes)'),
-            'recording_vibes': dictionaries(conn, 'SELECT * FROM recording_vibes ORDER BY recording_id,vibe'),
-            'predictions': dictionaries(conn, 'SELECT * FROM predictions WHERE id IN '
-                '(SELECT prediction_id FROM recording_vibes WHERE prediction_id IS NOT NULL) ORDER BY id'),
-            'prediction_inputs': dictionaries(conn, 'SELECT i.* FROM prediction_inputs i WHERE prediction_id IN '
-                '(SELECT prediction_id FROM recording_vibes WHERE prediction_id IS NOT NULL) ORDER BY prediction_id,measurement_id'),
-            'prediction_artists': dictionaries(conn, 'SELECT a.* FROM prediction_artists a WHERE prediction_id IN '
-                '(SELECT prediction_id FROM recording_vibes WHERE prediction_id IS NOT NULL) ORDER BY prediction_id,artist_id'),
-            'measurements': dictionaries(conn, 'SELECT * FROM measurements WHERE id IN '
-                '(SELECT measurement_id FROM recording_vibes WHERE measurement_id IS NOT NULL UNION '
-                'SELECT measurement_id FROM prediction_inputs WHERE prediction_id IN '
-                '(SELECT prediction_id FROM recording_vibes WHERE prediction_id IS NOT NULL)) ORDER BY id')}
+            **prediction_evidence(conn)}
         for row in samples:
             try:
                 value = sample_files.read(row['filename'], expected={k: row[k] for k in ('id', 'run_id', 'point', 'video_id')})

@@ -5,10 +5,12 @@ from types import SimpleNamespace
 import pytest
 
 from tests.conftest import FakeClient
+from yt_playlist.core import catalog
 from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.rec_model_policy import PERMANENT_SURFACE
 from yt_playlist.library import live_plays, player_events, ratings, sync
 from yt_playlist.controllers import library_synchronization as acquisition
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import permanent_taste
 
 
 def _client(items):
@@ -33,29 +35,34 @@ def _assert_feedback(store, key, status):
     assert (key in store.rec_model.disliked_identity_keys()) == (status == 'DISLIKE')
 
 
+def _taste_likes(store, now):
+    return [(row['identity_key'], row['played_at'])
+            for row in store.history.taste_rating_page((-1, -1), now, limit=16)]
+
+
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
 @pytest.mark.parametrize('reverse', [False, True])
 def test_neutral_sibling_is_not_an_unlike_of_the_rated_upload(store, status, reverse):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     key = _siblings(store)
     items = [('a', status), ('b', 'INDIFFERENT')]
     if reverse:
         items.reverse()
+    learning = _learning_state(store, now=30)
     sync.sync_identity(store, owner, _client(items), now=10)
     _assert_feedback(store, key, status)
     assert store.tracks.item_rating(owner, 'a')['status'] == status
     assert store.tracks.item_rating(owner, 'b')['status'] == 'INDIFFERENT'
-    theme = store.rec_signals.get_theme('artist:Artist')
-    if status == 'LIKE':
-        assert theme == rec_params.get_param(store, "source_w_like_synced")
-    else:
-        assert theme is None
+    assert store.rec_model.like_provenance(key) == ('sync' if status == 'LIKE' else None)
+    assert store.rec_model.recent_liked_with_ts() == []
+    assert _taste_likes(store, 10) == []
+    assert _learning_state(store, now=30) == learning
     first_feedback = store.rec_model.disliked_with_ts() if status == 'DISLIKE' else [
         tuple(row) for row in store.conn.execute(
             "SELECT item_key,created_at FROM rec_feedback WHERE kind='like'")]
     sync.sync_identity(store, owner, _client(list(reversed(items))), now=20)
     _assert_feedback(store, key, status)
-    assert store.rec_signals.get_theme('artist:Artist') == theme
+    assert _learning_state(store, now=30) == learning
     assert (store.rec_model.disliked_with_ts() if status == 'DISLIKE' else [
         tuple(row) for row in store.conn.execute(
             "SELECT item_key,created_at FROM rec_feedback WHERE kind='like'")]) == first_feedback
@@ -68,8 +75,8 @@ def test_neutral_sibling_is_not_an_unlike_of_the_rated_upload(store, status, rev
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
 @pytest.mark.parametrize('reverse', [False, True])
 def test_neutral_account_is_not_an_unlike_from_another_account(store, status, reverse):
-    first = store.accounts.upsert_account('Main', 'bridge', None, True)
-    second = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', False)
     observations = [(first, status), (second, 'INDIFFERENT')]
     if reverse:
         observations.reverse()
@@ -92,14 +99,15 @@ def test_neutral_account_is_not_an_unlike_from_another_account(store, status, re
 @pytest.mark.parametrize('reverse', [False, True])
 def test_explicit_conflicts_use_dislike_then_like_until_all_contributions_are_cleared(
         store, scope, reverse):
-    first = store.accounts.upsert_account('Main', 'bridge', None, True)
-    second = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', False)
     key = _siblings(store)
     contributions = [(first, 'a', 'LIKE'),
                      (first if scope == 'upload' else second,
                       'b' if scope == 'upload' else 'a', 'DISLIKE')]
     if reverse:
         contributions.reverse()
+    learning = _learning_state(store, now=50)
     for owner, video, status in contributions:
         sync.sync_identity(store, owner, _client([(video, status)]), now=10)
     _assert_feedback(store, key, 'DISLIKE')
@@ -109,21 +117,25 @@ def test_explicit_conflicts_use_dislike_then_like_until_all_contributions_are_cl
     disliked_owner, disliked_video, _ = next(c for c in contributions if c[2] == 'DISLIKE')
     sync.sync_identity(store, disliked_owner, _client([(disliked_video, 'INDIFFERENT')]), now=30)
     _assert_feedback(store, key, 'LIKE')
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like_synced")
+    assert store.rec_model.like_provenance(key) == 'sync'
     liked_owner, liked_video, _ = next(c for c in contributions if c[2] == 'LIKE')
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'INDIFFERENT')]), now=40)
     _assert_feedback(store, key, 'INDIFFERENT')
-    # Reliking still cannot replay a previously graduated recording.
+    # Seeing the like again restores the exact rating without adding a deliberate action.
     sync.sync_identity(store, liked_owner, _client([(liked_video, 'LIKE')]), now=50)
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like_synced")
+    _assert_feedback(store, key, 'LIKE')
+    assert store.rec_model.like_provenance(key) == 'sync'
+    assert store.rec_model.recent_liked_with_ts() == []
+    assert _taste_likes(store, 50) == []
+    assert _learning_state(store, now=50) == learning
 
 
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
 @pytest.mark.parametrize('unavailable', ['partial', 'missing', 'inactive'])
 def test_unavailable_account_contributions_remain_until_authoritatively_withdrawn(
         store, monkeypatch, status, unavailable):
-    first = store.accounts.upsert_account('Main', 'bridge', None, True)
-    second = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', False)
     sync.sync_identity(store, first, _client([('a', status)]), now=10)
     key = store.tracks.identity_key_for_video('a')
     if unavailable == 'partial':
@@ -154,8 +166,8 @@ def test_unavailable_account_contributions_remain_until_authoritatively_withdraw
 
 
 def test_api_native_and_player_paths_share_account_and_exact_upload_reconciliation(store):
-    first = store.accounts.upsert_account('Main', 'bridge', None, True)
-    second = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', False)
     key = _siblings(store)
     calls = []
     api = SimpleNamespace(rate_song=lambda *args: calls.append(args))
@@ -191,8 +203,8 @@ def test_api_native_and_player_paths_share_account_and_exact_upload_reconciliati
 
 
 def test_live_player_like_cannot_override_another_accounts_dislike(store):
-    first = store.accounts.upsert_account('Main', 'bridge', None, True)
-    second = store.accounts.upsert_account('Other', 'bridge', 'other', False)
+    first = store.accounts.upsert_account('Main', None, True)
+    second = store.accounts.upsert_account('Other', 'other', False)
     key = _siblings(store)
     sync.sync_identity(store, first, _client([('a', 'DISLIKE')]), now=10)
     ctx = SimpleNamespace(store=store)
@@ -212,7 +224,7 @@ def test_live_player_like_cannot_override_another_accounts_dislike(store):
 @pytest.mark.parametrize('partial', [False, True])
 def test_reassociation_moves_only_the_rated_uploads_feedback_without_replaying_learning(
         store, status, partial):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     old_key = _siblings(store)
     target = store.tracks.upsert_track('c', 'Other song', 'Other artist', 'Album', 200)
     target_recording = store.tracks.catalog_subject(target)['recording_id']
@@ -241,21 +253,111 @@ def test_reassociation_moves_only_the_rated_uploads_feedback_without_replaying_l
     assert store.rec_signals.get_theme('artist:Other artist') is None
 
 
+@pytest.mark.parametrize('legacy_path', [False, True], ids=['controller', 'legacy'])
+@pytest.mark.parametrize('retained_upload', [False, True], ids=['last-upload', 'retained-upload'])
+@pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
+def test_correcting_unrated_upload_keeps_independent_recording_feedback(
+        store, legacy_path, retained_upload, status):
+    owner = store.accounts.upsert_account('Main', None, True)
+    moved = 'b'
+    if retained_upload:
+        old_key = _siblings(store)
+        ratings.record_confirmed(store, owner, 'a', status, 10)
+        ratings.record_confirmed(store, owner, moved, 'INDIFFERENT', 11)
+    else:
+        store.tracks.upsert_track(moved, 'Song', 'Artist', 'Album', 200)
+        old_key = store.tracks.identity_key_for_video(moved)
+        kind = status.lower()
+        store.rec_model.record_feedback('like' if status == 'LIKE' else 'sync', old_key, kind,
+                                        until=None if status == 'LIKE' else 100, now=10)
+    store.rec_model.mark_graduated_once(old_key, 'like_grad', 10)
+    destination = store.tracks.upsert_track('c', 'Other song', 'Other artist', 'Album', 200)
+    target = store.tracks.catalog_subject(destination)
+    new_key = target['identity_key']
+    ratings.record_confirmed(store, owner, 'c', status, 20)
+    store.rec_model.mark_graduated_once(new_key, 'like_grad', 20)
+
+    def feedback():
+        return [tuple(row) for row in store.conn.execute(
+            'SELECT item_key,kind,created_at,until FROM rec_feedback WHERE item_key IN (?,?) '
+            'ORDER BY item_key,kind', (old_key, new_key))]
+
+    before = feedback()
+    assert len(before) == 4
+    correction = dict(source='corrected', evidence={'review': 'different recording'}, now=30)
+    if legacy_path:
+        with store.conn:
+            catalog.associate_item(store.conn, moved, target['recording_id'], **correction)
+    else:
+        store.tracks.associate_youtube_item(moved, target['recording_id'], **correction)
+    assert store.tracks.identity_key_for_video(moved) == new_key
+    assert store.tracks.resolve_identity_key(old_key) == old_key
+    assert feedback() == before
+
+
+@pytest.mark.parametrize('legacy_path', [False, True], ids=['controller', 'legacy'])
+@pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
+@pytest.mark.parametrize('moved_first', [False, True])
+def test_rated_upload_correction_splits_the_two_recordings_feedback(
+        store, monkeypatch, legacy_path, status, moved_first):
+    owner = store.accounts.upsert_account('Main', None, True)
+    old_key = _siblings(store)
+    entry = store.tracks.upsert_track('c', 'Other song', 'Other artist', 'Album', 200)
+    target = store.tracks.catalog_subject(entry)
+    new_key = target['identity_key']
+    observations = [('b', 10), ('c', 20), ('a', 30)] if moved_first else [('a', 10), ('c', 20), ('b', 30)]
+    for video, at in observations:
+        ratings.record_confirmed(store, owner, video, status, at)
+    raw = {video: store.tracks.item_rating(owner, video) for video, _ in observations}
+
+    def feedback(key):
+        return tuple(store.conn.execute(
+            'SELECT created_at,until FROM rec_feedback WHERE item_key=? AND kind=?',
+            (key, status.lower())).fetchone())
+
+    old_age, target_age = feedback(old_key), feedback(new_key)
+    inputs = dict(source='corrected', evidence={'review': 'different recording'}, now=40)
+    if legacy_path:
+        with store.conn:
+            catalog.associate_item(store.conn, 'b', target['recording_id'], **inputs)
+    else:
+        def interrupt(*args, **kwargs):
+            raise RuntimeError('interrupted before rating projection')
+
+        with monkeypatch.context() as patch:
+            patch.setattr(store.rec_model, 'reassociate_rating_feedback', interrupt)
+            with pytest.raises(RuntimeError, match='interrupted before rating projection'):
+                store.tracks.associate_youtube_item('b', target['recording_id'], **inputs)
+        assert store.tracks.identity_key_for_video('b') == new_key
+        store.tracks.associate_youtube_item('b', target['recording_id'], **inputs)
+
+    def redate(row, at):
+        return at, (row[1] - row[0] + at if row[1] is not None else None)
+
+    assert feedback(old_key) == (redate(old_age, 30) if moved_first else old_age)
+    assert feedback(new_key) == (old_age if moved_first else target_age)
+    assert store.tracks.identity_key_for_video('b') == new_key
+    assert store.tracks.identity_key_for_video('a') == old_key
+    assert {video: store.tracks.item_rating(owner, video) for video, _ in observations} == raw
+
+
 def test_sync_confirmation_keeps_pending_live_action_timestamp_and_provenance(store):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     ratings.record_confirmed(store, owner, 'a', 'LIKE', 10)
     assert store.tracks.identity_key_for_video('a') is None
     sync.sync_identity(store, owner, _client([('a', 'LIKE')]), now=20)
     key = store.tracks.identity_key_for_video('a')
     assert store.rec_model.recent_liked_with_ts() == [(key, 10)]
-    assert store.rec_signals.get_theme('artist:Artist') == rec_params.get_param(store, "source_w_like")
+    assert store.rec_model.like_provenance(key) == 'action'
+    assert _taste_likes(store, 20) == [(key, 10)]
+    assert store.rec_model.baseline_weights(now=20) == {}
     assert store.tracks.item_rating(owner, 'a') == {
         'status': 'LIKE', 'source': 'api', 'observed_at': 10}
 
 
 @pytest.mark.parametrize('reverse', [False, True])
 def test_partial_reassociation_reveals_retained_like_and_moves_dislike(store, reverse):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     old_key = _siblings(store)
     target = store.tracks.upsert_track('c', 'Other song', 'Other artist', 'Album', 200)
     target_recording = store.tracks.catalog_subject(target)['recording_id']
@@ -277,7 +379,7 @@ def test_partial_reassociation_reveals_retained_like_and_moves_dislike(store, re
 
 
 def test_live_rating_without_exact_upload_does_not_invent_account_evidence(store):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     key = _siblings(store)
     sync.sync_identity(store, owner, _client([('a', 'DISLIKE')]), now=10)
     live_plays.handle_play_event(SimpleNamespace(store=store), {
@@ -286,23 +388,30 @@ def test_live_rating_without_exact_upload_does_not_invent_account_evidence(store
     assert store.conn.execute('SELECT COUNT(*) FROM item_ratings').fetchone()[0] == 1
 
 
-def _learning_state(store):
-    # Check the complete ledger and permanent weights: coherent item selection can
-    # attribute repeated learning to either artist, so destination-only checks miss it.
-    return {table: [tuple(row) for row in store.conn.execute(f'SELECT * FROM {table} ORDER BY 1')]
-            for table in ('rec_theme', 'rec_weights', 'recommendation_gradient_events')}
+def _learning_state(store, *, now):
+    # A replay could affect either artist, so compare the whole serving baseline and its ledgers.
+    return (store.rec_model.baseline_weights(now), store.rec_model.weight_records(),
+            store.rec_signals.theme_rows(), store.rec_signals.recent_graduations())
 
 
 @pytest.mark.parametrize('source', ['api', 'sync'])
 def test_clearing_feedback_cannot_relearn_retained_likes(store, source):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     store.tracks.upsert_track('rated', 'Song', 'Artist', 'Album', 200)
     key = store.tracks.identity_key_for_video('rated')
-    rec_params.set_param(store, 'theme_threshold', 0.2)
     ratings.record_observations(store, owner, {'rated': 'LIKE'}, source=source, now=10)
-    store.rec_model.mark_graduated_once('old dislike|artist', 'dislike_grad', 5)
-    learning = _learning_state(store)
-    assert learning['rec_theme'] and learning['rec_weights'] and learning['recommendation_gradient_events']
+    assert store.rec_model.mark_graduated_once(key, 'like_grad', 4)
+    assert store.rec_model.mark_graduated_once('old dislike|artist', 'dislike_grad', 5)
+    deliberate_likes = [(key, 10)] if source == 'api' else []
+    assert _taste_likes(store, 10) == deliberate_likes
+    assert not permanent_taste.prepare(store, 10)
+    facets = store.rec_proposals.get_proposals(PERMANENT_SURFACE)['facets']
+    if source == 'api':
+        assert facets['artist:Artist']['deliberate_days'] == 1
+    else:
+        assert facets == {}
+    assert store.rec_model.baseline_weights(now=40) == {}
+    learning = _learning_state(store, now=40)
     guards = [tuple(row) for row in store.conn.execute(
         "SELECT item_key,kind,created_at FROM rec_feedback WHERE kind IN ('like_grad','dislike_grad') "
         "ORDER BY item_key")]
@@ -320,7 +429,11 @@ def test_clearing_feedback_cannot_relearn_retained_likes(store, source):
         sync.sync_identity(store, owner, _client([('rated', 'LIKE')]), now=now)
         _assert_feedback(store, key, 'LIKE')
         assert store.rec_model.like_provenance(key) == ('action' if source == 'api' else 'sync')
-        assert _learning_state(store) == learning
+        assert store.rec_model.recent_liked_with_ts() == deliberate_likes
+        assert _taste_likes(store, now) == deliberate_likes
+        assert not permanent_taste.prepare(store, now)
+        assert store.rec_proposals.get_proposals(PERMANENT_SURFACE)['facets'] == facets
+        assert _learning_state(store, now=40) == learning
 
 
 @pytest.mark.parametrize('status', ['LIKE', 'DISLIKE'])
@@ -328,7 +441,7 @@ def test_clearing_feedback_cannot_relearn_retained_likes(store, source):
 @pytest.mark.parametrize('partial', [False, True])
 def test_reassociation_merges_established_feedback_by_earliest_age_without_renewal(
         store, status, destination_first, partial):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     source = store.tracks.upsert_track('source', 'Source', 'Source artist', 'A', 200)
     old_recording = store.tracks.catalog_subject(source)['recording_id']
     old_key = store.tracks.identity_key_for_video('source')
@@ -343,20 +456,26 @@ def test_reassociation_merges_established_feedback_by_earliest_age_without_renew
     ratings.record_confirmed(store, owner, videos[0], status, 10)
     ratings.record_confirmed(store, owner, videos[1], status, 20)
     first_key = store.tracks.identity_key_for_video(videos[0])
+    if status == 'LIKE':
+        # Existing graduation markers were written before dated support owned learning.
+        second_key = store.tracks.identity_key_for_video(videos[1])
+        assert store.rec_model.mark_graduated_once(first_key, 'like_grad', 10)
+        assert store.rec_model.mark_graduated_once(second_key, 'like_grad', 20)
     expected = tuple(store.conn.execute(
         'SELECT created_at,until FROM rec_feedback WHERE item_key=? AND kind=?',
         (first_key, status.lower())).fetchone())
-    learning = _learning_state(store)
+    learning = _learning_state(store, now=40)
     raw = {video: store.tracks.item_rating(owner, video) for video in videos}
 
     store.tracks.associate_youtube_item('source', target_recording, source='corrected',
-                                       evidence={'review': 'same recording'}, now=30)
+                                       evidence={'review': 'same recording'}, now=30,
+                                       same_recording=not partial)
 
     feedback = lambda: tuple(store.conn.execute(
         'SELECT created_at,until FROM rec_feedback WHERE item_key=? AND kind=?',
         (key, status.lower())).fetchone())
     assert feedback() == expected
-    assert _learning_state(store) == learning
+    assert _learning_state(store, now=40) == learning
     assert {video: store.tracks.item_rating(owner, video) for video in videos} == raw
     if status == 'LIKE':
         assert store.conn.execute("SELECT created_at FROM rec_feedback WHERE item_key=? AND kind='like_grad'",
@@ -365,12 +484,13 @@ def test_reassociation_merges_established_feedback_by_earliest_age_without_renew
         assert not store.conn.execute('SELECT 1 FROM rec_feedback WHERE item_key=?', (old_key,)).fetchone()
     sync.sync_identity(store, owner, _client([(video, status) for video in reversed(videos)]), now=40)
     assert feedback() == expected
-    assert _learning_state(store) == learning
+    assert _taste_likes(store, 40) == ([(key, 10), (key, 20)] if status == 'LIKE' else [])
+    assert _learning_state(store, now=40) == learning
 
 
 @pytest.mark.parametrize('partial', [False, True])
 def test_masked_reassociated_like_keeps_its_guard_and_never_replays_learning(store, partial):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     source = store.tracks.upsert_track('rated-upload', 'Source', 'Artist A', 'A', 200)
     if partial:
         store.tracks.upsert_track('neutral-sibling', 'Source', 'Artist A', 'A', 200)
@@ -381,10 +501,12 @@ def test_masked_reassociated_like_keeps_its_guard_and_never_replays_learning(sto
     target_recording = store.tracks.catalog_subject(target)['recording_id']
     key = store.tracks.identity_key_for_video('disliked-upload')
     ratings.record_confirmed(store, owner, 'rated-upload', 'LIKE', 10)
+    old_key = store.tracks.identity_key_for_video('rated-upload')
+    assert store.rec_model.mark_graduated_once(old_key, 'like_grad', 10)
     if partial:
         ratings.record_confirmed(store, owner, 'neutral-sibling', 'INDIFFERENT', 11)
     ratings.record_confirmed(store, owner, 'disliked-upload', 'DISLIKE', 20)
-    learning = _learning_state(store)
+    learning = _learning_state(store, now=80)
     weights = store.rec_model.get_weights(now=40)
     raw = store.tracks.item_rating(owner, 'rated-upload')
 
@@ -395,7 +517,7 @@ def test_masked_reassociated_like_keeps_its_guard_and_never_replays_learning(sto
     assert store.conn.execute("SELECT created_at FROM rec_feedback WHERE item_key=? AND kind='like_grad'",
                               (key,)).fetchone()[0] == 10
     assert store.tracks.item_rating(owner, 'rated-upload') == raw
-    assert _learning_state(store) == learning
+    assert _learning_state(store, now=80) == learning
     # Removing the masking dislike exposes retained evidence, with no new like action.
     ratings.record_confirmed(store, owner, 'disliked-upload', 'INDIFFERENT', 40)
     _assert_feedback(store, key, 'LIKE')
@@ -403,5 +525,6 @@ def test_masked_reassociated_like_keeps_its_guard_and_never_replays_learning(sto
     for moment, status in [(50, 'LIKE'), (60, 'INDIFFERENT'), (70, 'LIKE'), (80, 'LIKE')]:
         sync.sync_identity(store, owner, _client([('rated-upload', status),
                                                 ('disliked-upload', 'INDIFFERENT')]), now=moment)
-        assert _learning_state(store) == learning
+        assert _taste_likes(store, moment) == [(key, 10)]
+        assert _learning_state(store, now=80) == learning
         assert store.rec_model.get_weights(now=40) == weights

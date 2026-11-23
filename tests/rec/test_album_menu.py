@@ -94,7 +94,7 @@ def test_album_overrides_expire_without_changing_shared_taste(store):
 def test_installed_album_controls_decode_legacy_values_and_reject_malformed_genres(installed):
     store, _ = installed
     assert store.conn.execute(
-        "SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone()
+        "SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone() is None
     defaults = album_tuning.defaults(store)
     malformed = json.dumps({'until': 1000, 'values': defaults, 'genres': 'jazz'})
     with pytest.raises(ValueError, match='album control selections'):
@@ -114,7 +114,7 @@ def test_installed_album_controls_decode_legacy_values_and_reject_malformed_genr
 
 @pytest.mark.parametrize('action', ['known', 'saved'])
 def test_current_album_state_and_reversals_reconcile_without_refitting(store, action):
-    store.accounts.upsert_account('Main', 'credentials', None, True)
+    store.accounts.upsert_account('Main', None, True)
     prepared = records()[6:10]
     target = prepared[0]
 
@@ -150,7 +150,7 @@ def test_current_album_state_and_reversals_reconcile_without_refitting(store, ac
 
 @pytest.mark.parametrize('classification', ['known', 'rediscovery'])
 def test_prepared_familiarity_does_not_survive_its_current_state_or_lose_its_origin(store, classification):
-    store.accounts.upsert_account('Main', 'credentials', None, True)
+    store.accounts.upsert_account('Main', None, True)
     prepared = [{**records()[6], 'classification': classification, 'unsaved_classification': 'familiar_artist'}]
     assert album_choices.eligible(store, prepared, 100)[0]['classification'] == 'familiar_artist'
     album_choices.set_feedback(store, prepared[0]['browse_id'], 'known', 101)

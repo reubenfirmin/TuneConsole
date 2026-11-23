@@ -1,5 +1,4 @@
 """The empty-catalog path uses actual selections and retained catalog evidence."""
-import json
 from contextlib import ExitStack, nullcontext
 import sys
 from types import SimpleNamespace
@@ -94,7 +93,7 @@ class EmptyLibraryCatalog(Catalog):
 
 
 def client_for(store, fake):
-    identity = store.accounts.upsert_account('main', 'cred', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     return TestClient(create_app(store, lambda: {identity: fake}, now_fn=lambda: 1000.,
                                  background_work=False), base_url='http://127.0.0.1')
 
@@ -157,13 +156,13 @@ def test_empty_owned_library_with_incidental_history_reaches_artist_setup(
     assert result['status'] == ('complete' if likes_readable else 'partial')
     assert set(dict(store.history.recent_plays_with_ts())) == {'one past song|past artist'}
     assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == 0
-    assert store.conn.execute('SELECT COUNT(*) FROM playable_library_tracks').fetchone()[0] == 0
+    assert not store.readiness.playable_owned()
     for index in range(live_plays):
         assert live_ingestion.handle_play_event(SimpleNamespace(store=store), {
             'type': 'play', 'title': f'Incidental {index}', 'artist': 'Past artist',
             'videoId': f'incidental-{index}', 'brandId': '', 'likeStatus': 'INDIFFERENT',
         }, 900. + index)
-    assert store.conn.execute('SELECT COUNT(*) FROM playable_library_tracks').fetchone()[0] == 0
+    assert not store.readiness.playable_owned()
     assert artist_start.required(store)
     status = client.get('/home/onboard/status').json()
     assert status['setup']['artists_required'] and not status['setup']['complete']
@@ -241,7 +240,11 @@ def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(
         'saved_albums': {'status': 'failed' if unavailable == 'saved_albums' else 'complete'},
     }
     sync = Mock(spec_set=SyncRepo)
-    sync.state_facts.return_value = {'raw': json.dumps({'accounts': {'1': {'resources': resources}}})}
+    sync.state_facts.return_value = {
+        'attempt': {'recovery_filename': 'sync-result', 'recovery_digest': 'digest', 'recovery_bytes': 17,
+                    'finished_at': 1, 'phase': 'partial'},
+        'cursors': [],
+    }
     settings = Mock(spec_set=SettingsRepo)
     settings.get_setting.return_value = None
     readiness = Mock(spec_set=ReadinessRepo)
@@ -256,7 +259,7 @@ def test_artist_setup_waits_for_a_connected_listing_but_not_unavailable_albums(
         _read_only=True, settings=settings, collection=collection, discovery=discovery,
         accounts=accounts,
         readiness=Readiness(readiness, Mock(maximum_duration=Mock(return_value=1200))),
-        sync=LibrarySync(sync, settings, Mock(retained=nullcontext), None))
+        sync=LibrarySync(sync, Mock(retained=nullcontext, read=Mock(return_value={'accounts': {'1': {'resources': resources}}}))))
     store = SimpleNamespace(_read_only=False, read_view=Mock(return_value=nullcontext(reader)))
 
     assert artist_start.required(store) == (unavailable == 'saved_albums')
@@ -301,6 +304,20 @@ def test_exact_artist_seeds_and_real_songs_survive_a_service_restart(store):
     assert len(store.discovery.starter_artists()) == 2
     assert len(store.discovery.starter_tracks()) == 8
     assert all(row['artist'] != 'Artist 1' for row in store.discovery.starter_tracks())
+
+
+def test_starter_suggestions_keep_local_neighbors_when_artist_page_fails(store):
+    from yt_playlist.core.artists import token
+
+    seed = store.artists.ensure_artist('Seed', provider='youtube', provider_id='UCseed0000')
+    peer = store.artists.ensure_artist('Peer', provider='youtube', provider_id='UCpeer0000')
+    store.discovery.select_starter_artist('Seed', 'UCseed0000', '', True, 1000)
+    store.artist_similarity.cache_similar(token(seed), [('Peer', .8)], 1000)
+
+    result = artist_start.ArtistCatalog(lambda: {}).related(store)
+    assert [(row['browse_id'], row['because'], row['sources']) for row in result] == [
+        ('UCpeer0000', 'Seed', {'lastfm': .8})]
+    assert store.artists.provider_identity('UCpeer0000') == peer
 
 
 @pytest.mark.parametrize('duration_field,duration', [('duration', '2:30:00'), ('duration_seconds', 9000)])
@@ -387,8 +404,8 @@ def test_cleanup_retains_explicit_artist_input_and_playable_first_set(store, mon
     for index in range(3):
         service.select(store, f'UCartist{index}', True, 1000.)
     with store.conn:
-        store.conn.execute('UPDATE discovered_artists SET first_shown=1001')
-        store.conn.execute('UPDATE discovery_memberships SET first_shown=1001')
+        store.conn.execute('UPDATE artists SET discovery_first_shown=1001 WHERE discovery_candidate=1')
+        store.conn.execute('UPDATE recordings SET discovery_first_shown=1001 WHERE discovery_entry_id IS NOT NULL')
     expired = store.discovery.gc_discovery_pool(1000 + 40 * 86400, 30, set())
     assert expired['artists'] == expired['tracks'] == 0
     assert len(store.discovery.starter_artists()) == 3

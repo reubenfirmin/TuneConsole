@@ -18,7 +18,7 @@ from tests.store_fixture_support import (
 from yt_playlist.core import db_checkpoint, recommendation_outputs as outputs, recommendation_pools as pools
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core.store import Store
-from yt_playlist.repos import proposal_cache, recommendation_publication as publication
+from yt_playlist.repos import recommendation_publication as publication
 
 
 @pytest.fixture(autouse=True)
@@ -44,7 +44,7 @@ def output_staging_store(tmp_path, staging_schema, native_sql_calls, monkeypatch
 def manifest(store, generation):
     # Observe only committed state from an independent connection.
     with closing(sqlite3.connect(store._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        return reader.execute('SELECT chunk_key,filename,content_digest,byte_size FROM prepared_outputs '
+        return reader.execute('SELECT chunk_key,filename,content_digest,byte_size FROM recommendation_chunks '
                               'WHERE generation_id=? ORDER BY chunk_key', (generation,)).fetchall()
 
 
@@ -61,8 +61,8 @@ def test_failed_first_candidate_batch_rolls_back_its_new_pool_header(file_backed
         store.recommendations.stage(prepared, build)
     assert not store.conn.execute('SELECT 1 FROM recommendation_pools WHERE content_digest=?',
                                   (prepared.slots[0].pool.content_digest,)).fetchone()
-    assert not store.conn.execute('SELECT 1 FROM recommendation_build_pools WHERE generation_id=?',
-                                  (build.generation_id,)).fetchone()
+    assert store.conn.execute('SELECT staged_pool_ids FROM recommendation_generations WHERE id=?',
+                              (build.generation_id,)).fetchone()[0] == '[]'
     assert store.recommendations.head('home') is None
     assert not store.conn.in_transaction
 
@@ -81,8 +81,8 @@ def test_failed_slot_attachment_leaves_verified_prefix_unsealed_until_retry(file
     assert complete == 0
     assert store.conn.execute('SELECT count(*) FROM recommendation_candidates WHERE pool_id=?',
                               (pool_id,)).fetchone()[0] == 130
-    assert store.conn.execute('SELECT pool_id FROM recommendation_build_pools WHERE generation_id=?',
-                              (build.generation_id,)).fetchone()[0] == pool_id
+    assert store.conn.execute('SELECT staged_pool_ids FROM recommendation_generations WHERE id=?',
+                              (build.generation_id,)).fetchone()[0] == f'[{pool_id}]'
     assert store.recommendations.head('home')['id'] == previous.generation_id
     store.conn.execute('DROP TRIGGER reject_slot')
     store.recommendations.stage(prepared, build)
@@ -134,8 +134,9 @@ def test_failed_manifest_transaction_resumes_after_reopen_without_partial_batch(
     store = file_backed_store
     prepared = output_plan(store, 'interrupted-owner', 35)
     build = store.recommendations.claim(prepared)
-    store.conn.execute("CREATE TEMP TRIGGER reject_output BEFORE INSERT ON prepared_outputs "
-        "WHEN NEW.chunk_key='chunk-17' BEGIN SELECT RAISE(ABORT, 'owner interrupted'); END")
+    store.conn.execute("CREATE TEMP TRIGGER reject_output BEFORE UPDATE OF chunk_id ON collection_file_writes "
+        "WHEN NEW.chunk_id IS NOT NULL AND NEW.owner_id->>3='chunk-17' "
+        "BEGIN SELECT RAISE(ABORT, 'owner interrupted'); END")
     with pytest.raises(sqlite3.IntegrityError, match='owner interrupted'):
         store.recommendations.stage(prepared, build)
     committed = manifest(store, build.generation_id)
@@ -262,7 +263,7 @@ def test_batched_manifests_yield_to_foreground_and_preserve_pinned_last_good(fil
     store = file_backed_store
     previous = publish(store, plan(store, 'previous'))
     prepared = output_plan(store, 'bounded-manifests', 35)
-    original, counts = proposal_cache._write, []
+    original, counts = publication.staging_write, []
     with store.read_view() as pinned, ThreadPoolExecutor(1) as foreground:
         assert pinned.recommendations.head('home')['id'] == previous.generation_id
 
@@ -279,7 +280,7 @@ def test_batched_manifests_yield_to_foreground_and_preserve_pinned_last_good(fil
             assert pinned.recommendations.head('home')['id'] == previous.generation_id
             foreground.submit(store.settings.set_setting, 'foreground-during-output-stage', 'saved').result(5)
 
-        monkeypatch.setattr(proposal_cache, '_write', observed)
+        monkeypatch.setattr(publication, 'staging_write', observed)
         build = store.recommendations.claim(prepared)
         store.recommendations.stage(prepared, build)
     increments = [right - left for left, right in zip([0] + counts, counts)]

@@ -1,7 +1,5 @@
 """Canonical releases and their track occurrences. Callers own transactions and locks."""
-import time
-
-from . import artists, legacy_evidence, album_tracklists
+from . import artists, album_tracklists
 
 
 def lookup(conn, browse_id):
@@ -22,7 +20,7 @@ def _credit_subject(conn, album_id, previous):
         'WHERE ta.artist_id=? AND NOT EXISTS(SELECT 1 FROM album_tracks at '
         'WHERE at.album_id=? AND at.entry_id=ta.entry_id)',(previous,album_id))]
     if other_albums or other_entries:
-        legacy_evidence.mark_artist_ambiguity(conn, previous)
+        artists.mark_ambiguity(conn, previous)
     return None if artists.ambiguous_context(conn,previous) else previous
 
 
@@ -32,9 +30,8 @@ def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
     if not browse_id:
         raise ValueError('An album requires a YouTube browse ID.')
     aid = lookup(conn,browse_id)
-    keyed_genres = genre_classifications.available(conn)
-    fields = ('title','artist','year','type','thumbnail') + (() if keyed_genres else ('genre',))
-    inputs = (title,artist,str(year) if year is not None else None,type,thumbnail) + (() if keyed_genres else (genre,))
+    fields = ('title','artist','year','type','thumbnail')
+    inputs = (title,artist,str(year) if year is not None else None,type,thumbnail)
     values = tuple(None if v=='' else v for v in inputs)
     previous_rank = None
     if aid is None:
@@ -44,7 +41,7 @@ def observe(conn, browse_id, *, title=None, artist=None, year=None, type=None,
         previous_rank = conn.execute('SELECT metadata_rank FROM albums WHERE id=?', (aid,)).fetchone()[0]
         assignments = ','.join(f'{f}=COALESCE(?,{f})' if rank>=previous_rank else f'{f}=COALESCE({f},?)' for f in fields)
         conn.execute(f'UPDATE albums SET {assignments},metadata_rank=MAX(metadata_rank,?) WHERE id=?', (*values,rank,aid))
-    if keyed_genres and genre not in (None, '') and (previous_rank is None or rank >= previous_rank
+    if genre not in (None, '') and (previous_rank is None or rank >= previous_rank
             or genre_classifications.read(conn, 'albums', aid) in (None, '')):
         genre_classifications.write(conn, 'albums', aid, genre)
     has_credits = conn.execute('SELECT * FROM album_artists WHERE album_id=?', (aid,)).fetchall()
@@ -72,10 +69,7 @@ def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='you
     if not browse_id:
         return None
     aid = observe(conn,browse_id,title=title,artist=artist)
-    if album_tracklists.available(conn):
-        album_tracklists.associate(conn,aid,entry_id,source)
-    elif not conn.execute('SELECT 1 FROM album_tracks WHERE album_id=? AND entry_id=?', (aid,entry_id)).fetchone():
-        conn.execute('INSERT INTO album_tracks(album_id,entry_id,is_full,source) VALUES (?,?,0,?)', (aid,entry_id,source))
+    album_tracklists.associate(conn,aid,entry_id,source)
     # A single identified performer on this exact release can identify its formerly
     # anonymous credit. Reconcile that provisional subject and retain its handle.
     credit = conn.execute('SELECT aa.artist_id,aa.credit,a.provisional FROM album_artists aa JOIN artists a ON a.id=aa.artist_id WHERE aa.album_id=?', (aid,)).fetchall()
@@ -90,37 +84,4 @@ def link(conn, entry_id, browse_id=None, *, title=None, artist=None, source='you
                 if previous is not None:
                     subject = artists.reconcile_provisional(conn,previous,subject,source='exact_release')
                 conn.execute('UPDATE album_artists SET artist_id=? WHERE album_id=?', (subject,aid))
-    return aid
-
-
-def save(conn, data, *, account_id=None):
-    from . import album_memberships
-    aid = observe(conn,data['browse'],title=data.get('title'),artist=data.get('artist'),
-                  year=data.get('year'),type=data.get('type'),thumbnail=data.get('thumbnail'),
-                  credits=data.get('credits'),rank=2)
-    if album_memberships.available(conn):
-        album_memberships.save(conn, aid, account_id)
-    else:
-        conn.execute("INSERT OR IGNORE INTO album_library_memberships(album_id,account_id,source) VALUES (?,?,'youtube')", (aid,account_id))
-    return aid
-
-
-def cache_full(conn, browse_id, title, artist, thumbnail, keys, *, entries=None, credits=None, year=None, album_type=None, now=None):
-    aid = observe(conn,browse_id,title=title,artist=artist,thumbnail=thumbnail,credits=credits,year=year,type=album_type,rank=3)
-    if album_tracklists.available(conn):
-        album_tracklists.cache(conn,aid,browse_id,keys,entries=entries,now=now)
-        return aid
-    if entries is not None:
-        rows = [(e['entry_id'],None,None,i,e.get('disc_number'),e.get('track_number')) for i,e in enumerate(entries)]
-    else:
-        rows = []
-        for key in dict.fromkeys(keys):
-            found = conn.execute('SELECT DISTINCT e.id FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id JOIN album_tracks t ON t.entry_id=e.id WHERE t.album_id=? AND r.identity_key=?', (aid,key)).fetchall()
-            recording = conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()
-            rows.append((found[0][0],None,None,None,None,None) if len(found)==1 else (None,recording[0] if recording else None,key,None,None,None))
-    conn.execute('DELETE FROM album_tracks WHERE album_id=? AND is_full=1', (aid,))
-    for entry,rid,key,position,disc,track in rows:
-        conn.execute('INSERT INTO album_tracks(album_id,entry_id,recording_id,legacy_track_key,position,disc_number,track_number,is_full,source) VALUES (?,?,?,?,?,?,?,1,\'full_fetch\')', (aid,entry,rid,key,position,disc,track))
-    conn.execute('DELETE FROM album_tracks WHERE album_id=? AND is_full=0 AND entry_id IN (SELECT entry_id FROM album_tracks WHERE album_id=? AND is_full=1)', (aid,aid))
-    conn.execute('INSERT INTO album_fetch_state VALUES (?,?,1,?) ON CONFLICT(album_id) DO UPDATE SET fetched_at=excluded.fetched_at,complete=1,expected_track_count=excluded.expected_track_count', (aid,time.time() if now is None else now,len(rows)))
     return aid

@@ -65,16 +65,7 @@ creation age. Changing the compressed inode's filesystem timestamp alone does
 not renew that lease. Renewal verifies and replaces the bounded stream atomically;
 a failed renewal leaves the previous artifact intact.
 
-## Copy and recovery
-
-Current database replacement keeps installed file roots in place. Private SQL
-candidates and retained originals use `db_rebuild.files.borrow`, preserving file
-identity and continuing publication through those same roots. Only SQL is staged.
-The `_move` boundary remains for installation and rollback of persisted older
-`file_roots` plans, with application handles drained. It preserves complete
-directories, including locks and superseded publications. Required file
-verification uses FAO. Build and install share SQLite verification in
-`core/db_rebuild/sqlite_checks.py`.
+## Export and recovery
 
 Domain export/restore tests use `tests/file_custody_support.py` for disposable
 snapshots. They verify destination bytes before publication and preserve the

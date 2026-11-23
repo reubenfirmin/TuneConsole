@@ -8,6 +8,7 @@ import threading
 import pytest
 
 from yt_playlist.core.activity import WorkClosing, cancellable_work
+from yt_playlist.core.mode_offers import PREFIX as MODE_OFFER_PREFIX
 from yt_playlist.repos.base import Repo, lookup_read
 
 
@@ -217,14 +218,13 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(file_back
             if operation == 'impression_counts':
                 store.modes.log_impressions(1, [('wheelhouse', 7)], 100)
                 read = lambda: store.modes.impression_counts(50, before=200)
-                change = ('INSERT INTO rec_mode_impressions(epoch,lane,mode_id,created_at) '
-                          'VALUES (?,?,?,?)', (2, 'wheelhouse', 7, 101))
+                change = ('INSERT INTO settings(key,value) VALUES (?,?)',
+                          (MODE_OFFER_PREFIX + '2', '{"wheelhouse":[7,null,null,101]}'))
             else:
                 store.modes.log_pick(101, 7, 100)
-                store.conn.execute('INSERT INTO playlist_membership_refs(id) VALUES (102)')
+                store.conn.execute('INSERT INTO playlists(id,is_current) VALUES (102,0)')
                 read = lambda: store.modes.pick_counts(50, before=200)
-                change = ('INSERT INTO rec_mode_picks(membership_ref_id,mode_id,created_at) '
-                          'VALUES (102,7,101)', ())
+                change = ('UPDATE playlists SET picked_mode_id=7,mode_picked_at=101 WHERE id=102', ())
             committed, uncommitted = {7: 1}, {7: 2}
         elif operation in ('disliked_identity_keys', 'disliked_key_page'):
             keys = []
@@ -258,9 +258,7 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(file_back
             assert original['identity_key'] != target['identity_key']
             read = lambda: (store.tracks.identity_key_for_video('observed-upload'),
                             store.tracks.identity_key_for_video('unknown-upload'))
-            item_change = ('UPDATE youtube_items SET recording_id=? WHERE video_id=?',
-                           (target['recording_id'], 'observed-upload'))
-            change = ('UPDATE catalog_entries SET recording_id=? WHERE id=?',
+            change = ('UPDATE track_sources SET recording_id=? WHERE id=?',
                       (target['recording_id'], observed))
             committed = (original['identity_key'], None)
             uncommitted = (target['identity_key'], None)
@@ -278,11 +276,11 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(file_back
             store.tracks.upsert_track('v2', 'Second', 'Artist', None, 100, thumbnail='/second.png')
             read = lambda: [(row['video_id'], row['thumbnail']) for row in
                             store.charts.video_tracks_detail(['v2', 'absent', 'v1', 'v2'])]
-            change = ("UPDATE youtube_items SET thumbnail='/uncommitted.png' WHERE video_id='v1'", ())
+            change = ("UPDATE track_sources SET thumbnail='/uncommitted.png' WHERE video_id='v1'", ())
             committed = [('v2', '/second.png'), ('v1', '/committed.png'), ('v2', '/second.png')]
             uncommitted = [('v2', '/second.png'), ('v1', '/uncommitted.png'), ('v2', '/second.png')]
         else:
-            identity = store.accounts.upsert_account('Main', 'bridge', None, True)
+            identity = store.accounts.upsert_account('Main', None, True)
             playlist = store.playlists.upsert_playlist(identity, 'P', 'Committed', 0, '', 1)
 
             def read():
@@ -294,10 +292,6 @@ def test_home_reads_keep_owned_changes_and_finish_before_a_busy_writer(file_back
             uncommitted = ('Uncommitted', identity, 'P')
 
         def mutate():
-            if operation == 'identity_key_for_video':
-                # Preserve the deferred composite upload/recording reference,
-                # matching the association owner's update order without commit.
-                store.conn.execute(*item_change)
             store.conn.execute(*change)
             if operation == 'identity_key_for_video':
                 assert store.conn.execute('PRAGMA foreign_key_check').fetchone() is None

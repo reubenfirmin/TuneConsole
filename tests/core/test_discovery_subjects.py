@@ -16,25 +16,22 @@ def discover(store,video='song',source='discovery',now=1):
 
 
 def test_fresh_typed_constraints_and_unknown_sources_admit_no_catalog_subjects(store):
-    for table in ('artist_scans','discovered_artists'):
-        columns = {r[1]:r for r in store.conn.execute('PRAGMA table_info('+table+')')}
-        assert 'artist' not in columns and columns['artist_id'][5]==1
-    assert not {'because','fits'} & {r[1] for r in store.conn.execute('PRAGMA table_info(discovered_artists)')}
+    columns = {r[1]:r for r in store.conn.execute('PRAGMA table_info(discovered_artists)')}
+    assert not {'artist','because','fits'} & columns.keys()
+    assert store.conn.execute("SELECT type FROM sqlite_schema WHERE name='discovered_artists'").fetchone()[0] == 'view'
+    with pytest.raises(ValueError, match='Unknown artist'):
+        store.discovery.repository.mark_scanned(99999, 0)
     key = discover(store,source='radio:never-admitted')
     before = store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0]
     source = store.discovery.discovery_sources_for_track(key)[0]
     assert source['source_type']=='legacy_unknown' and source['resolution_status']=='unresolved'
     assert source['source_token']=='radio:never-admitted'
     assert store.conn.execute('SELECT count(*) FROM recordings').fetchone()[0]==before
-    assert not store.conn.execute("SELECT 1 FROM youtube_items WHERE video_id='never-admitted'").fetchone()
-    rid = source['recording_id']
-    aid = store.artists.ensure_artist('Artist')
+    assert not store.conn.execute("SELECT 1 FROM track_sources WHERE video_id='never-admitted'").fetchone()
     for sql,args in (
         ("INSERT INTO discovery_origins(kind,resolution_status) VALUES ('radio','resolved')",()),
         ("INSERT INTO discovery_origins(kind,seed_video_id,resolution_status) VALUES ('album','song','resolved')",()),
-        ('INSERT INTO artist_scans VALUES (?,0)',(99999,)),
-        ('INSERT INTO discovery_impressions(view_id,recording_id,artist_id,shown_at) VALUES (?,?,?,0)',('view',rid,aid)),
-        ('INSERT INTO discovery_impressions(view_id,recording_id,shown_at) VALUES (?,99999,0)',('view',)),
+        ("UPDATE recordings SET discovery_views='[]' WHERE id=?", (source['recording_id'],)),
     ):
         with pytest.raises(sqlite3.IntegrityError):
             store.conn.execute(sql,args)
@@ -71,11 +68,16 @@ def test_views_survive_expiry_rediscovery_and_old_visit_retries(store,kind):
     key = add()
     store.discovery.record_discovery_impressions(kind,[key,key],'visit',2)
     store.discovery.gc_discovery_pool(200*86400,30,set())
-    assert store.conn.execute('SELECT count(*) FROM discovery_impressions').fetchone()[0]==1
+    identifier = provenance.subject(store.conn, kind, key)
+    assert provenance.offer_views(store.conn, kind, identifier) == {'visit': 2}
     add()
     store.discovery.record_discovery_impressions(kind,[key],'visit',200*86400)
-    table,column = provenance.CANDIDATES[kind]
-    identifier = provenance.subject(store.conn,kind,key)
+    if kind == 'album':
+        table, column, identifier = 'discovered_albums', 'browse_id', key
+    else:
+        table, column = {'track': ('discovered_tracks', 'recording_id'),
+                         'artist': ('discovered_artists', 'artist_id')}[kind]
+        identifier = provenance.subject(store.conn,kind,key)
     assert tuple(store.conn.execute('SELECT offered_count,first_shown,last_shown FROM '+table+
         ' WHERE '+column+'=?',(identifier,)).fetchone())==(1,2,2)
     store.discovery.record_discovery_impressions(kind,[key],'other-visit',200*86400)
@@ -83,8 +85,8 @@ def test_views_survive_expiry_rediscovery_and_old_visit_retries(store,kind):
 
 
 def test_account_and_import_withdrawal_preserves_independent_sources_and_lifetime_views(store):
-    first = store.accounts.upsert_account('First','credential',None,True)
-    second = store.accounts.upsert_account('Second','other',None,False)
+    first = store.accounts.upsert_account('First',None,True)
+    second = store.accounts.upsert_account('Second',None,False)
     store.discovery.upsert_discovered_artist('Candidate',2,['Independent'],['Playlist'],None,1)
     store.discovery.seed_spotify_artists(first,{'Candidate':3},2,import_key='one')
     store.discovery.seed_spotify_artists(first,{'Candidate':5},3,import_key='two')
@@ -131,7 +133,7 @@ def test_candidate_output_backup_restore_and_orphan_cleanup(
             assert collect_collections(copied.conn)==1
             assert copied.discovery.get_discovered_artists()[0]['because']==['Other']
             with copied.conn:
-                copied.conn.execute('DELETE FROM discovered_artists')
+                copied.conn.execute('UPDATE artists SET discovery_candidate=0 WHERE discovery_candidate=1')
             assert collect_collections(copied.conn)==0
             for filename in collection_recovery.directory(copied.conn).glob('by-id/*/*.json'):
                 expire_file(filename)

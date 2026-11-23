@@ -5,7 +5,7 @@ import re
 import uuid
 from threading import Lock
 
-from yt_playlist.library.tv_stream import PendingTV
+from yt_playlist.library.tv_launch import PendingTV
 
 
 def playback_message(playlist, items, accounts, form):

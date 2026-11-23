@@ -10,7 +10,7 @@ import pytest
 @pytest.fixture
 def database(file_backed_store):
     store = file_backed_store
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     store.enrichment_state.reconcile_provider_configuration({
         "deezer": {"fingerprint": "original", "status": "available"}})
     for video, title in (("one", "First"), ("two", "Second")):
@@ -80,7 +80,10 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
                 if change == "pass_changed":
                     # A new refresh belongs to a different pass, even with the same input.
                     with database.conn:
-                        database.conn.execute("INSERT OR IGNORE INTO enrichment_provider_jobs VALUES (?,'deezer')",
+                        database.conn.execute("INSERT INTO enrichment_provider_state "
+                                              "(recording_id,provider,cycle,at,status,failures,retry_at,error,queued) "
+                                              "VALUES (?,'deezer',-1,0,'queued',0,0,'',1) "
+                                              "ON CONFLICT(recording_id,provider) DO UPDATE SET queued=1",
                                               (first["recording_id"],))
             elif change in ("retry", "cooldown"):
                 database.enrichment_state.record_enrichment_attempt(first["identity_key"], "deezer", {},
@@ -89,12 +92,12 @@ def test_snapshot_candidates_are_revalidated_before_job_admission(database, monk
                     database.enrichment_state.defer_integration('deezer', now=1000, retry_after=1030, error='new outage')
             elif change == "removed":
                 with database.conn:
-                    database.conn.execute("DELETE FROM library_memberships WHERE entry_id=?", (first["id"],))
+                    database.conn.execute("UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?", (first["id"],))
             elif change == "input_changed":
                 replacement = database.tracks.upsert_track("replacement", "First", "Artist", None, 200)
                 assert replacement != first["id"]
                 with database.conn:
-                    database.conn.execute("DELETE FROM library_memberships WHERE entry_id=?", (first["id"],))
+                    database.conn.execute("UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?", (first["id"],))
             elif change.startswith("provider_"):
                 database.enrichment_state.reconcile_provider_configuration({"deezer": {
                     "fingerprint": "changed", "status": "disabled" if change == "provider_disabled" else "available"}})
@@ -183,15 +186,18 @@ def test_resweep_rechecks_current_inputs_after_snapshot_selection(database, monk
         else:
             with database.conn:
                 if change == 'removed':
-                    database.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (first['id'],))
+                    database.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?', (first['id'],))
                 elif change == 'provider':
                     database.conn.execute("UPDATE enrichment_provider_config SET fingerprint='changed'")
                 elif change == 'pending':
-                    database.conn.execute("INSERT INTO enrichment_provider_jobs VALUES (?,'deezer')",
+                    database.conn.execute("INSERT INTO enrichment_provider_state "
+                                          "(recording_id,provider,cycle,at,status,failures,retry_at,error,queued) "
+                                          "VALUES (?,'deezer',-1,0,'queued',0,0,'',1) "
+                                          "ON CONFLICT(recording_id,provider) DO UPDATE SET queued=1",
                                           (first['recording_id'],))
                 elif change == 'metadata':
                     seed_enrichment(database, first['id'], 'House', '2000')
-                    seed_audio(database, first['id'], bpm=120, energy=.5, danceability=.5)
+                    seed_audio(database, first['id'], bpm=120, danceability=.5)
 
     monkeypatch.setattr(database.enrichment_queue, 'read_snapshot', changed_reader)
     result = database.enrichment_queue.resweep_batch(2, 500, providers=['deezer'], now=1000)

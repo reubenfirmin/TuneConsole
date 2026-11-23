@@ -13,8 +13,12 @@ from threading import Lock
 from time import monotonic
 from typing import Protocol
 
+from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
+from yt_playlist.core.artist_policy import token
+from yt_playlist.core.road_trip_contract import YOUTUBE_ARTIST_PREFIX, parse_youtube_artist_choice
 from yt_playlist.providers import deezer, genres, lastfm, musicbrainz
 from yt_playlist.integrations.base import IntegrationUnavailable
+from yt_playlist.rec import artist_model
 from yt_playlist.rec.road_trip_axes import canonical_genre
 from yt_playlist.util import genre_map, net
 from yt_playlist.util.thumbnails import best_thumb
@@ -40,12 +44,13 @@ class InputRequest:
     name: str
     cap: int
     decade: str | None = None
+    browse_id: str | None = None
 
 
 @dataclass(frozen=True)
 class CandidateBatch:
     rows: list[dict]
-    related: list[str]
+    related: list[dict]
 
 
 def _decade(year):
@@ -99,6 +104,7 @@ def own_rows(songs, plays, hard, muted, by_artist, learned):
                                song["duration"], "mine", song["genre"] or extra.get("genre") or fallback.get("genre") or "",
                                song["year"] or extra.get("year") or fallback.get("year"), plays.get(song["key"], 0))
         candidate["engagement"] = candidate["plays"] + (LIKE_BONUS if song["liked"] else 0)
+        candidate["key"] = song["key"]
         candidate['artist_ids'] = song.get('artist_ids', [])
         out.append(candidate)
     out.sort(key=lambda candidate: candidate["engagement"])
@@ -142,6 +148,15 @@ def track_facts(store, title, artist):
 def artist_genre(store, artist):
     if not artist:
         return None
+    if artist.startswith(YOUTUBE_ARTIST_PREFIX):
+        choice = parse_youtube_artist_choice(artist)
+        identity = store.artists.provider_identity(choice[0]) if choice else None
+        if identity is None:
+            return None
+        artist = token(identity)
+    if artist.startswith('@artist:'):
+        counts = Counter(row['genre'] for row in store.rec_query.tracks_by_artists([artist]) if row['genre'])
+        return counts.most_common(1)[0][0] if counts else None
     key = lastfm.api_key(store)
     if not key:
         return None  # Missing credentials must never poison a later configured lookup.
@@ -191,48 +206,65 @@ def _metadata_cached(cache, key, load):
     return value
 
 
-def _artist_page(client, name):
+def _artist_page(client, name, browse_id=None):
     try:
-        results = client.search(name, filter="artists") or []
-    except Exception:
-        return None, None
-    browse_id = results[0].get("browseId") if results else None
-    if not browse_id:
-        return None, None
-    try:
+        if not browse_id:
+            results = client.search(name, filter="artists") or []
+            browse_id = results[0].get("browseId") if results else None
+        if not browse_id:
+            return None, None
         return (client.get_artist(browse_id) or {}), browse_id
+    except (WorkClosing, WorkBudgetExceeded):
+        raise
     except Exception:
-        return None, None
+        return None, browse_id
 
 
-def _page_songs(page, fallback_name, limit=ARTIST_SONGS_LIMIT):
+def _page_songs(page, fallback_name, limit=ARTIST_SONGS_LIMIT, *, browse_id=None):
     rows = (((page or {}).get("songs") or {}).get("results")) or []
     out = []
     for row in rows[:limit]:
         if not (video_id := row.get("videoId")):
             continue
-        artists = row.get("artists") or []
+        credits = row.get("artists") or ()
+        credit = next(iter(credits), {})
+        artist = credit.get("name") or fallback_name
+        channel = credit.get("id") or credit.get("browseId")
+        if browse_id and any((c.get('id') or c.get('browseId')) == browse_id for c in credits):
+            channel = browse_id
+        if not channel and artist.casefold() == fallback_name.casefold():
+            channel = browse_id
         out.append({"video_id": video_id, "title": row.get("title") or "",
-                    "artist": (artists[0].get("name") if artists else None) or fallback_name,
+                    "artist": artist, "artist_browse_id": channel,
                     "album": (row.get("album") or {}).get("name") or "",
                     "thumbnail": best_thumb(row.get("thumbnails")), "duration": row.get("duration_seconds"), "genre": ""})
     return out
 
 
-def artist_songs(client, name, limit=ARTIST_SONGS_LIMIT):
-    page, _ = _artist_page(client, name)
-    return _page_songs(page, name, limit)
+def artist_songs(client, name, limit=ARTIST_SONGS_LIMIT, *, browse_id=None):
+    page, browse = _artist_page(client, name, browse_id) if browse_id else _artist_page(client, name)
+    return _page_songs(page, name, limit, browse_id=browse)
 
 
-def _related_names(page, limit=RELATED_ARTISTS):
-    rows = (((page or {}).get("related") or {}).get("results")) or []
-    return [row.get("title") for row in rows[:limit] if row.get("title")]
+def _related_artists(store, name, browse, page, limit):
+    if store is None:
+        return []
+    seed = artist_model.youtube_artist_key(store.artists, browse) if browse else store.artists.key(name) or name
+    listed = [(rank, ref) for rank, ref in artist_model.youtube_neighbors(page, allow_names=True)
+              if not browse or ref['browse_id'] != browse]
+    ranked = artist_model.ranked_artist_neighbors(store, [seed], youtube=listed, topn=limit)
+    result = []
+    for neighbor in ranked:
+        if reference := artist_model.neighbor_reference(store.artists, neighbor):
+            result.append({**reference, 'key': neighbor.key, 'sources': neighbor.sources})
+    return result
 
 
-def artist_context(client: MusicClient, name: str) -> CandidateBatch:
+def artist_context(client: MusicClient, name: str, store=None, *, browse_id=None) -> CandidateBatch:
     """The seed's representative songs and neighborhood, including for legacy draft repair."""
-    page, _ = _artist_page(client, name)
-    return CandidateBatch(_page_songs(page, name, limit=5), _related_names(page, limit=GENRE_ARTISTS))
+    page, browse = _artist_page(client, name, browse_id) if browse_id else _artist_page(client, name)
+    return CandidateBatch(_page_songs(page, name, limit=5, browse_id=browse),
+                          _related_artists(store, name, browse, page, GENRE_ARTISTS))
 
 
 def _genre_songs(client, genre, limit=GENRE_SEARCH_LIMIT):
@@ -294,10 +326,14 @@ def _load_genre_artists(genre, decade, limit, key, store):
     return out[:limit], complete
 
 
-def other_input_songs(client, kind, name, cap, store=None, decade=None):
+def other_input_songs(client, kind, name, cap, store=None, decade=None, *, browse_id=None):
     if kind == "artist":
-        page, _ = _artist_page(client, name)
-        return _cap_per_artist(_page_songs(page, name), cap), _related_names(page)
+        page, browse = _artist_page(client, name, browse_id) if browse_id else _artist_page(client, name)
+        rows = _page_songs(page, name, browse_id=browse)
+        if browse_id:
+            rows = [row for row in rows if row['artist_browse_id'] == browse_id]
+        return (_cap_per_artist(rows, cap),
+                _related_artists(store, name, browse, page, RELATED_ARTISTS))
     rows, artists = [], genre_artists(store, name, decade)
     per_artist = max(2, math.ceil(cap / max(1, min(len(artists), GENRE_ARTISTS))))
     for artist in artists:
@@ -312,7 +348,8 @@ def other_input_songs(client, kind, name, cap, store=None, decade=None):
 
 
 def acquire_input(client: MusicClient, store, request: InputRequest) -> CandidateBatch:
-    rows, related = other_input_songs(client, request.kind, request.name, request.cap, store, request.decade)
+    options = {'browse_id': request.browse_id} if request.browse_id else {}
+    rows, related = other_input_songs(client, request.kind, request.name, request.cap, store, request.decade, **options)
     return CandidateBatch(rows, related)
 
 
@@ -334,6 +371,8 @@ def candidate_rows(rows, metadata, artist_genres):
         candidate = _candidate(row["video_id"], row["title"], row["artist"], row["album"], row["thumbnail"],
                                row["duration"] or facts.get("duration"), "theirs", genre, facts.get("year"))
         candidate["input"] = row.get("input")
+        if row.get('artist_browse_id'):
+            candidate['artist_browse_id'] = row['artist_browse_id']
         out.append(candidate)
     return out
 

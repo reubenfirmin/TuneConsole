@@ -34,7 +34,7 @@ class PlaylistTaste:
         similarities = self.centroids @ normalized.T
         if len(self.titles) == 1:
             # No allocation is needed for a single interest. Keep equal fits equal
-            # and preserve cosine scale for the recent/session/negative overlays.
+            # and preserve cosine scale for the recent and same-day adjustments.
             return similarities[0]
         orders = np.argsort(-similarities, axis=1, kind="stable")
         positions = np.zeros(len(self.titles), dtype=int)

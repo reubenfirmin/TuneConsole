@@ -53,7 +53,7 @@ def rankings(facts):
 
 def artist(facts):
     info = facts['info']
-    additional = more_albums((info or {}).get('albums', []), facts['collection'], facts['identities'])
+    additional = more_albums((info or {}).get('albums') or [], facts['collection'], facts['identities'])
     additional = [{**a, 'saved': a.get('browse_id') in facts['saved_ids']} for a in additional]
     albums = sorted([*facts['collection'], *[
         {'album': a['title'], 'browse': a.get('browse_id'), 'year': a.get('year'),

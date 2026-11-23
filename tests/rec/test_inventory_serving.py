@@ -1,6 +1,6 @@
 """Each foreground consumer stays usable during real installed inventory work."""
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing, ExitStack, nullcontext
+from contextlib import nullcontext
 import json
 import sqlite3
 import threading
@@ -9,52 +9,67 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.genre_catalog_support import bound_catalog
-from tests.home_fixture_support import returning_listener, without_metadata_providers
+from tests.home_fixture_support import returning_listener, service
+from tests.onboarding_support import publish_live_mix_inputs
 from tests.prepared_fixture_support import capture_template, prepared_template
 from tests.rec.test_evidence_responsiveness import (
-    assert_maintenance_banner, comparison_owner, pending_inventory, publish_serving_inputs,
-    install_serving_routes, seed_evidence_library, serving_bytecode, serving_routes)
-from tests.store_fixture_support import install_numbered_input
-from yt_playlist.core.migrations import regular, runner
-from yt_playlist.rec import choice_evidence, home_cache, home_cards, home_prepared, group_root_backfill, group_roots, stored_home
+    assert_maintenance_banner, install_serving_routes, seed_evidence_library, serving_bytecode)
+from tests.store_fixture_support import bounded_consumer_schema
+from yt_playlist.core import group_evidence, home_outputs, recommendation_impressions
+from yt_playlist.core.group_preparation_state import ROOTS
+from yt_playlist.core.worker_settings import number, save
+from yt_playlist.rec import choice_evidence, group_root_backfill, group_roots, home_cards, rec_params
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.web.app import create_app
 
 
+def pending_inventory(store, identity):
+    captured = {'at': 10, 'group_generation': 'first', 'musical_groups': [
+        {'group_id': 'stable-parent', 'version': 'first-parent'},
+        {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]}
+    ledger = store.rec_ledger.evidence()
+    artifact = ledger.artifact(captured)
+    ledger.put('opportunity', identity, {'id': identity, 'schema': 1, 'format': 'mixes',
+        'at': 10, 'observed_at': 10, 'context': artifact, 'options': [{'id': 'one'}]})
+    store.rec_proposals.put_proposals('album_prepared', {
+        'context': {'artifact': artifact}, 'items': [], 'built_at': 10}, 10)
+    publication = home_outputs.manifest(store.conn, 'album_prepared')
+    assert publication is not None
+    owner = f'home-output:{publication.publication_id}:context'
+    assert store.group_evidence.has_owner('prepared', owner)
+    with group_roots.writer(store) as conn:
+        save(conn, ROOTS, 0)
+    store._group_root_backfill = group_root_backfill.Backfill(store)
+    return identity, owner
+
+
+def assert_prepared_roots(store, owner):
+    assert [row[0] for row in store.conn.execute(
+        f'SELECT reference.value->>0 FROM {group_evidence.HOME_VERSIONS} '
+        'AND context.value->>2=? ORDER BY 1', (owner,))] == ['first-leaf', 'first-parent']
+    assert store.conn.execute(
+        "SELECT 1 FROM group_evidence_contexts e JOIN group_generations g ON g.id=e.generation_id "
+        "WHERE e.kind='prepared' AND e.external_key=? AND g.external_key='first'", (owner,)).fetchone()
+
+
+def assert_live_mixes(response):
+    assert response.status_code == 200
+    for lane in ('comfort', 'wheelhouse', 'explore', 'fresh'):
+        assert f'id="gen-{lane}"' in response.text
+        assert f'data-vid="live-{lane}-' in response.text
+
+
 @pytest.fixture(scope='module')
-def inventory_numbered_input():
-    with closing(sqlite3.connect(':memory:')) as schema:
-        with pytest.MonkeyPatch.context() as patch:
-            bound_catalog(patch, entries=(('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz')))
-            install_numbered_input(schema, 107)
-        schema.execute('PRAGMA query_only=ON')
-        yield schema
-
-
-def test_inventory_retains_the_current_numbered_contract(inventory_numbered_input):
-    runner.validate_version(inventory_numbered_input, 107)
-    assert inventory_numbered_input.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == 107
-    assert inventory_numbered_input.execute('SELECT count(*) FROM main.catalog_entries').fetchone()[0] == 0
-
-
-@pytest.fixture(scope='module')
-def inventory_admitted_input(inventory_numbered_input, tmp_path_factory):
-    path = tmp_path_factory.mktemp('inventory-installed') / 'installed.db'
-    with ExitStack() as resources:
-        with pytest.MonkeyPatch.context() as patch:
-            bound_catalog(patch, entries=(('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz')))
-            template = resources.enter_context(prepared_template(
-                inventory_numbered_input, lambda store: None, database=path, defer_metadata=True))
+def inventory_admitted_input(tmp_path_factory):
+    path = tmp_path_factory.mktemp('inventory-current') / 'inventory.db'
+    entries = (('house', 'House'), ('rock', 'Rock'), ('jazz', 'Jazz'))
+    with bounded_consumer_schema(entries) as schema, prepared_template(
+            schema, lambda store: None, database=path) as template:
         yield template
 
 
-def test_inventory_admission_keeps_history_and_installs_real_regular_guards(inventory_admitted_input):
+def test_inventory_input_has_real_revision_guards(inventory_admitted_input):
     source = inventory_admitted_input.source
-    with closing(sqlite3.connect(source._db_path.as_uri() + '?mode=ro', uri=True)) as reader:
-        reader.row_factory = sqlite3.Row
-        runner.validate_version(reader, 107)
-        regular.validate(reader)
     assert source.conn.execute('PRAGMA journal_mode').fetchone()[0] == 'wal'
     assert inventory_admitted_input.revision_guards
 
@@ -81,34 +96,29 @@ def test_inventory_inputs_publish_both_real_group_versions_and_retained_choice_e
 def inventory_serving_input(inventory_evidence_input, tmp_path_factory):
     path = tmp_path_factory.mktemp('inventory-serving') / 'serving.db'
     with inventory_evidence_input.open(path) as store:
-        publish_serving_inputs(store, tracks_per_card=1)
-        store.accounts.upsert_account('Main', 'bridge', None, True)
+        publish_live_mix_inputs(store, tracks_per_lane=8)
+        rec_params.set_param(store, 'comfort_min_pool', 0)
+        store.accounts.upsert_account('Main', None, True)
         store.settings.set_setting('last_sync_at', '1000')
         store.settings.set_setting('onboard_dismissed', '1')
         returning_listener(store, 'mixes', now=1000)
         yield capture_template(store, None)
 
 
-def test_inventory_serving_inputs_retain_four_playable_cards_and_a_real_typed_head(inventory_serving_input):
+def test_inventory_serving_inputs_retain_ranked_candidates_and_a_real_typed_head(inventory_serving_input):
     store = inventory_serving_input.source
-    payload = home_cache.read(store, 'home_tuned')
-    assert home_prepared._valid(payload)
-    protos = payload['menus'][0]['protos']
-    assert {proto['lane'] for proto in protos} == {'comfort', 'wheelhouse', 'explore', 'temporal'}
-    assert all(len(proto['tracks']) == 1 for proto in protos)
     assert store.recommendations.head('home')
+    assert store.recommendations.head('fresh')
     # Completed serving output is usable before historical inventory finishes.
-    assert store.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+    assert number(store.conn, ROOTS) == 0
 
 
-def test_inventory_cached_home_serves_every_lane_before_recovery(cached_inventory_app):
-    # Own the ordinary cached-page contract and its first real template compile;
+def test_inventory_home_serves_every_lane_before_recovery(cached_inventory_app):
+    # Own the ordinary Home request and its first real template compile;
     # held preparation below then isolates each concurrent foreground request.
     library, client, _ = cached_inventory_app
     response = client.get('/')
-    assert response.status_code == 200
-    for lane in ('comfort', 'wheelhouse', 'explore', 'temporal'):
-        assert f'A {lane} mix for you' in response.text
+    assert_live_mixes(response)
     assert_maintenance_banner(response)
     assert not library.activity_paused
 
@@ -145,19 +155,14 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(
     observed = {'home_timed_out': False, 'cleanup_errors': []}
     try:
         # The preceding live-app check warmed Home before this gated file existed.
-        identity, surface = pending_inventory(library, 'inventory-serving-check')
+        identity, owner = pending_inventory(library, 'inventory-serving-check')
         ledger = library.rec_ledger.evidence()
         path = ledger._path('opportunity', identity)
         raw = path.read_bytes()
-        assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' "
+        assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='offer' "
                                         'AND external_key=?', (identity,)).fetchone()
-        owners = {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
-        # This disposable fixture represents retained choice files not
-        # yet inventoried. Do not leave retention open over that missing owner.
-        with group_roots.writer(library) as conn:
-            conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
-        backfill = group_root_backfill.Backfill(library)
-        library._group_root_backfill = backfill
+        owners = {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_contexts')}
+        backfill = library._group_root_backfill
         record_reader = type(ledger)
         read_record = record_reader.read
 
@@ -188,7 +193,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(
                 except TimeoutError:
                     observed['home_timed_out'] = True
                 else:
-                    assert home.status_code == 200 and 'A comfort mix for you' in home.text
+                    assert_live_mixes(home)
                     assert_maintenance_banner(home)
                     assert not maintenance.done() and not release.is_set()
                 observed['home_elapsed_before_release'] = time.monotonic() - started
@@ -205,7 +210,7 @@ def test_cached_home_does_not_wait_for_inventory_file_preparation(
                             observed['cleanup_errors'].append(f'{name}: {type(error).__name__}: {error}')
         monkeypatch.setattr(record_reader, 'read', read_record)
         cached_inventory_recovery.update(
-            identity=identity, surface=surface, path=path, raw=raw, owners=owners, backfill=backfill)
+            identity=identity, owner=owner, path=path, raw=raw, owners=owners, backfill=backfill)
         assert not observed['home_timed_out'], (
             'Cached Home waited more than 2 seconds for held inventory file preparation; '
             'see inventory-serving.json')
@@ -223,48 +228,33 @@ def test_cached_inventory_recovery_completes_its_cursor_without_rewriting_files_
     for _ in range(10):
         if not choice_evidence.maintain_storage(library, 1000).get('deferred'):
             break
-    assert library.conn.execute('SELECT roots_complete FROM group_retention_state WHERE id=1').fetchone()[0] == 1
+    assert number(library.conn, ROOTS) == 1
     backfill = state['backfill']
     assert backfill.stage == len(group_root_backfill.KINDS) and backfill.pending_path is None
     assert state['path'].read_bytes() == state['raw']
-    assert state['owners'] <= {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_owners')}
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint') "
+    assert state['owners'] <= {tuple(row) for row in library.conn.execute('SELECT * FROM group_evidence_contexts')}
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind IN ('offer','checkpoint') "
                                     'AND external_key=?', (state['identity'],)).fetchone()
-    owner = comparison_owner(library, state['surface'])
-    assert [row[0] for row in library.conn.execute("SELECT external_version FROM group_evidence_versions "
-        "WHERE kind='comparison' AND external_key=? ORDER BY external_version", (owner,))] == [
-            'first-leaf', 'first-parent']
-    assert library.conn.execute("SELECT 1 FROM group_evidence_generations e JOIN group_generations g "
-        "ON g.id=e.generation_id WHERE e.kind='comparison' AND e.external_key=? AND g.external_key='first'",
-        (owner,)).fetchone()
+    assert_prepared_roots(library, state['owner'])
     assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 @pytest.mark.parametrize('shared_writer', [True, False], ids=['serving-writer', 'separate-writer'])
-def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(inventory_serving_input, monkeypatch, tmp_path, shared_writer):
-    from yt_playlist.util import genre_map
-
+def test_home_onboarding_and_growth_do_not_wait_for_a_cleanup_writer(inventory_serving_input, monkeypatch, tmp_path, shared_writer):
     with inventory_serving_input.open(tmp_path / 'held-schema.db') as library:
-        library.accounts.upsert_account('Main', 'bridge', None, True)
+        library.accounts.upsert_account('Main', None, True)
         library.settings.set_setting('last_sync_at', '1000')
-        prepared_home = library.rec_proposals.get_proposals('home_tuned')
-        families = genre_map.all_families()
-        prepared_home['fingerprint'] = {'breadth': {'families': {
-            family: 1 / len(families) for family in families}, 'breadth': 1},
-            'eras': [], 'transient': {}}
-        library.rec_proposals.put_proposals('home_tuned', prepared_home, 1000)
-        # The asserted mix dashboard belongs to an established listener. A complete
-        # menu alone does not bypass the fresh-account journey's preceding stops.
+        # The asserted mix dashboard belongs to an established listener.
         returning_listener(library, 'mixes', now=1000)
         app = create_app(library, lambda: {}, now_fn=lambda: 1000, background_work=False)
         entered, release = threading.Event(), threading.Event()
-        before = list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key')))
+        before = recommendation_impressions.counts(library.conn, recommendation_impressions.CARD)
         assert not library.activity_paused
         acquire = library._lock.acquire
 
         def foreground_acquire(blocking=True, timeout=-1):
             if entered.is_set() and not release.is_set() and not library._lock.held_by_current_thread:
-                assert not blocking, 'Home tried to wait for the held schema writer'
+                assert not blocking, 'Home tried to wait for the held cleanup writer'
             return acquire(blocking=blocking, timeout=timeout)
 
         monkeypatch.setattr(library._lock, 'acquire', foreground_acquire)
@@ -283,40 +273,40 @@ def test_home_onboarding_and_growth_do_not_wait_for_a_schema_writer(inventory_se
 
         with TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True}) as client:
             with ThreadPoolExecutor(2) as executor:
-                app.state.ctx.storage_maintenance.phase = 'schema'
+                library._recommendation_retirement_pending = True
                 writer = executor.submit(hold_writer)
-                response = None
                 try:
                     assert entered.wait(2)
-                    response = executor.submit(client.get, '/')
                     # The lock hook rejects every blocking serving-lock acquisition.
                     # Allow cold template compilation within the first-page deadline.
+                    response = executor.submit(client.get, '/')
                     home = response.result(timeout=5)
-                    assert home.status_code == 200 and 'A comfort mix for you' in home.text
-                    assert_maintenance_banner(home)
-                    assert 'id="growth-title"' in home.text
+                    assert_live_mixes(home)
+                    assert_maintenance_banner(home, visible=True)
+                    response = executor.submit(client.get, '/?panel=unlocks&fragment=true')
+                    unlocks = response.result(timeout=5)
+                    assert unlocks.status_code == 200
+                    assert 'id="growth-title"' in unlocks.text
+                    assert 'data-landmark="first"' in unlocks.text
                     assert not writer.done()
                 finally:
                     release.set()
                     writer.result(timeout=5)
-                    if response is not None:
-                        response.result(timeout=5)
-                    app.state.ctx.storage_maintenance.phase = 'done'
-            assert list(map(tuple, library.conn.execute('SELECT * FROM rec_impressions ORDER BY surface,item_key'))) == before
+                    library._recommendation_retirement_pending = False
+            assert recommendation_impressions.counts(library.conn, recommendation_impressions.CARD) == before
             assert library.conn.execute('PRAGMA busy_timeout').fetchone()[0] == 5000
             assert not library.activity_paused
             # The same running app resumes ordinary visits after admission is free.
             old_views = library.rec_ledger.card_views('comfort')
             assert client.get('/').status_code == 200
             assert library.rec_ledger.card_views('comfort') == old_views + 1
-            assert library.rec_proposals.get_proposals('home_choice')['experiments']
 
 
 @pytest.mark.parametrize('endpoint', ['home', 'playlists', 'status', 'settings', 'assembly', 'radio', 'retry'])
 def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
         inventory_serving_input, tmp_path, monkeypatch, endpoint):
     with inventory_serving_input.open(tmp_path / 'inventory.db') as library:
-        oid, surface = pending_inventory(library, 'inventory-home')
+        oid, owner = pending_inventory(library, 'inventory-home')
         path = library.rec_ledger.evidence()._path('opportunity', oid)
         original = path.read_bytes()
         entered, release = threading.Event(), threading.Event()
@@ -346,7 +336,7 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
                     started = time.monotonic()
                     if endpoint == 'home':
                         response = client.get('/')
-                        assert response.status_code == 200 and 'A comfort mix for you' in response.text
+                        assert_live_mixes(response)
                         assert_maintenance_banner(response)
                     elif endpoint == 'playlists':
                         response = client.get('/playlists')
@@ -361,8 +351,10 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
                         assert response.status_code == 204
                         assert library.settings.get_setting('lastfm_api_key') == 'during-inventory'
                     elif endpoint == 'assembly':
-                        stored_home.unmodeled_cards(library, 1000, card_builder=home_cards._carded)
-                        stored_home.assemble(library, 1000, 0)
+                        with library.read_view() as reader:
+                            result = service(reader).cards(home_cards.CardsRequest(1000, record=False))
+                        assert {proto['lane'] for proto in result.protos if proto['tracks']} == {
+                            'comfort', 'wheelhouse', 'explore', 'fresh'}
                     elif endpoint == 'radio':
                         radio = PreparedRadio(library, 1000)
                         try:
@@ -378,7 +370,7 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
                         assert choice_evidence.maintain_storage(library, 1000) == {'deferred': True}
                     assert time.monotonic() - started < 2
                     assert not future.done() and not release.is_set()
-                    assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 0
+                    assert number(library.conn, ROOTS) == 0
                 finally:
                     release.set()
                 result = future.result(5)
@@ -388,13 +380,10 @@ def test_inventory_preparation_keeps_each_foreground_consumer_responsive(
                     break
                 result = choice_evidence.maintain_storage(library, 1000)
             assert not result.get('deferred')
-            assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='offer' AND external_key=?",
+            assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='offer' AND external_key=?",
                                             (oid,)).fetchone()
-            owner = comparison_owner(library, surface)
-            assert [row[0] for row in library.conn.execute(
-                "SELECT external_version FROM group_evidence_versions WHERE kind='comparison' AND external_key=? ORDER BY external_version",
-                (owner,))] == ['first-leaf', 'first-parent']
-            assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0] == 1
+            assert_prepared_roots(library, owner)
+            assert number(library.conn, ROOTS) == 1
             assert path.read_bytes() == original and not library.activity_paused
             assert not library.conn.execute('PRAGMA foreign_key_check').fetchone()
         finally:

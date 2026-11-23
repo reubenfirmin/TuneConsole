@@ -30,18 +30,17 @@ def api_key(store=None, config_path=None):
     return resolve(env_name='DEEPSEEK_API_KEY', setting_name='deepseek_api_key', store=store, config_path=config_path)
 
 
-def settings(store, now, *, paid=None):
-    return _access(store, paid=paid).settings(now)
+def settings(store, now):
+    return description_access(store).settings(now)
 
 
-def availability(store, key, now, *, paid=None):
-    return _access(store, paid=paid).availability(key, now)
+def availability(store, key, now):
+    return description_access(store).availability(key, now)
 
 
-def _access(store, *, paid=None):
-    return DescriptionAccess(store.settings, store.album_descriptions, store.rec_proposals,
+def description_access(store):
+    return DescriptionAccess(store.settings, store.album_descriptions,
         AccessConfiguration(store.settings), _iao,
-        paid=getattr(store, '_paid_descriptions', False) if paid is None else paid,
         key_source=lambda: api_key(store))
 
 

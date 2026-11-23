@@ -86,6 +86,10 @@ function genreLookupStatus(event) {
   return 'Looking up genres…';
 }
 
+function metadataValues(track) {
+  return { title: track.title, artist: track.artist ?? '', genre: track.genre ?? '', year: String(track.year ?? '') };
+}
+
 function songActions() {
   // Keep DOM nodes and the originating Alpine scope outside reactive data.
   let trigger = null, owner = null, request = 0, lookupStream = null, maintenanceObserver = null;
@@ -111,17 +115,18 @@ function songActions() {
   return {
     song: {}, context: {}, mode: 'create', name: '', query: '', selected: '',
     playlists: [], multipleIdentities: false, loading: false, busy: false, error: '', result: null,
-    artworkFailed: false, readOnly: document.documentElement.dataset.storageCompacting === 'true',
+    artworkFailed: false, readOnly: document.documentElement.dataset.libraryWritesPaused === 'true',
     metadata: { title: '', artist: '', genre: '', year: '' }, initialMetadata: {}, originals: {},
-    metadataLoaded: false, metadataPending: false, trackId: null, genreOptions: [], genres: [],
+    metadataLoaded: false, metadataPending: false, metadataNeedsCheck: false,
+    trackId: null, genreOptions: [], genres: [],
     lookupRunning: false, lookupStatus: '',
     reasons: [['vibe', 'Wrong vibe'], ['era', 'Wrong era'], ['mainstream', 'Too mainstream'],
               ['own_it', 'Already know it'], ['artist', 'Not this artist']],
     init() {
       maintenanceObserver = new MutationObserver(() => {
-        this.readOnly = document.documentElement.dataset.storageCompacting === 'true';
+        this.readOnly = document.documentElement.dataset.libraryWritesPaused === 'true';
       });
-      maintenanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-storage-compacting'] });
+      maintenanceObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-library-writes-paused'] });
     },
     show(detail) {
       if (this.$refs.dialog.open) return;
@@ -213,15 +218,16 @@ function songActions() {
       this.busy = false;
     },
     async openDialog(mode) {
-      if (document.documentElement.dataset.storageCompacting === 'true') return;
+      if (document.documentElement.dataset.libraryWritesPaused === 'true') return;
       stopLookup();
       this.closeMenu();
       this.mode = mode;
       this.name = this.song.title;
       this.query = ''; this.selected = ''; this.playlists = [];
       this.error = ''; this.result = null; this.busy = false;
-      this.metadata = { title: this.song.title, artist: this.song.artist || '', genre: '', year: '' };
+      this.metadata = metadataValues(this.song);
       this.originals = {}; this.metadataLoaded = false; this.trackId = null;
+      this.metadataNeedsCheck = false;
       this.genreOptions = []; this.genres = []; this.lookupStatus = ''; this.lookupRunning = false;
       this.loading = mode !== 'create';
       const current = ++request;
@@ -230,29 +236,14 @@ function songActions() {
       this.focusDialog(focus);
       if (mode === 'create') return;
       try {
+        const videoId = this.song.video_id;
         // Reopening the same song waits for its pending write before reading defaults.
-        if (mode === 'metadata') await metadataSaves.get(this.song.video_id);
-        if (current !== request) return;
-        if (mode === 'metadata' && metadataEdits.has(this.song.video_id)) {
-          Object.assign(this, metadataEdits.get(this.song.video_id).fields, {
-            metadataLoaded: true, error: 'This edit was not confirmed. Review your changes before saving again.'
-          });
-          return;
-        }
-        const data = await this.json('/songs/' + (mode === 'metadata' ? 'metadata' : 'playlists') +
-          '?video_id=' + encodeURIComponent(this.song.video_id));
-        if (current !== request) return;
         if (mode === 'metadata') {
-          if (data.metadata) {
-            const { title, artist, genre, year, orig_title, orig_artist, track_id } = data.metadata;
-            this.metadata = { title, artist: artist || '', genre, year: String(year) };
-            this.originals = { title: orig_title, artist: orig_artist };
-            this.trackId = track_id;
-          }
-          this.initialMetadata = { ...this.metadata };
-          this.genreOptions = data.genre_options; this.genres = data.genres;
-          this.metadataLoaded = true;
+          await metadataSaves.get(videoId);
+          if (current === request) await this.readMetadata(videoId, current, metadataEdits.get(videoId));
         } else {
+          const data = await this.json('/songs/playlists?video_id=' + encodeURIComponent(videoId));
+          if (current !== request) return;
           this.playlists = data.playlists;
           this.multipleIdentities = data.multiple_identities;
         }
@@ -264,6 +255,54 @@ function songActions() {
           this.focusDialog(focus);
         }
       }
+    },
+    async readMetadata(videoId, current, edit, { acknowledged = false, closeOnMatch = false } = {}) {
+      const query = new URLSearchParams({video_id: videoId});
+      if (!acknowledged && edit?.changes.genre !== undefined) query.set('proposed_genre', edit.changes.genre);
+      let data;
+      try {
+        data = await this.json('/songs/metadata?' + query);
+      } catch (error) {
+        if (!edit) throw error;
+      }
+      if (!closeOnMatch && current !== request) return;
+      const track = data?.metadata;
+      const values = metadataValues(track ?? (edit?.song ?? this.song));
+      const pending = Object.fromEntries(Object.entries(edit?.changes ?? {}).filter(([field, value]) =>
+        !track || (field === 'genre' ? !data.genre_matches : values[field] !== value)));
+      const confirmed = edit && track && (acknowledged || !Object.keys(pending).length);
+      if (edit) {
+        if (confirmed) metadataEdits.delete(videoId);
+        else metadataEdits.set(videoId, edit);
+        if (this.song.video_id === videoId) this.metadataPending = !confirmed;
+        markMetadataEdit(videoId, !confirmed);
+        if (track) applySongMetadata(videoId, { ...track, ...values });
+      }
+      if (current !== request) return;
+      if (confirmed && closeOnMatch) {
+        this.closeDialog();
+        return;
+      }
+      this.metadataLoaded = true;
+      this.metadataNeedsCheck = !data;
+      if (data) {
+        this.initialMetadata = values;
+        this.metadata = { ...values, ...(confirmed ? {} : pending) };
+        this.originals = { title: track?.orig_title, artist: track?.orig_artist };
+        this.trackId = track?.track_id;
+        this.genreOptions = data.genre_options; this.genres = data.genres;
+        this.error = edit && !confirmed ? 'This edit was not confirmed. Review your changes before saving again.' : '';
+      } else {
+        this.metadata = { ...edit.draft };
+        this.error = 'Check the saved values before saving again. Your changes are kept.';
+      }
+    },
+    get metadataSavedValues() {
+      if (!this.metadataPending || this.metadataNeedsCheck || this.mode !== 'metadata' || this.loading || this.busy) return '';
+      const differing = Object.entries(this.initialMetadata)
+        .filter(([field, value]) => this.metadata[field] !== value)
+        .map(([field, value]) => `${field} ${value ? `“${value}”` : '(blank)'}`);
+      return differing.length ? 'Currently saved ' + differing.join(', ') + '.' : '';
     },
     async lookupGenres() {
       if (this.lookupRunning || !this.trackId) return;
@@ -396,37 +435,30 @@ function songActions() {
     },
     saveMetadata() {
       if (!this.metadataLoaded || this.busy || metadataSaves.has(this.song.video_id)) return;
-      const edit = { fields: {
-        song: { ...this.song }, context: { ...this.context }, metadata: { ...this.metadata },
-        initialMetadata: { ...this.initialMetadata }, originals: { ...this.originals },
-        trackId: this.trackId, genreOptions: [...this.genreOptions], genres: [...this.genres]
-      }};
-      const changes = Object.fromEntries(Object.entries(edit.fields.metadata)
-        .filter(([field, value]) => value !== edit.fields.initialMetadata[field]));
-      const videoId = edit.fields.song.video_id;
+      const { video_id: videoId } = this.song;
+      const checkOnly = this.metadataNeedsCheck;
+      const draft = { ...this.metadata };
+      const changes = Object.fromEntries(Object.entries(draft)
+        .filter(([field, value]) => value !== this.initialMetadata[field])
+        .map(([field, value]) => [field, value.trim()])
+        .filter(([field, value]) => value !== this.initialMetadata[field]));
+      const edit = checkOnly ? metadataEdits.get(videoId) : { song: { ...this.song }, draft, changes };
+      if (!checkOnly && !Object.keys(changes).length) {
+        metadataEdits.delete(videoId);
+        this.metadataPending = false;
+        markMetadataEdit(videoId, false);
+        this.closeDialog();
+        return;
+      }
       const current = ++request;
       stopLookup();
       this.lookupRunning = false;
       this.busy = true; this.error = '';
       const save = async () => {
         try {
-          await this.json('/songs/metadata', { song: edit.fields.song, ...changes });
-          const data = await this.json('/songs/metadata?video_id=' + encodeURIComponent(videoId));
-          if (!data.metadata) throw new Error('Saved metadata could not be read');
-          metadataEdits.delete(videoId);
-          if (this.song.video_id === videoId) this.metadataPending = false;
-          markMetadataEdit(videoId, false);
-          if (current === request) this.closeDialog();
-          applySongMetadata(videoId, data.metadata);
-        } catch (error) {
-          // Keep this song's edits without taking over another song's form.
-          // Its existing Edit Metadata control restores the draft on demand.
-          console.debug('[Song actions] Metadata save unconfirmed', videoId, error);
-          metadataEdits.set(videoId, edit);
-          if (this.song.video_id === videoId) this.metadataPending = true;
-          markMetadataEdit(videoId, true);
-          if (current === request)
-            this.error = 'This edit was not confirmed. Review your changes before saving again.';
+          const acknowledged = !checkOnly && await this.json('/songs/metadata', { song: edit.song, ...edit.changes })
+            .then(() => true, () => false);
+          await this.readMetadata(videoId, current, edit, { acknowledged, closeOnMatch: true });
         } finally {
           metadataSaves.delete(videoId);
           if (current === request) this.busy = false;

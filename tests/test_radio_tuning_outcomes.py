@@ -62,6 +62,47 @@ def test_energy_admission_has_an_explicit_receipt_without_the_full_journey(poc, 
     assert (remote.ids, remote.adds, remote.removes, frames) == before
 
 
+@pytest.mark.parametrize('changed', [
+    ('comfort',), ('theme',), ('energy',), ('comfort', 'theme'), ('comfort', 'energy'),
+    ('theme', 'energy'), ('comfort', 'theme', 'energy'),
+])
+def test_tuning_publishes_one_song_per_stream_then_extends_the_same_menu(poc, changed):
+    c, remote, frames, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
+    edited = {'comfort': .1, 'theme': .9, 'energy': .2}
+    values = {axis: value if axis in changed else .5 for axis, value in edited.items()}
+    first = c.tune(values)
+    assert first['ok'] and first['tuning_confirmed']
+    branches = first['directions']
+    assert len(branches) == 4
+    assert all(branch['filling'] and len(branch['tracks']) == 1 for branch in branches)
+    assert len({branch['tracks'][0]['video_id'] for branch in branches}) == 4
+    assert c.persistence.load()['directions']['filling']
+
+    with c.operation:
+        c.listening.fill_tuned_streams(c.session, cancelled=lambda: False)
+    full = c.status()
+    assert full['menu_id'] == first['menu_id']
+    for head, filled in zip(branches, full['directions'], strict=True):
+        assert filled['id'] == head['id'] and filled['tracks'][:1] == head['tracks']
+        assert not filled['filling'] and len(filled['tracks']) == 6
+    assert (remote.ids, remote.adds, remote.removes, frames) == before
+
+
+def test_tuning_first_song_is_selectable_while_the_stream_fills(poc):
+    c, *_ = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    first = c.tune({'comfort': .1, 'theme': .5, 'energy': .5})
+    branch = next(branch for branch in first['directions'] if not branch['active'])
+    assert branch['filling']
+    video = branch['tracks'][0]['video_id']
+    assert c.select(branch['id'], first['menu_id'], video_id=video)['ok']
+    assert c.session.requested_direction['play']['video_id'] == video
+
+
 def test_a_newer_tuning_request_supersedes_a_late_plan(poc, monkeypatch):
     c, remote, frames, *_ = poc
     assert c.start()['ok']

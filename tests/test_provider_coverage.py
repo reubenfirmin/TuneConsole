@@ -21,7 +21,7 @@ class Provider:
     def probe(self, track, store):
         self.calls.append(track["id"])
         return EnrichmentResult(self.name, {"genre": "house", "year": "2024", "bpm": 120,
-                                          "energy": .8, "danceability": .7})
+                                          "danceability": .7})
 
 
 def config(store, enabled):
@@ -65,9 +65,11 @@ def test_reenrichment_keeps_genre_until_later_provider_replacement(store):
     tid = store.tracks.upsert_track('song', 'Song', 'Artist', None, 200)
     order = ['musicbrainz', 'discogs']
     store.enrichment.apply_provider_fields(tid, 'musicbrainz', {'genre': 'Rock'}, providers=order)
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (tid,)).fetchone()[0]
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (tid,)).fetchone()[0]
     with store.conn:
-        store.conn.executemany('INSERT INTO enrichment_provider_jobs VALUES (?,?)',
+        store.conn.executemany('INSERT INTO enrichment_provider_state '
+                               "(recording_id,provider,cycle,at,status,failures,retry_at,error,queued) "
+                               "VALUES (?,?,-1,0,'queued',0,0,'',1)",
                                [(recording, name) for name in order])
     store.enrichment_state.record_enrichment_attempt('song|artist', 'musicbrainz', {}, providers=order)
     assert store.tracks.get_track_enrichment(tid)[0] == 'Rock'
@@ -172,13 +174,14 @@ def test_provider_refresh_retains_durable_evidence_and_newer_state(store, newer_
             retry=newer_status == 'retry', run_id='a-new')
         if newer_status == 'retry':
             repo.defer_integration('a', now=20, retry_after=50, error='new outage')
-    protected = ('metadata_deliveries', 'metadata_observations', 'metadata_choice_heads',
-                 'recording_metadata_selections', 'entry_metadata_selections', 'metadata_conflicts',
-                 'metadata_conflict_candidates', 'provider_attempts', 'provider_attempt_fields')
+    protected = ('metadata_deliveries', 'metadata_observations',
+                 'current_metadata_selections', 'metadata_conflicts',
+                 'provider_attempts')
 
     def retained():
-        return {table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')))
-                for table in protected}
+        return {**{table: list(map(tuple, store.conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')))
+                   for table in protected},
+                'choices': list(map(tuple, store.conn.execute('SELECT id,choice_observations FROM track_sources ORDER BY id')))}
 
     before = retained()
     states = repo.enrichment_provider_state(recording, include_previous=True)
@@ -195,7 +198,7 @@ def test_provider_refresh_retains_durable_evidence_and_newer_state(store, newer_
     else:
         assert after['a'] == states['a']
     assert repo.enrichment_cooldowns() == cooldowns
-    queued = store.conn.execute('SELECT provider FROM enrichment_provider_jobs WHERE recording_id=?',
+    queued = store.conn.execute('SELECT provider FROM enrichment_provider_state WHERE recording_id=? AND queued=1',
                                  (recording,)).fetchall()
     assert [row[0] for row in queued] == ([] if newer_status == 'found' else ['a'])
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -221,8 +224,8 @@ def test_provider_refresh_rolls_back_operational_fields_state_jobs_and_frontier_
     with store.conn:
         store.conn.execute('DROP TRIGGER interrupt_refresh')
     assert repo._advance_provider_refresh('a', current)
-    assert not store.conn.execute('SELECT 1 FROM provider_state_fields').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM enrichment_provider_state').fetchone()
+    assert not store.conn.execute("SELECT 1 FROM enrichment_provider_state WHERE field_links<>'{}'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM enrichment_provider_state WHERE status<>'queued'").fetchone()
 
 
 def test_provider_settings_routes_wake_owned_worker(store):

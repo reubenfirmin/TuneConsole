@@ -143,11 +143,8 @@ function sampleMetadata(value, {run, point, duration, reason = 'scheduled'}) {
     analysis_location: value.analysis_location, audio_transferred_to_app: value.audio_transferred_to_app,
     analysed_seconds: prediction.analysed_seconds, tags: prediction.scores,
     audio_attributes: value.audio_attributes || null,
-    ...(prediction.embedding ? {embedding: prediction.embedding} : {}),
-    traits: Object.fromEntries(Object.entries(prediction.moods.traits).map(([key, trait]) =>
-      [key, {score: trait.score, per_patch: trait.per_patch}])),
+    embedding: prediction.embedding,
     model: prediction.model, model_version: prediction.model_version,
-    mood_versions: Object.fromEntries(Object.entries(prediction.moods.models).map(([key, model]) => [key, model.version])),
     artifact_hashes: Object.fromEntries((prediction.bundle.files || []).map(file => [file.path, file.sha256]))};
 }
 

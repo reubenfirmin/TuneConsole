@@ -6,7 +6,7 @@ retain their exact-video rating while the recommendation worker resolves metadat
 (skip vs completion, sessions, curation signals) happens later, at read time, so thresholds stay
 server-tunable without extension releases."""
 import json
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 
 PLAYBACK_KINDS = {"track_exit", "ended", "state", "tick", "volume", "bye", "next"}
@@ -34,6 +34,22 @@ def _extract_action_from_url(url):
         return url.rstrip("/").rsplit("/", 1)[-1]
 
 
+def _watch_playlist(href, video):
+    if not video or not isinstance(href, str):
+        return None
+    try:
+        watch = urlsplit(href)
+    except ValueError:
+        return None
+    if (watch.scheme, watch.netloc, watch.path) != ('https', 'music.youtube.com', '/watch'):
+        return None
+    query = parse_qs(watch.query, keep_blank_values=True)
+    playlists = query.get('list', [])
+    if query.get('v') == [video] and len(playlists) == 1:
+        return playlists[0] or None
+    return None
+
+
 def _curation_fields(kind, msg):
     """Best-effort (video_id, playlist_ytm_id, action) from an observed request. Unknown shapes
     yield Nones; the raw url/body/href payload is kept regardless, so nothing is lost."""
@@ -45,9 +61,13 @@ def _curation_fields(kind, msg):
     if not isinstance(data, dict):
         data = {}
     if kind == "rate":
-        target = data.get("target") or {}
+        target = data.get("target")
+        if not isinstance(target, dict):
+            target = {}
+        video = target.get("videoId")
+        playlist = target.get("playlistId") or _watch_playlist(msg.get("href"), video)
         action = _extract_action_from_url(url)
-        return target.get("videoId"), target.get("playlistId"), action
+        return video, playlist, action
     if kind == "playlist_edit":
         vids = [a.get("addedVideoId") or a.get("removedVideoId")
                 for a in (data.get("actions") or []) if isinstance(a, dict)]

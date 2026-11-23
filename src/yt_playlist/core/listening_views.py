@@ -78,6 +78,76 @@ def definitions(relation, *, staged=False):
         SELECT DISTINCT {group}account_id,identity_key,day FROM {eligible}) GROUP BY {group}identity_key'''
 
 
+def _same_subject(candidate, anchor):
+    return f'''({candidate}.recording_id=coalesce({anchor}.recording_id,
+        (SELECT id FROM recordings WHERE identity_key={anchor}.identity_key))
+        OR ({candidate}.recording_id IS NULL AND {candidate}.unresolved_subject_key={anchor}.identity_key))'''
+
+
+def inline_event_definitions():
+    """Use the event's date and sources directly when checking listening evidence."""
+    observations = '''SELECT CASE WHEN o.capture_item_id IS NOT NULL THEN 'capture:'||o.capture_item_id
+        ELSE 'day:'||o.id END evidence_id,o.account_id,o.identity_key,o.recording_id,o.day,o.source,o.timezone,
+        o.precision,o.last_observed_at observed_at,NULL event_id,0 is_generated
+        FROM listening_observation_subjects o WHERE o.day IS NOT NULL'''
+    events = '''SELECT 'event:'||pe.id||':'||s.value,pe.account_id,pe.identity_key,pe.recording_id,pe.day,
+        s.value,a.listening_timezone,'exact_timestamp',pe.played_at,pe.id,coalesce(pe.is_generated,0)
+        FROM play_event_subjects pe JOIN accounts a ON a.id=pe.account_id
+        CROSS JOIN json_each(pe.sources) s WHERE pe.day IS NOT NULL'''
+    same_day = ('SELECT 1 FROM play_events p WHERE p.account_id=o.account_id AND p.day=o.day '
+                f'AND {_same_subject("p", "o")} AND json_array_length(p.sources)>0')
+    yield 'listening_evidence', observations+' UNION ALL '+events
+    yield 'eligible_listening_evidence', observations+f''' AND (
+        o.source<>'ytm_history'
+        OR NOT EXISTS ({same_day} AND p.is_generated=1)
+        OR EXISTS ({same_day} AND coalesce(p.is_generated,0)=0)
+        OR EXISTS (SELECT 1 FROM listening_observations i WHERE i.account_id=o.account_id
+            AND i.day=o.day AND i.source<>'ytm_history' AND {_same_subject("i", "o")}))
+        UNION ALL {events} AND coalesce(pe.is_generated,0)=0'''
+    yield 'listening_activity', f'''SELECT pe.account_id,pe.identity_key,pe.recording_id,pe.day,pe.played_at at,
+        'exact_timestamp' precision,pe.id event_id
+        FROM play_event_subjects pe WHERE pe.day IS NOT NULL AND coalesce(pe.is_generated,0)=0
+        UNION ALL SELECT d.account_id,d.identity_key,d.recording_id,d.day,d.day_ts,
+        CASE WHEN EXISTS (SELECT 1 FROM eligible_listening_evidence e
+            WHERE e.account_id=d.account_id AND e.identity_key=d.identity_key AND e.day=d.day
+            AND e.precision='calendar_day') THEN 'calendar_day' ELSE 'legacy_unknown' END,NULL
+        FROM listening_days d WHERE NOT EXISTS (
+            SELECT 1 FROM play_events p WHERE p.account_id=d.account_id AND p.day=d.day
+            AND coalesce(p.is_generated,0)=0 AND {_same_subject("p", "d")})'''
+
+
+def recording_membership_evidence():
+    """Probe listening for the recording r without visiting unrelated subjects."""
+    # A resolved organic play qualifies on its own, as does a resolved
+    # independent observation. Only their unresolved counterparts need a
+    # separate check to make a shadowed observation eligible.
+    return '''
+        SELECT 1 FROM play_events p INDEXED BY ix_play_event_recording_time
+        WHERE p.recording_id=r.id AND p.day IS NOT NULL AND coalesce(p.is_generated,0)=0
+          AND json_array_length(p.sources)>0
+        UNION ALL
+        SELECT 1 FROM listening_observations o INDEXED BY ix_listening_observation_recording_day
+        WHERE o.recording_id=r.id AND o.day IS NOT NULL AND (
+          o.source<>'ytm_history' OR NOT EXISTS (
+            SELECT 1 FROM play_events p INDEXED BY ix_play_event_account_subject_time
+            WHERE p.account_id=o.account_id AND p.recording_id=r.id AND p.day=o.day
+              AND p.is_generated=1 AND json_array_length(p.sources)>0
+            UNION ALL
+            SELECT 1 FROM play_events p INDEXED BY ix_play_event_account_unresolved_time
+            WHERE p.account_id=o.account_id AND p.unresolved_subject_key=r.identity_key
+              AND p.recording_id IS NULL AND p.day=o.day AND p.is_generated=1 AND json_array_length(p.sources)>0
+          ) OR EXISTS (
+            SELECT 1 FROM play_events p INDEXED BY ix_play_event_account_unresolved_time
+            WHERE p.account_id=o.account_id AND p.unresolved_subject_key=r.identity_key
+              AND p.recording_id IS NULL AND p.day=o.day AND coalesce(p.is_generated,0)=0
+              AND json_array_length(p.sources)>0
+          ) OR EXISTS (
+            SELECT 1 FROM listening_observations i INDEXED BY ix_listening_observation_unresolved_day
+            WHERE i.recording_id IS NULL AND i.unresolved_subject_key=r.identity_key
+              AND i.day=o.day AND i.account_id=o.account_id AND i.source<>'ytm_history'
+          ))'''
+
+
 def first_play(relation):
     recordings, artists, activity = (relation(name) for name in
         ('recording_listening_summary', 'artist_listening_summary', 'listening_activity'))

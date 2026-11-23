@@ -20,6 +20,9 @@ from yt_playlist.core.policy_config import PolicyCapacityFull
 from yt_playlist.rec.worker_queue import Job, PendingJobs
 from yt_playlist.rec.worker_tasks import ServingTasks
 
+STORY_CHECK_INTERVAL_S = 30
+
+
 class RecWorker:
     def __init__(self, ctx, debounce_s=2.0, discovery_tick_s=1800, gc_tick_s=86400, gc_initial_s=60,
                  *, enabled=True):
@@ -40,6 +43,9 @@ class RecWorker:
         self.enabled = enabled
         self._stop = threading.Event()
         self._threads = []
+        self._mix_listening_check = 0.
+        self._mix_selection_prepared_for = None
+        self._story_check = float("-inf")
         self.work = activity_for(ctx)
         limit_native_threads()
         model_selection.recover_interrupted(ctx.store)
@@ -55,9 +61,8 @@ class RecWorker:
         from yt_playlist.rec.model_refresh import FitCache
         self._fit_cache = FitCache()
         if self.enabled:
-            from yt_playlist.rec import choice_evidence
             with ctx.store._lock:
-                pending = ctx.store.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+                pending = ctx.store.evidence_files.maintenance_state()['pending']
                 ctx.store._evidence_recovery_pending = bool(pending)
             ctx.store.background_measurement = self.enqueue_measurement
             from yt_playlist.rec.choice_capture import CaptureQueue
@@ -88,6 +93,8 @@ class RecWorker:
                 from yt_playlist.core import playback_feedback
                 if playback_feedback.try_drain(self.ctx.store):
                     self.trigger_rating_update()
+                self._poll_mix_selection()
+                self._poll_mix_listening()
                 self._retry_home()
                 self._retry_bundles()
                 self.projections.poll()
@@ -95,6 +102,7 @@ class RecWorker:
                 self._poll_choices()
                 self._retry_measurements()
                 self._poll_tv()
+                self._poll_stories()
             except WorkClosing:
                 # Idle and cancelled restart admission can reopen while this
                 # rejection unwinds. Keep the periodic worker alive to resume.
@@ -122,6 +130,30 @@ class RecWorker:
             with cancellable_work(self._stop.is_set):
                 return album_feedback.try_drain(self.ctx.store)
         return self.work.wrap('album feedback responses', drain)()
+
+    def _poll_mix_listening(self):
+        from yt_playlist.library import mix_listening
+
+        if not self._accepting() or time.monotonic() < self._mix_listening_check:
+            return
+        self._mix_listening_check = time.monotonic() + max(0.5, self.debounce_s)
+
+        def refresh():
+            with cancellable_work(self._stop.is_set):
+                return mix_listening.prepare(self.ctx.store, self.ctx.now_fn())
+
+        return self.work.wrap(mix_listening.PHASE, refresh)()
+
+    def _poll_mix_selection(self):
+        from yt_playlist.core import recording_selection
+
+        store = self.ctx.store
+        connection = store.conn
+        if connection is self._mix_selection_prepared_for or not self._accepting():
+            return
+        with cancellable_work(self._stop.is_set):
+            if self.work.wrap('recording mix selection backfill', recording_selection.prepare, store)():
+                self._mix_selection_prepared_for = connection
 
     def _poll_refresh(self):
         from yt_playlist.library.worker_composition import maintenance_commands
@@ -313,7 +345,7 @@ class RecWorker:
     def enqueue_measurement(self, offer):
         """Use this worker for analytics too; requests only pin and enqueue their offered state."""
         with self._lock:
-            if (self._stop.is_set() or not self.work.accepting or not self._storage_ready()
+            if (self._stop.is_set() or not self.work.accepting
                     or getattr(self.ctx.store, 'activity_paused', False)):
                 return False
             if not self.jobs.merge(Job.MEASUREMENT, offer):
@@ -410,14 +442,11 @@ class RecWorker:
 
         Automatic preparation shares a thirty-second backoff, including bundle
         publications during catch-up. The maintenance ticker retries dirty work
-        even when no Home request arrives. Explicit completed pool jobs may force
-        a refresh so their user-requested result becomes available immediately.
+        even when no Home request arrives. Forced refreshes skip the backoff.
         """
         with self._lock:
             state = self.jobs.retry[Job.HOME]
             state.dirty = True
-            if force:
-                self.tasks.request_home_refresh()
         if force or time.monotonic() - state.attempted_at >= 30:
             self._schedule(full=False, home=True)
 
@@ -447,8 +476,18 @@ class RecWorker:
 
     def trigger_story_refresh(self):
         """A cold reading tab queues article preparation, never a synchronous provider lookup."""
-        if time.monotonic() - self.jobs.retry[Job.STORIES].attempted_at >= 30:
-            self._schedule(full=False, stories=True)
+        if time.monotonic() - self.jobs.retry[Job.STORIES].attempted_at >= STORY_CHECK_INTERVAL_S:
+            return self._schedule(full=False, stories=True)
+
+    def _poll_stories(self):
+        now = time.monotonic()
+        if not self._accepting() or now < self._story_check or self.busy:
+            return
+        if now - self.jobs.retry[Job.STORIES].attempted_at < STORY_CHECK_INTERVAL_S:
+            return
+        self._story_check = now + STORY_CHECK_INTERVAL_S
+        if self.tasks.stories_due():
+            self.trigger_story_refresh()
 
     def trigger_trends_refresh(self):
         """Queue the monthly recap through its coalescing summary owner."""
@@ -459,13 +498,9 @@ class RecWorker:
         if artist_ids:
             self._schedule(full=False, artist_images=artist_ids)
 
-    def _storage_ready(self):
-        maintenance = getattr(self.ctx, 'storage_maintenance', None)
-        return maintenance is None or maintenance.ready.is_set()
-
     def _accepting(self):
         return (self.enabled and not self._stop.is_set() and self.work.accepting
-                and self._storage_ready() and not getattr(self.ctx.store, 'activity_paused', False))
+                and not getattr(self.ctx.store, 'activity_paused', False))
 
     def _schedule_projections(self, kinds):
         return self._schedule(full=False, **dict.fromkeys(kinds, True))
@@ -493,20 +528,20 @@ class RecWorker:
 
     def _schedule(self, *, full, modes=False, keys=(), ratings=False, trends=False, cleanup=False, bundles=False, home=False,
                   stories=False, artist_images=(), prepare=False, choices=False, analytics=False, groups=False, tv=False,
-                  model_health=False, evidence_storage=False, retention=False):
+                  model_health=False, library_taste=False, evidence_storage=False, retention=False):
         with self._lock:
             if getattr(self.ctx.store, '_recommendation_retirement_pending', False):
                 if not retention or time.monotonic() < self.jobs.retry[Job.RETENTION].retry_at:
                     return False
             recovery = ((evidence_storage or retention) and self.enabled and not self._stop.is_set()
-                        and self.work.accepting and self._storage_ready()
+                        and self.work.accepting
                         and not getattr(self.ctx.store, '_activity_paused', False))
             if not self._accepting() and not recovery:
                 return False
             requested = {Job.FULL: full, Job.MODES: modes, Job.RATINGS: ratings, Job.PREPARE: prepare, Job.TRENDS: trends,
                          Job.CLEANUP: cleanup, Job.BUNDLES: bundles, Job.HOME: home, Job.STORIES: stories,
                          Job.ARTWORK: artist_images, Job.CONTENT: keys, Job.CHOICES: choices, Job.ANALYTICS: analytics,
-                         Job.GROUPS: groups, Job.TV: tv, Job.MODEL_HEALTH: model_health,
+                         Job.GROUPS: groups, Job.TV: tv, Job.MODEL_HEALTH: model_health, Job.LIBRARY_TASTE: library_taste,
                          Job.EVIDENCE_STORAGE: evidence_storage, Job.RETENTION: retention}
             for job, payload in requested.items():
                 if payload:
@@ -645,15 +680,18 @@ class RecWorker:
         state.started(time.monotonic())
 
         with self.model_lock:
+            groups = self.ctx.store.taste_groups
+            previous_head = groups.head_generation()
             outcome = group_commands(self).prepare()
+            groups_changed = groups.head_generation() != previous_head
         if outcome.state == 'deferred':
             state.deferred(time.monotonic())
         elif outcome.state == 'failed':
             state.failed(time.monotonic(), base=60, cap=3600)
         else:
             state.succeeded()
-            if outcome.refresh_home:
-                self._schedule(full=False, home=True)
+        if groups_changed or outcome.refresh_home:
+            self._schedule(full=False, home=True, bundles=groups_changed)
 
     def _do_rebuild(self):
         # Source removal waits for publication, then clears every derived cache

@@ -10,20 +10,19 @@ import json
 import math
 from pathlib import Path
 
-from . import recommendation_outputs as files
+from . import publication_files, recommendation_outputs as files
+from .db_revisions import keyed_reads
 from .activity import check_cancellable_work
 
 SURFACES = ('listening_analytics', 'listening_edition')
 MAX_CHUNKS = 4096
 MAX_PUBLICATION_BYTES = 128 * 1024 * 1024
+CURRENT = publication_files.LISTENING + 'current'
+PREVIOUS = publication_files.LISTENING + 'previous'
 
 
 def owns(surface):
     return surface in SURFACES or surface.startswith('listening_chunk:')
-
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='listening_output_publications'").fetchone() is not None
 
 
 def _finite(value):
@@ -133,47 +132,44 @@ def register(conn, publication, durable, *, keep_previous):
     if not conn.in_transaction:
         raise ValueError('Listening publication requires its SQL transaction')
     # No SQL owner changes until every admitted file is durable.
-    identity = conn.execute('INSERT INTO listening_output_publications(schema_version,generation_key,timezone, built_at,'
-        'input_revision,revision_reason,output_count,chunk_count) VALUES (?,?,?,?,?,?,?,?) RETURNING id',
-        (publication.schema_version, publication.generation, publication.timezone, publication.built_at,
-         publication.input_revision, 'legacy_not_recorded' if publication.input_revision is None else None,
-         len(durable), len(publication.memberships))).fetchone()[0]
-    conn.executemany('INSERT INTO listening_output_files(publication_id,surface,chunk_key,filename,content_digest,byte_size,built_at) '
-                     'VALUES (?,?,?,?,?,?,?)', [(identity, *row) for row in durable])
-    conn.executemany('INSERT INTO listening_output_chunks(publication_id,position,chunk_key,from_day,until_day,encoded_bytes) '
-                     'VALUES (?,?,?,?,?,?)', [(identity, *row) for row in publication.memberships])
-    conn.execute("UPDATE listening_output_publications SET status='published' WHERE id=?", (identity,))
-    current = conn.execute("SELECT publication_id FROM listening_output_heads WHERE slot='current'").fetchone()
-    conn.execute('DELETE FROM listening_output_heads')
-    conn.execute("INSERT INTO listening_output_heads VALUES ('current',?)", (identity,))
-    if current and keep_previous:
-        conn.execute("INSERT INTO listening_output_heads VALUES ('previous',?)", (current[0],))
-    for (retired,) in conn.execute('SELECT id FROM listening_output_publications WHERE id NOT IN '
-                                  '(SELECT publication_id FROM listening_output_heads)').fetchall():
-        conn.execute("UPDATE listening_output_publications SET status='retiring' WHERE id=?", (retired,))
-        conn.execute('DELETE FROM listening_output_chunks WHERE publication_id=?', (retired,))
-        conn.execute('DELETE FROM listening_output_files WHERE publication_id=?', (retired,))
-        conn.execute('DELETE FROM listening_output_publications WHERE id=?', (retired,))
+    indexed = {key: (position, first, last, size) for position, key, first, last, size in publication.memberships}
+    descriptors = [(*row, *indexed.get(row[1], (None, None, None, None))) for row in durable]
+    descriptors.sort(key=lambda row: (row[6] is None, row[6], row[0], row[1]))
+    identity = publication_files.next_identity(conn, publication_files.LISTENING)
+    if keep_previous:
+        publication_files.move_listening(conn, CURRENT, PREVIOUS)
+    else:
+        publication_files.clear(conn, PREVIOUS)
+    publication_files.save(conn, CURRENT, {
+        'id': identity, 'schema_version': publication.schema_version, 'generation_key': publication.generation,
+        'timezone': publication.timezone, 'built_at': publication.built_at, 'input_revision': publication.input_revision,
+        'revision_reason': 'legacy_not_recorded' if publication.input_revision is None else None,
+        'output_count': len(durable), 'chunk_count': len(publication.memberships),
+        'files': json.loads(publication_files.manifest(conn, 'listening_output_files', descriptors)),
+    })
     return identity
+
+
+def reference(conn, surface, key):
+    keys = (CURRENT, PREVIOUS) if key else (CURRENT,)
+    with keyed_reads(conn, publication_files.RECEIPTS, keys):
+        return conn.execute('SELECT f.value->>3,f.value->>4,f.value->>5 '
+            f"FROM {publication_files.MANIFESTS} p,json_each(p.value,'$.files') f "
+            f"WHERE p.key IN ({','.join('?' for _ in keys)}) AND f.value->>1=? AND f.value->>2=? "
+            'ORDER BY p.key LIMIT 1', (*keys, surface, key)).fetchone()
 
 
 def _file(conn, surface):
     if surface in SURFACES:
-        row = conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
-            'JOIN listening_output_files f ON f.publication_id=h.publication_id '
-            "WHERE h.slot='current' AND f.surface=? AND f.chunk_key=''", (surface,)).fetchone()
         key = ''
     elif surface.startswith('listening_chunk:'):
         key = surface.removeprefix('listening_chunk:')
         if not _key(key):
             return None, surface, key
-        row = conn.execute('SELECT f.filename,f.content_digest,f.byte_size FROM listening_output_heads h '
-            'JOIN listening_output_files f ON f.publication_id=h.publication_id '
-            "WHERE f.surface='listening_chunk' AND f.chunk_key=? ORDER BY h.slot LIMIT 1", (key,)).fetchone()
         surface = 'listening_chunk'
     else:
         raise ValueError('Unknown listening output surface')
-    return row, surface, key
+    return reference(conn, surface, key), surface, key
 
 
 def present(conn, surface):
@@ -213,9 +209,5 @@ def publish_document(conn, surface, raw, now):
 def clear(conn):
     if not conn.in_transaction:
         raise ValueError('Listening display invalidation requires the outer transaction')
-    conn.execute('DELETE FROM listening_output_heads')
-    for (identity,) in conn.execute('SELECT id FROM listening_output_publications').fetchall():
-        conn.execute("UPDATE listening_output_publications SET status='retiring' WHERE id=?", (identity,))
-        conn.execute('DELETE FROM listening_output_chunks WHERE publication_id=?', (identity,))
-        conn.execute('DELETE FROM listening_output_files WHERE publication_id=?', (identity,))
-        conn.execute('DELETE FROM listening_output_publications WHERE id=?', (identity,))
+    publication_files.clear(conn, CURRENT)
+    publication_files.clear(conn, PREVIOUS)

@@ -23,6 +23,58 @@ def test_candidate_acquisition_failure_returns_empty_batch(monkeypatch, store, k
     assert batch == candidates.CandidateBatch([], [])
 
 
+def test_road_trip_acquires_each_verified_homonym_by_channel(store):
+    channels = {'UCseed0000': 'Seed', 'UCpeer0000': 'Peer', 'UCpeer1111': 'Peer'}
+    pages = {channel: {'songs': {'results': [{'videoId': 'video-' + channel, 'title': 'Song ' + channel,
+              'artists': [{'name': name}], 'duration_seconds': 240}]}}
+             for channel, name in channels.items()}
+    pages['UCseed0000']['related'] = {'results': [{'title': 'Peer', 'browseId': channel}
+                                                  for channel in ('UCpeer0000', 'UCpeer0000', 'UCpeer1111')]}
+
+    class Client(FakeClient):
+        def search(self, query, filter='songs'):
+            assert query == 'Seed'
+            return [{'browseId': 'UCseed0000'}]
+
+    state = complete_draft(store, Client(artists=pages), _recipe(own_pct=0, artists=['Seed']), 1000, seed=1)
+    assert {row.get('artist_browse_id') for row in state['pool']} == set(channels)
+    context = state['artist_contexts']['Seed']
+    assert [ref['browse_id'] for ref in context['related']] == ['UCpeer0000', 'UCpeer1111']
+    assert context['related'][0]['sources'] == {'youtube': 1.}
+
+
+@pytest.mark.parametrize('explicit', [False, True], ids=['search-resolved', 'explicit'])
+@pytest.mark.parametrize('known', [False, True], ids=['unregistered-channel', 'registered-channel'])
+@pytest.mark.parametrize('available', [False, True], ids=['provider-unavailable', 'provider-available'])
+def test_road_trip_uses_the_selected_channel_for_local_neighbors(store, explicit, known, available):
+    requested = 'UCtwin1111'
+    other = store.artists.ensure_artist('Twins', provider='youtube', provider_id='UCtwin0000')
+    store.artist_similarity.cache_similar(other, [('Unrelated twin neighbor', .99)], 10)
+    if known:
+        selected = store.artists.ensure_artist('Selected Twin', provider='youtube', provider_id=requested)
+        store.artists.ensure_artist('Twins', provider='youtube', provider_id=requested)
+        store.artist_similarity.cache_similar(selected, [('Selected twin neighbor', .9)], 10)
+
+    class Client(FakeClient):
+        def search(self, query, filter='songs'):
+            assert not explicit and query == 'Twins' and filter == 'artists'
+            return [{'browseId': requested}]
+
+        def get_artist(self, channel):
+            assert channel == requested
+            if not available:
+                raise OSError('Artist page unavailable')
+            return {'songs': {'results': [{'videoId': 'chosen', 'artists': [{'name': 'Twins'}]}]},
+                    'related': {'results': [{'title': 'YouTube peer', 'browseId': 'UCother000'}]}}
+
+    songs, neighbors = candidates.other_input_songs(Client(), 'artist', 'Twins', 10, store,
+                                                     browse_id=requested if explicit else None)
+    assert [row['artist_browse_id'] for row in songs] == ([requested] if available else [])
+    evidence = {row['name']: row['sources'] for row in neighbors}
+    assert evidence == ({'Selected twin neighbor': {'lastfm': .9}} if known else {}) | (
+        {'YouTube peer': {'youtube': 1.}} if available else {})
+
+
 def test_own_side_is_the_whole_collection_ranked_by_engagement(store, monkeypatch):
     """Your side is not a sample of your library, it IS your library - spread along how much you
     actually listen, which is what the favorites/deeper-cuts slider slides along."""
@@ -323,7 +375,7 @@ def test_artist_input_cap_scales_with_demand(monkeypatch):
     """A single named artist must be able to fill their whole half. A fixed per-artist cap is what
     made a 50% "theirs" recipe come back almost entirely "mine"."""
     monkeypatch.setattr(candidates, "_page_songs",
-                        lambda page, name, limit=30: _fake_artist_songs(25)(None, name))
+                        lambda page, name, limit=30, **options: _fake_artist_songs(25)(None, name))
     monkeypatch.setattr(candidates, "_artist_page", lambda client, name: ({}, "UC1"))
 
     cap = candidates.other_cap(['ArtistA'], [], limit=20)

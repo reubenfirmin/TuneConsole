@@ -6,33 +6,30 @@ from yt_playlist.core import discovery_policy as policy
 from yt_playlist.core import discovery_cache_policy
 from yt_playlist.core import artist_reconciliation
 from yt_playlist.core import discovery_origin_policy
-from yt_playlist.core.discovery_sources import source_identity
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.db_diagnostics import database_operation
 
 
 class Discovery:
-    def prepare_track_reassociation(self, video, previous, target, association, now):
-        inputs = self.repository.track_reassociation_inputs(video, previous, target)
-        member, remaining, sources = inputs['member'], inputs['remaining'], inputs['sources']
-        membership_found = None
-        retain_member = bool(member and (remaining is None or sources))
-        if retain_member:
-            membership_found = member['found_at'] if inputs['typed'] or remaining is None else min(
-                (row['found_at'] for row in sources if row['found_at'] is not None), default=now)
-        identities = [None if inputs['typed'] else source_identity(row['source_token']) for row in sources]
-        return inputs, retain_member, membership_found, identities
+    def prepare_track_reassociation(self, video, previous, target, association, now, *, merge_recordings):
+        inputs = self.repository.track_reassociation_inputs(video, previous, target, merge_recordings=merge_recordings)
+        member, sources = inputs['member'], inputs['sources']
+        retain_member = bool(member and (merge_recordings or sources))
+        found = member['found_at'] if merge_recordings and member else None
+        if retain_member and not merge_recordings:
+            found = min((row['first_found_at'] for row in sources if row['first_found_at'] is not None), default=now)
+        return inputs, retain_member, found
 
     def finish_track_reassociation(self, prepared, *, association=None):
-        inputs, retain_member, found, identities = prepared
+        inputs, retain_member, found = prepared
         self.repository.finish_track_reassociation(inputs, retain_member=retain_member,
-            membership_found=found, source_identities=identities, association=association)
+            membership_found=found, association=association)
 
     def __init__(self, repository, artists, eligibility, files, *, tracks, albums, genres,
-                 metadata, keys, proposals=None, settings=None):
+                 metadata, keys, proposals=None):
         self.repository, self.artists = repository, artists
         self.eligibility, self.files = eligibility, files
-        self.proposals, self.settings = proposals, settings
+        self.proposals = proposals
         self.tracks, self.albums, self.genres = tracks, albums, genres
         self.metadata, self.keys = metadata, keys
 
@@ -53,21 +50,18 @@ class Discovery:
     def reconcile_artist(self, previous, target, *, source):
         inputs = self.repository.artist_reconciliation_inputs(previous, target)
         origins = self.repository.origin_merge_inputs('artist_id', previous, target)
-        if inputs['typed']:
-            origins = artist_reconciliation.origins_after_artist_move(origins, previous, target)
-        scan = artist_reconciliation.latest(inputs['artist_scans'], 'scanned_at', target, legacy=not inputs['typed'])
-        candidate = artist_reconciliation.candidate(inputs['discovered_artists'], target,
-            typed=inputs['typed'], duplicates=inputs['duplicates'])
-        self.repository.apply_artist_reconciliation(previous, target, inputs, origins, scan, candidate)
+        origins = artist_reconciliation.origins_after_artist_move(origins, previous, target)
+        candidate = artist_reconciliation.candidate(inputs['discovered_artists'], target)
+        self.repository.apply_artist_reconciliation(previous, target, inputs, origins, candidate)
 
     def select_starter_artist(self, name, browse_id, thumbnail, selected, now):
         identity = self.artists.ensure_artist(name, provider='youtube', provider_id=browse_id)
         if selected and self.repository.starter_count(identity) >= policy.STARTER_LIMIT:
             raise ValueError('Choose up to 12 artists to start.')
         source = 'artist_start:' + browse_id
-        origin = self._origin(source) if selected and self.repository.explanation_files() else None
-        self.repository.set_starter_artist(identity, browse_id, thumbnail, selected, now,
-            score=policy.STARTER_SCORE, maximum=policy.STARTER_LIMIT, source=source, origin=origin)
+        origin = self._origin(source) if selected else None
+        self.repository.set_starter_artist(identity, thumbnail, selected, now,
+            score=policy.STARTER_SCORE, maximum=policy.STARTER_LIMIT, origin=origin)
         return self.starter_artists()
 
     def starter_artists(self):
@@ -90,8 +84,10 @@ class Discovery:
         return self.repository.interested_artists(weights=policy.INTEREST_WEIGHTS, limit=limit)
 
     def artists_due_for_scan(self, now, ttl_days=policy.SCAN_DAYS, budget=policy.SCAN_BUDGET,
-                             artist_limit=None, *, with_ids=False):
+                             artist_limit=None, *, with_ids=False, require_channel=False):
         artists = self.interested_artists(limit=artist_limit)
+        if require_channel:
+            artists = [artist for artist in artists if artist.get('browse_id')]
         scanned = self.repository.artist_scan_times([artist['artist_id'] for artist in artists])
         due = policy.scans_due(artists, scanned, now, ttl_days, budget)
         return due if with_ids else [artist['artist'] for artist in due]
@@ -110,13 +106,10 @@ class Discovery:
             rows = self.repository.discovered_artist_rows()
             result = []
             for row in rows:
-                if 'recovery_filename' in row:
-                    explanation = (self.files.read(
-                        tuple(row['recovery_' + field] for field in ('filename', 'digest', 'bytes')),
-                        kind='discovery-candidate', owner=policy.explanation_owner(row))
-                        if row['recovery_filename'] is not None else {'because': [], 'fits': []})
-                else:
-                    explanation = {field: json.loads(row[field] or '[]') for field in ('because', 'fits')}
+                explanation = (self.files.read(
+                    (row['recovery_filename'], row['recovery_digest'], row['recovery_bytes']),
+                    kind='discovery-candidate', owner=row['artist_id'])
+                    if row['recovery_filename'] is not None else {'because': [], 'fits': []})
                 result.append({'artist': row['display_artist'], 'artist_id': row['artist_id'],
                     **{field: row[field] for field in ('score', 'thumbnail', 'found_at', 'last_shown', 'genre',
                                                      'first_shown', 'offered_count')}, **explanation})
@@ -148,10 +141,10 @@ class Discovery:
         return self.repository.remove_spotify_origins()
 
     def merge_albums(self, previous, target):
-        inputs = self.repository.album_merge_inputs(previous, target)
+        memberships = self.repository.album_merge_inputs(previous, target)
         origins = self.repository.origin_merge_inputs('album_id', previous, target)
-        member = policy.merged_album_membership(inputs['memberships'], target)
-        self.repository.apply_album_merge(previous, target, inputs, origins, member)
+        member = min((row['found_at'] for row in memberships), default=None)
+        self.repository.apply_album_merge(previous, target, origins, member)
 
     def fetched_albums(self, browse_ids):
         return self.repository.fetched_albums(browse_ids)
@@ -177,43 +170,42 @@ class Discovery:
         self.repository.add_album_membership(identity, now)
 
     def upsert_discovered_artist(self, artist, score, because, fits, thumbnail, now, genre=None, *, artist_id=None,
-                                 source='discovery'):
+                                 source='discovery', sources=None):
         explanation = {'because': because or [], 'fits': fits or []}
-        encoded = tuple(json.dumps(explanation[field], allow_nan=False) for field in ('because', 'fits'))
+        if sources:
+            explanation['sources'] = sources
+        json.dumps(explanation, allow_nan=False)
         genre_key = self.genres.resolve(genre)[0] if genre is not None else None
         identity = self.artists.state_id(artist_id if artist_id is not None else artist)
         with self.files.retained():
-            native = self.repository.explanation_files()
-            origin = self._origin(source) if native else None
-            reference, file_id = None, None
-            if native:
-                integrity = self.files.describe('discovery-candidate', identity, explanation)
-                file_id = self.repository.reserve_explanation_file(identity, integrity)
-                reference = self.files.publish_reserved(file_id, 'discovery-candidate', identity, explanation,
-                                                        expected=integrity)
-            self.repository.store_discovered_artist(identity, score, thumbnail, now, genre, source=source,
-                                                    reference=reference, file_id=file_id, encoded=encoded,
-                                                    origin=origin, genre_key=genre_key)
+            origin = self._origin(source)
+            integrity = self.files.describe('discovery-candidate', identity, explanation)
+            file_id = self.repository.reserve_explanation_file(identity, integrity)
+            reference = self.files.publish_reserved(file_id, 'discovery-candidate', identity, explanation,
+                                                    expected=integrity)
+            self.repository.store_discovered_artist(identity, score, thumbnail, now, genre, reference=reference,
+                                                    file_id=file_id, origin=origin, genre_key=genre_key)
 
     def retain_discovered_artist(self, artist, score):
         identity = self.artists.resolve_exact(artist)
         if identity is not None:
-            origin = self._origin('discovery') if self.repository.explanation_files() else None
-            self.repository.retain_discovered_artist(identity, score, source='discovery', origin=origin,
+            origin = self._origin('discovery')
+            self.repository.retain_discovered_artist(identity, score, origin=origin,
                 excluded_kinds=('spotify_export', 'spotify_model'))
 
     def seed_spotify_artists(self, account_id, counts, now, *, min_plays=policy.SPOTIFY_MIN_PLAYS, import_key=None):
         rows = [(self.artists.state_id(name), float(plays)) for name, plays in counts.items() if plays >= min_plays]
         source = f'spotify_export:{account_id}'
-        origin = self._origin(source, account_id=account_id, import_key=import_key) if self.repository.explanation_files() else None
-        return self.repository.seed_spotify_artists(account_id, rows, now, source=source, origin=origin,
+        origin = self._origin(source, account_id=account_id, import_key=import_key)
+        return self.repository.seed_spotify_artists(rows, now, origin=origin,
             excluded_kinds=('spotify_export',))
 
     def get_discovered_albums(self):
         return self.repository.get_discovered_albums()
 
-    def present_home_tiles(self, album_ids, artist_ids):
-        return self.repository.present_home_tiles(album_ids, artist_ids)
+    def present_home_tiles(self, album_ids, artist_ids, *, recheck_artist_ownership=False):
+        return self.repository.present_home_tiles(album_ids, artist_ids,
+                                                  recheck_artist_ownership=recheck_artist_ownership)
 
     def upsert_discovered_track(self, identity_key, video_id, title, artist, album, thumbnail,
                                 genre, year, source_browse_id, now, audio=None, *, credits=None, duration_s=None):
@@ -223,9 +215,8 @@ class Discovery:
         self.keys.add_alias(identity_key, subject, 'discovery')
         self.repository.add_track_membership(subject, entry, now)
         if source_browse_id:
-            kind, identifier = source_identity(source_browse_id)
-            origin = self._origin(source_browse_id) if self.repository.explanation_files() else None
-            self.repository.retain_track_source(subject, source_browse_id, kind, identifier, video_id or None, now, origin)
+            origin = self._origin(source_browse_id)
+            self.repository.retain_track_source(subject, video_id or None, now, origin)
             if self.repository.pooled_album(source_browse_id):
                 self.albums.link(entry, source_browse_id, source='discovery')
         fields = {'genre': genre, 'mb_year': year, **{field: value for field, value in (audio or {}).items() if field in policy.TRACK_AUDIO_FIELDS}}
@@ -250,6 +241,9 @@ class Discovery:
     def discovered_tracks_by_keys(self, keys, **options):
         return self.repository.discovered_tracks_by_keys(keys, **options)
 
+    def playable_discoveries_by_keys(self, keys):
+        return self.repository.playable_discoveries_by_keys(keys)
+
     def candidate_tracks_by_keys(self, keys):
         return self.repository.candidate_tracks_by_keys(keys)
 
@@ -267,20 +261,17 @@ class Discovery:
             expired = repository.expired_pool_rows(now - gc_days * policy.DAY)
             held = set(held_track_keys or ()) | reader.rec_eligibility.generated_track_keys()
             gone = set(expired['tracks']) - held
-            details = repository.cleanup_track_details(gone)
+            sources = repository.cleanup_source_tokens(gone)
             cached = reader.rec_proposals.cache_rows() if gone else []
             snapshot.release_reader()
             prepared = discovery_cache_policy.prepare(cached, gone) if gone else []
-            prepared = self.proposals.stage_pruned_cache(prepared)
 
             def publish():
-                # Each owner commits independently. Keep memberships until caches,
-                # refill prevention and enrichment bookkeeping have succeeded.
+                # Keep memberships until the cache and refill-prevention writes succeed.
                 if gone:
                     self.proposals.publish_pruned_cache(prepared)
-                    self.repository.remember_source_tokens(details['sources'])
-                    self.settings.replace_keys(['enrich_attempts:' + key for key in details['unowned']], {})
-                self.repository.delete_pool_entries(expired['albums'], expired['artist_targets'], gone)
+                    self.repository.remember_source_tokens(sources)
+                self.repository.delete_pool_entries(expired['albums'], expired['artists'], gone)
 
             if not snapshot.publish_ordered(publish):
                 raise WorkBudgetExceeded('Discovery pool cleanup inputs changed; retry cleanup')

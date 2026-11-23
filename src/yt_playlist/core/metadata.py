@@ -1,74 +1,53 @@
-"""Typed metadata selection, separate from item-scoped explicit overrides.
+"""Typed provider selection and explicit metadata overrides.
 
 Callers own the connection transaction. Selections identify the retained evidence
 that supplies the ordinary typed catalog columns.
 """
-import json
 import time
 
 from .catalog_identity import RECORDING_FIELDS, ITEM_FIELDS
-from . import genre_classifications, metadata_attempts, metadata_deliveries, metadata_evidence, metadata_values
-from . import metadata_runtime, provider_queries
+from . import genre_classifications, metadata_attempts, metadata_deliveries, metadata_evidence, metadata_hints, metadata_values
+from . import metadata_runtime, provider_queries, runtime_metadata_choices
+from . import metadata_choice_selections, recording_metadata
 from yt_playlist.util import genre_catalog
 
 
-def source_location(conn, entry_id, field):
-    row = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
-    if row is None:
-        raise ValueError('Unknown catalog entry')
-    if metadata_evidence.available(conn):
-        return (('recording_metadata_selections', 'recording_id', row[0]) if field in RECORDING_FIELDS else
-                ('entry_metadata_selections', 'entry_id', entry_id))
-    return (('recording_field_sources','recording_id',row[0]) if field in RECORDING_FIELDS else
-            ('item_field_sources','entry_id',entry_id))
-
-
 def selected_source(conn, entry_id, field):
+    return selected_sources(conn, entry_id, (field,))[field]
+
+
+def has_choice(conn, entry_id, field):
+    if field in recording_metadata.CANONICAL_FIELDS:
+        return recording_metadata.has_choice(conn, entry_id, field)
     if metadata_runtime.active(conn):
-        return metadata_runtime.selected_source(conn, entry_id, field)
-    table,column,subject = source_location(conn,entry_id,field)
-    if table in ('recording_metadata_selections', 'entry_metadata_selections'):
-        row = conn.execute('SELECT COALESCE(d.provider,o.legacy_source,s.legacy_source) '
-                           f'FROM {table} s LEFT JOIN metadata_observations o ON o.id=s.observation_id '
-                           'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
-                           f'WHERE s.{column}=? AND s.field=?', (subject, field)).fetchone()
-        return row[0] if row else None
-    from . import metadata_reads
-    table = metadata_reads.read_table(conn,table)
-    row = conn.execute(f'SELECT source FROM {table} WHERE {column}=? AND field=?',
-                       (subject,field)).fetchone()
-    return row[0] if row else None
+        if field not in metadata_runtime.CODES:
+            return False
+        return conn.execute(f'SELECT 1 FROM {runtime_metadata_choices.VIEW} WHERE entry_id=? AND field=? AND kind<>0',
+                            (entry_id, metadata_runtime.code(field))).fetchone() is not None
+    observation = metadata_choice_selections.get(conn, entry_id, field)
+    return observation is not None and observation['value_kind'] != 'withdrawn'
 
 
 def selected_sources(conn, entry_id, fields):
-    """Read one entry's finite source set without reloading its layout per field."""
+    """Read the selected provider for each requested field."""
     fields = tuple(dict.fromkeys(fields))
     if set(fields) - {*ITEM_FIELDS, *RECORDING_FIELDS}:
         raise ValueError('Unknown metadata field')
-    subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    subject = conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     if subject is None:
         raise ValueError('Unknown catalog entry')
-    typed = metadata_evidence.available(conn)
-    from . import metadata_reads
-    published = not typed and metadata_reads.selected(conn) is not None
     result = dict.fromkeys(fields)
-    for recording in (True, False):
-        selected = tuple(field for field in fields if (field in RECORDING_FIELDS) == recording)
+    for table, column, identity, supported in (
+        ('recording_field_sources', 'recording_id', subject[0], RECORDING_FIELDS),
+        ('item_field_sources', 'entry_id', entry_id, ITEM_FIELDS),
+    ):
+        selected = tuple(field for field in fields if field in supported)
         if not selected:
             continue
-        column, identity = ('recording_id', subject[0]) if recording else ('entry_id', entry_id)
         placeholders = ','.join('?' for _ in selected)
-        if typed:
-            table = 'recording_metadata_selections' if recording else 'entry_metadata_selections'
-            sql = ('SELECT s.field,COALESCE(d.provider,o.legacy_source,s.legacy_source) '
-                   f'FROM {table} s LEFT JOIN metadata_observations o ON o.id=s.observation_id '
-                   'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id '
-                   f'WHERE s.{column}=? AND s.field IN ({placeholders})')
-        else:
-            table = 'recording_field_sources' if recording else 'item_field_sources'
-            table = metadata_reads.table(table) if published else table
-            sql = f'SELECT field,source FROM {table} WHERE {column}=? AND field IN ({placeholders})'
-        result.update(conn.execute(sql, (identity, *selected)).fetchall())
+        result.update(conn.execute(f'SELECT field,source FROM {table} '
+                                   f'WHERE {column}=? AND field IN ({placeholders})',
+                                   (identity, *selected)).fetchall())
     return result
 
 
@@ -83,36 +62,20 @@ def _select(conn, entry_id, field, value, source, *, now=None, observation_id=No
     if field not in (*ITEM_FIELDS,*RECORDING_FIELDS):
         raise ValueError(f'Unknown metadata field: {field}')
     if metadata_runtime.active(conn):
-        return metadata_runtime.select(conn, entry_id, field, value, source)
-    if metadata_evidence.available(conn):
-        if not conn.in_transaction:
-            conn.execute('BEGIN IMMEDIATE')
-        at = time.time() if now is None else now
-        if observation_id is None:
-            delivery = metadata_deliveries.capture_state(conn, entry_id, source, 'selected-field:' + field,
-                {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
-            units = {field: metadata_values.DEFAULT_UNIT[field]} if field in metadata_values.NUMBER_FIELDS and value not in (None, '') else {}
-            observation_id = metadata_evidence.record_provider(conn, delivery, {field: value}, units=units)[field]
-        row = conn.execute('SELECT o.*,COALESCE(d.provider,o.legacy_source) AS provider FROM metadata_observations o '
-                           'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?', (observation_id,)).fetchone()
-        if row is None or row['provider'] != source or metadata_evidence.value_from_row(row).selected() != value:
-            raise ValueError('Selected metadata value does not match its supplying observation')
-        metadata_evidence.select(conn, entry_id, field, observation_id, now=at)
-        return
-    # Write the base even beneath an override. The effective projection still uses the explicit
-    # choice, including a JSON null or empty string. Reset can then reveal fresh provider data.
-    row = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?',
-                       (entry_id,)).fetchone()
-    if field in RECORDING_FIELDS:
-        conn.execute(f'UPDATE recordings SET {field}=? WHERE id=?', (value,row[0]))
-    elif row[1]:
-        conn.execute(f'UPDATE youtube_items SET {field}=? WHERE video_id=?', (value,row[1]))
-    else:
-        conn.execute(f'UPDATE unresolved_items SET {field}=? WHERE entry_id=?', (value,entry_id))
-    table,column,subject = source_location(conn,entry_id,field)
-    conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?) ON CONFLICT({column},field) DO UPDATE '
-                 'SET source=excluded.source,selected_at=excluded.selected_at',
-                 (subject,field,source,time.time() if now is None else now))
+        return metadata_runtime.select(conn, entry_id, field, value, source, now=now)
+    if not conn.in_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    at = time.time() if now is None else now
+    if observation_id is None:
+        delivery = metadata_deliveries.capture_state(conn, entry_id, source, 'selected-field:' + field,
+            {'format': 'catalog-field-capture-1', 'field': field, 'value': value}, now=at)
+        units = {field: metadata_values.DEFAULT_UNIT[field]} if field in metadata_values.NUMBER_FIELDS and value not in (None, '') else {}
+        observation_id = metadata_evidence.record_provider(conn, delivery, {field: value}, units=units)[field]
+    row = conn.execute('SELECT o.*,COALESCE(d.provider,o.legacy_source) AS provider FROM metadata_observations o '
+                       'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?', (observation_id,)).fetchone()
+    if row is None or row['provider'] != source or metadata_evidence.value_from_row(row).selected() != value:
+        raise ValueError('Selected metadata value does not match its supplying observation')
+    metadata_evidence.select(conn, entry_id, field, observation_id, now=at)
 
 
 def fill(conn, entry_id, fields, source, *, blank=False, now=None):
@@ -142,8 +105,8 @@ def reuse_recording_selections(conn, previous, target):
     belongs to the target and is never replaced by a merge.
     """
     if metadata_runtime.active(conn):
-        entry = conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1', (target,)).fetchone()
-        original = conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1', (previous,)).fetchone()
+        entry = conn.execute('SELECT id FROM track_sources WHERE recording_id=? ORDER BY id LIMIT 1', (target,)).fetchone()
+        original = conn.execute('SELECT id FROM track_sources WHERE recording_id=? ORDER BY id LIMIT 1', (previous,)).fetchone()
         if entry and original:
             for field in RECORDING_FIELDS:
                 value = (genre_classifications.read(conn, 'recordings', previous) if field == 'genre' else
@@ -156,24 +119,15 @@ def reuse_recording_selections(conn, previous, target):
     before = conn.execute('SELECT * FROM recordings WHERE id=?', (previous,)).fetchone()
     after = conn.execute('SELECT * FROM recordings WHERE id=?', (target,)).fetchone()
     before, after = dict(before), dict(after)
-    if genre_classifications.available(conn):
-        before['genre'] = genre_classifications.read(conn, 'recordings', previous)
-        after['genre'] = genre_classifications.read(conn, 'recordings', target)
-    typed = metadata_evidence.available(conn)
+    before['genre'] = genre_classifications.read(conn, 'recordings', previous)
+    after['genre'] = genre_classifications.read(conn, 'recordings', target)
     for field in RECORDING_FIELDS:
         if before[field] in (None, '') or after[field] not in (None, ''):
             continue
-        table = 'recording_metadata_selections' if typed else 'recording_field_sources'
-        if conn.execute(f'SELECT 1 FROM {table} WHERE recording_id=? AND field=?',
+        if conn.execute('SELECT 1 FROM recording_field_sources WHERE recording_id=? AND field=?',
                         (target, field)).fetchone():
             continue
-        if typed:
-            metadata_evidence.transfer_recording_selection(conn, previous, target, field)
-            continue
-        conn.execute(f'UPDATE recordings SET {field}=? WHERE id=?', (before[field], target))
-        conn.execute('INSERT INTO recording_field_sources(recording_id,field,source,selected_at) '
-                     'SELECT ?,field,source,selected_at FROM recording_field_sources '
-                     'WHERE recording_id=? AND field=?', (target, previous, field))
+        metadata_evidence.transfer_recording_selection(conn, previous, target, field)
 
 
 def apply_provider(conn, entry_id, provider, fields, providers, *, now=None, delivery_id=None,
@@ -184,17 +138,17 @@ def apply_provider(conn, entry_id, provider, fields, providers, *, now=None, del
     this selection. Missing answers never erase a previous useful finding.
     """
     rank = {name:i for i,name in enumerate(providers)}
-    typed = metadata_evidence.available(conn)
+    runtime = metadata_runtime.active(conn)
     observed_at = time.time() if now is None else now
     observations = {}
-    if metadata_runtime.active(conn):
+    if runtime:
         metadata_runtime.validate_capture(conn, entry_id, provider, fields, delivery_id)
         if delivery_id is not None:
-            previous = conn.execute('SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=?',
+            previous = conn.execute("SELECT at FROM enrichment_provider_state WHERE recording_id=? AND provider=? AND status<>'queued'",
                                     (delivery_id.recording, provider)).fetchone()
             if previous and previous[0] >= delivery_id.at:
                 return {}
-    if typed:
+    else:
         if not conn.in_transaction:
             conn.execute('BEGIN IMMEDIATE')
         captured = {'mb_year' if name == 'year' else name: value for name, value in fields.items()
@@ -215,17 +169,12 @@ def apply_provider(conn, entry_id, provider, fields, providers, *, now=None, del
         field = 'mb_year' if concept == 'year' else concept
         if field not in (*ITEM_FIELDS,*RECORDING_FIELDS) or value in (None,''):
             continue
-        if typed and supplying_observations is not None and field not in observations:
+        if not runtime and supplying_observations is not None and field not in observations:
             continue
-        recording = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?',
-                                 (entry_id,)).fetchone()[0]
-        if not typed and not metadata_runtime.active(conn):
-            conn.execute('INSERT INTO metadata_findings(entry_id,recording_id,field,provider,value_json,'
-                         'observed_at) VALUES (?,?,?,?,?,?)',
-                         (entry_id,recording,field,provider,json.dumps(value),observed_at))
         previous = selected_source(conn,entry_id,field)
         refinement = False
         if field == 'genre' and previous in rank:
+            recording, _ = metadata_runtime.subject(conn, entry_id)
             current = genre_classifications.read(conn, 'recordings', recording)
             refinement = genre_catalog.is_subgenre(value, current)
             if previous != provider and genre_catalog.is_subgenre(current, value):
@@ -233,10 +182,8 @@ def apply_provider(conn, entry_id, provider, fields, providers, *, now=None, del
         if not refinement and previous in rank and rank[previous] < rank.get(provider,len(rank)):
             continue
         select(conn,entry_id,field,value,provider,now=observed_at,observation_id=observations.get(field))
-        if not metadata_runtime.active(conn):
-            hint_table = 'metadata_hints' if typed else 'catalog_field_hints'
-            conn.execute(f'UPDATE {hint_table} SET active=0 WHERE entry_id=? AND field=?',
-                         (entry_id,field))
+        if not runtime:
+            metadata_hints.retire_entry(conn, entry_id, field)
     return observations
 
 
@@ -246,7 +193,7 @@ def refresh_genre(conn, recording_id, answers, providers):
     The caller supplies completed, current answers. Historical findings remain retained;
     item-scoped explicit choices continue to sit above this recording-level selection.
     """
-    entry = conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? ORDER BY id LIMIT 1',
+    entry = conn.execute('SELECT id FROM track_sources WHERE recording_id=? ORDER BY id LIMIT 1',
                          (recording_id,)).fetchone()
     if entry is None:
         return
@@ -259,7 +206,7 @@ def refresh_genre(conn, recording_id, answers, providers):
         if candidate and (genre is None or genre_catalog.is_subgenre(candidate, genre)):
             genre, source = candidate, name
     if genre:
-        if metadata_attempts.available(conn):
+        if not metadata_runtime.active(conn):
             observations = metadata_attempts.reusable_evidence(conn, entry[0], source, {'genre': genre})
             if 'genre' in observations:
                 select(conn, entry[0], 'genre', genre, source, observation_id=observations['genre'])
@@ -270,12 +217,6 @@ def refresh_genre(conn, recording_id, answers, providers):
 
 
 def record_choice(conn, entry_id, field, value, source, *, now=None):
-    if metadata_runtime.active(conn):
-        return metadata_runtime.choose(conn, entry_id, field, value, source=source, now=now)
-    if metadata_evidence.available(conn):
-        if not conn.in_transaction:
-            conn.execute('BEGIN IMMEDIATE')
-        return metadata_evidence.choose(conn, entry_id, field, value, source=source, now=now)
-    conn.execute('INSERT INTO metadata_decisions(entry_id,field,value_json,source,chosen_at) '
-                 'VALUES (?,?,?,?,?)',
-                 (entry_id,field,json.dumps(value),source,time.time() if now is None else now))
+    if not conn.in_transaction:
+        conn.execute('BEGIN IMMEDIATE')
+    return metadata_evidence.choose(conn, entry_id, field, value, source=source, now=now)

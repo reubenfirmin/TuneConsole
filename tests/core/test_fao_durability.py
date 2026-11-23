@@ -4,8 +4,7 @@ from pathlib import Path
 import pytest
 
 from yt_playlist.core import fao, profile_files, sample_files
-from tests.file_preparation_support import profiles
-from tests.core.test_profile_files import seed
+from tests.core.test_profile_files import payload, seed
 from tests.test_audio_vibes import sample
 
 
@@ -28,14 +27,13 @@ def test_domain_publication_failure_keeps_sql_evidence_and_retry_can_commit(file
     else:
         keys, bodies = seed(store)
         root = profile_files.directory(store.conn)
+        raw, digest = payload('successor')
         def publish():
-            profiles.prepare(store)
+            store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
         def unchanged():
-            assert dict(store.conn.execute('SELECT identity_key,payload FROM rec_musical_profiles')) == bodies
-            assert not store.conn.execute('SELECT 1 FROM recording_profile_files').fetchone()
-        def committed():
             assert [profile_files.read(store.conn, 'recording', key) for key in keys] == [bodies[key] for key in keys]
-            assert all(not row[0] for row in store.conn.execute('SELECT payload FROM rec_musical_profiles'))
+        def committed():
+            assert [profile_files.read(store.conn, 'recording', key) for key in keys] == [raw, bodies[keys[1]]]
 
     replace = fao.os.replace
     failed = False

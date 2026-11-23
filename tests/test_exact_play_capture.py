@@ -91,9 +91,9 @@ for(const fn of polls)fn();flush();
                             text=True, capture_output=True, check=False, timeout=10)
     assert result.returncode == 0, result.stderr
     frames = json.loads(result.stdout)
-    iid = store.accounts.upsert_account("music", "bridge", "brand-A", True)
+    iid = store.accounts.upsert_account("music", "brand-A", True)
     if scenario == "ambiguous_account":
-        store.accounts.upsert_account("other", "bridge", "brand-A", False)
+        store.accounts.upsert_account("other", "brand-A", False)
     if scenario == "generated":
         store.playlists.set_playlist_group("PL_current", "Generated")
         store.playlists.mark_generated_playlist("PL_current")

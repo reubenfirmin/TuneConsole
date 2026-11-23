@@ -2,7 +2,7 @@
 import json
 import uuid
 
-from yt_playlist.core import playlist_recipe_policy as policy
+from yt_playlist.core import append_work, playlist_recipe_policy as policy
 from yt_playlist.core.catalog_state import rekey_state
 
 
@@ -12,27 +12,15 @@ class PlaylistRecipes:
 
     def set_recipe(self, scope, recipe, now=None):
         with self.guard(), self.files.retained():
-            owner = self.repository.document_owner('recipes', scope)
-            if not owner['native']:
-                self.repository.publish_legacy('recipes', owner['scope'], json.dumps(recipe), now)
-                return
             facets = policy.facets(recipe)
-            append = None
-            if recipe.get('tv_refill') is not None and self.repository.append_available():
-                checkpoint = recipe['tv_refill']
-                if not isinstance(checkpoint, dict):
-                    raise ValueError('Unsupported TV append recovery checkpoint')
-                append = policy.append_plan(recipe, self.repository.append_owner(owner['scope'],
-                    recipe.get('tv_stream'), checkpoint.get('request_id')))
+            owner = self.repository.document_owner('recipes', scope)
+            recipe, append = append_work.prepare(recipe)
+            if append is not None:
+                self.repository.check_append(owner['scope'], append)
             integrity = self.files.describe('playlist-recipe', owner['id'], recipe)
             file_id = self.repository.reserve_file('playlist-recipe', owner['id'], integrity)
             reference = self.files.publish_reserved(file_id, 'playlist-recipe', owner['id'], recipe,
                                                     expected=integrity)
-            if append is not None:
-                integrity = self.files.describe('tv-append', append['id'], append['checkpoint'])
-                append['file_id'] = self.repository.reserve_file('tv-append', append['id'], integrity)
-                append['reference'] = self.files.publish_reserved(append['file_id'], 'tv-append', append['id'],
-                                                                append['checkpoint'], expected=integrity)
             self.repository.publish_recipe(owner, uuid.uuid4().hex, recipe, facets, reference, append, now,
                                            file_id=file_id)
 
@@ -41,35 +29,16 @@ class PlaylistRecipes:
             facts = self.repository.document_facts('recipes', scope)
             if facts is None:
                 return None
-            if facts['native']:
-                header = facts['header']
-                value = self.files.read(self._reference(header), kind='playlist-recipe', owner=header['id'])
-                policy.project(value, header, facts['facets'])
-                identity = header['id']
-            else:
-                raw = self.files.read_original(facts['header'], facts['parts']) if facts['prepared'] else facts['raw']
-                value = json.loads(raw) if raw is not None else None
-                identity = None
-            if not isinstance(value, dict):
-                return value
-            append = self.repository.append_facts(facts['scope'], identity, value)
-            if append is not None:
-                header = append['header']
-                if header is None:
-                    raise ValueError('Saved TV append has no retained intent')
-                checkpoint = self.files.read(self._reference(header), kind='tv-append',
-                    owner=header['id'] if append['native'] else header['source'])
-                policy.project_append(value, checkpoint, append)
-            return value
+            header = facts['header']
+            value = self.files.read(self._reference(header), kind='playlist-recipe', owner=header['id'])
+            policy.project(value, header, facts['facets'])
+            return append_work.project(value, facts['appends'])
 
     def set_cluster_canvas(self, scope, state, now=None):
         with self.guard(), self.files.retained():
-            owner = self.repository.document_owner('canvases', scope)
-            if not owner['native']:
-                self.repository.publish_legacy('canvases', owner['scope'], state, now)
-                return
             if state is not None and not isinstance(state, str):
                 raise ValueError('A saved canvas requires its serialized text')
+            owner = self.repository.document_owner('canvases', scope)
             integrity = self.files.describe('playlist-canvas', owner['id'], state)
             file_id = self.repository.reserve_file('playlist-canvas', owner['id'], integrity)
             reference = self.files.publish_reserved(file_id, 'playlist-canvas', owner['id'], state,
@@ -81,9 +50,7 @@ class PlaylistRecipes:
             facts = self.repository.document_facts('canvases', scope)
             if facts is None:
                 return None
-            if facts['native']:
-                return self.files.read(self._reference(facts['header']), kind='playlist-canvas', owner=facts['header']['id'])
-            return self.files.read_original(facts['header'], facts['parts']) if facts['prepared'] else facts['raw']
+            return self.files.read(self._reference(facts['header']), kind='playlist-canvas', owner=facts['header']['id'])
 
     @staticmethod
     def _reference(header):

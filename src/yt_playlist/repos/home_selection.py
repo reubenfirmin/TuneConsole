@@ -18,11 +18,10 @@ class HomeSelectionRepo:
         # candidate writes in one transaction instead of fsyncing every CREATE.
         conn.execute('BEGIN')
         conn.execute('CREATE TABLE candidates(pool INTEGER,rank INTEGER,key TEXT,artist TEXT,album TEXT,'
-            'family TEXT,has_genre INTEGER,year INTEGER,tilt REAL,delta REAL,eligible INTEGER,'
+            'family TEXT,has_genre INTEGER,year INTEGER,tilt REAL,eligible INTEGER,'
             'PRIMARY KEY(pool,rank)) WITHOUT ROWID')
         conn.execute('CREATE TABLE seen(key TEXT PRIMARY KEY) WITHOUT ROWID')
-        conn.execute('CREATE TABLE considered(card INTEGER,key TEXT,delta REAL,PRIMARY KEY(card,key)) WITHOUT ROWID')
-        conn.execute('CREATE TABLE ordered(key TEXT PRIMARY KEY,delta REAL) WITHOUT ROWID')
+        conn.execute('CREATE TABLE considered(card INTEGER,key TEXT,PRIMARY KEY(card,key)) WITHOUT ROWID')
         conn.execute('CREATE TABLE ppr(mode TEXT,key TEXT,rank INTEGER,PRIMARY KEY(mode,key)) WITHOUT ROWID')
         conn.execute('CREATE TABLE distances(source TEXT,target TEXT,distance REAL,PRIMARY KEY(source,target)) WITHOUT ROWID')
         conn.execute("CREATE INDEX candidate_families ON candidates(COALESCE(family,''))")
@@ -47,7 +46,7 @@ class HomeSelectionRepo:
             cursor.close()
 
     def add_candidates(self, rows):
-        self._conn.executemany('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?,?)', rows)
+        self._conn.executemany('INSERT INTO candidates VALUES (?,?,?,?,?,?,?,?,?,?)', rows)
 
     def add_ppr(self, rows):
         self._conn.executemany('INSERT INTO ppr VALUES (?,?,?)', rows)
@@ -65,14 +64,8 @@ class HomeSelectionRepo:
         return self._conn.execute('SELECT count(*) FROM candidates c WHERE ' + query.predicate, query.values).fetchone()[0]
 
     def considered(self, card, query):
-        self._conn.execute('INSERT OR IGNORE INTO considered SELECT ?,c.key,c.delta FROM candidates c WHERE ' + query.predicate,
+        self._conn.execute('INSERT OR IGNORE INTO considered SELECT ?,c.key FROM candidates c WHERE ' + query.predicate,
                            (card, *query.values))
-        self._conn.execute('INSERT OR IGNORE INTO ordered SELECT c.key,c.delta FROM candidates c WHERE ' + query.predicate,
-                           query.values)
-
-    def has_negative_ordering(self):
-        return self._conn.execute('SELECT 1 FROM ordered WHERE delta<>0 LIMIT 1').fetchone() is not None
-
     def ranked(self, query):
         join = 'LEFT JOIN ppr p ON p.mode=? AND p.key=c.key ' if query.mode is not None else ''
         values = ((query.mode,) if query.mode is not None else ()) + query.values + query.order_values
@@ -84,7 +77,7 @@ class HomeSelectionRepo:
         return row[0] if row else None
 
     def considered_rows(self, card):
-        return self._rows('SELECT key,delta FROM considered WHERE card=? ORDER BY key', (card,))
+        return self._rows('SELECT key FROM considered WHERE card=? ORDER BY key', (card,))
 
     def mark_seen(self, query, keys):
         self._conn.execute('INSERT OR IGNORE INTO seen SELECT c.key FROM candidates c WHERE ' + query.predicate, query.values)

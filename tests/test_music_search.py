@@ -1,4 +1,6 @@
 """Native song saves retain ownership, account scope and uncertain-write safety."""
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -115,8 +117,8 @@ class EntityCatalog(SongCatalog):
 
 @pytest.mark.parametrize('kind', ['artist', 'album', 'playlist'])
 def test_entity_save_confirms_native_membership_and_publishes_to_the_main_account(store, kind):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('other', 'other', None, False)
+    account = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
     fake, unused = EntityCatalog(), EntityCatalog()
     intent = dict(kind=kind, browse_id=fake.identities[kind])
     with TestClient(app_for(store, {account: fake, other: unused}), base_url='http://127.0.0.1') as client:
@@ -139,7 +141,7 @@ def test_entity_save_confirms_native_membership_and_publishes_to_the_main_accoun
 
 @pytest.mark.parametrize('kind', ['artist', 'album', 'playlist'])
 def test_uncertain_entity_save_survives_restart_and_never_replays(store, kind):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = EntityCatalog()
     fake.outcome = 'uncertain'
     intent = dict(kind=kind, browse_id=fake.identities[kind])
@@ -158,7 +160,7 @@ def test_uncertain_entity_save_survives_restart_and_never_replays(store, kind):
 
 @pytest.mark.parametrize('kind', ['artist', 'album', 'playlist'])
 def test_entity_empty_ack_needs_membership_and_known_non_dispatch_allows_explicit_retry(store, kind):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = EntityCatalog()
     intent = dict(kind=kind, browse_id=fake.identities[kind])
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
@@ -173,8 +175,8 @@ def test_entity_empty_ack_needs_membership_and_known_non_dispatch_allows_explici
 
 
 def test_entity_save_refuses_unidentified_membership_and_disconnected_main(store):
-    main = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('other', 'other', None, False)
+    main = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
     fake = EntityCatalog()
     intent = dict(kind='artist', browse_id='UCfavorite')
     with TestClient(app_for(store, {other: fake}), base_url='http://127.0.0.1') as client:
@@ -187,7 +189,7 @@ def test_entity_save_refuses_unidentified_membership_and_disconnected_main(store
 
 
 def test_confirmed_remote_entity_recovers_a_failed_local_publication_without_another_write(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = EntityCatalog()
     app = app_for(store, {account: fake})
     entities = app.state.ctx.music_search().entities
@@ -213,7 +215,7 @@ def app_for(store, clients):
 
 
 def test_catalog_keeps_the_identified_artist_from_a_native_top_result(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     original = fake.search
 
@@ -250,7 +252,7 @@ def test_top_artist_results_do_not_guess_missing_or_ambiguous_identities(credits
 
 
 def test_search_and_confirmed_save_without_liking_and_without_provider_tokens(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
         response = client.get('/search/catalog?q=favorite')
@@ -275,7 +277,7 @@ def test_search_and_confirmed_save_without_liking_and_without_provider_tokens(st
 
 
 def test_catalog_sections_keep_native_identities_and_do_not_acquire_results(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake, calls = SongCatalog(), []
     original = fake.search
 
@@ -311,7 +313,7 @@ def test_catalog_sections_keep_native_identities_and_do_not_acquire_results(stor
 
 
 def test_toggle_removes_standalone_save_but_blocks_playlist_owned_removal(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     intent = {'video_id': 'exact-song', 'query': 'favorite'}
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
@@ -336,7 +338,7 @@ def test_toggle_removes_standalone_save_but_blocks_playlist_owned_removal(store)
 @pytest.mark.parametrize('provider_saved', [False, None])
 @pytest.mark.parametrize('owner', ['playlist', 'liked', 'album'])
 def test_local_song_ownership_overrides_false_or_missing_native_membership(store, provider_saved, owner):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     original = fake.search
 
@@ -370,7 +372,7 @@ def test_local_song_ownership_overrides_false_or_missing_native_membership(store
 
 @pytest.mark.parametrize('provider_saved', [False, None])
 def test_album_bookmark_uses_saved_release_identity_and_excludes_cached_albums(store, provider_saved):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = EntityCatalog()
     original = fake.search
 
@@ -398,7 +400,7 @@ def test_album_bookmark_uses_saved_release_identity_and_excludes_cached_albums(s
 
 @pytest.mark.parametrize('phase', ['search', 'dispatch', 'pending'])
 def test_removal_rechecks_ownership_acquired_while_the_action_is_running(store, phase):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     intent = {'video_id': 'exact-song', 'query': 'favorite'}
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
@@ -438,7 +440,7 @@ def test_removal_rechecks_ownership_acquired_while_the_action_is_running(store, 
 
 
 def test_uncertain_removal_only_reconciles_after_restart(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     intent = {'video_id': 'exact-song', 'query': 'favorite'}
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
@@ -447,6 +449,8 @@ def test_uncertain_removal_only_reconciles_after_restart(store):
         assert client.post('/search/songs/save', json={**intent, 'saved': False}).json()['state'] == 'pending'
     assert store.tracks.library_identity_key_for_video('exact-song')
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
+        row = client.get('/search/catalog?q=favorite').json()['songs'][0]
+        assert row['action_state'] == 'pending' and row['pending_saved'] is False
         assert client.post('/search/songs/save', json={**intent, 'saved': False}).json()['state'] == 'pending'
         fake.saved.clear()
         assert client.post('/search/songs/save', json={**intent, 'check': True}).json()['state'] == 'removed'
@@ -455,7 +459,7 @@ def test_uncertain_removal_only_reconciles_after_restart(store):
 
 
 def test_interrupted_song_admission_keeps_the_onboarding_draft_and_reconciles_without_replay(store, monkeypatch):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     fake = SongCatalog()
     intent = {'video_id': 'exact-song', 'query': 'favorite', 'onboarding': True}
@@ -480,7 +484,7 @@ def test_interrupted_song_admission_keeps_the_onboarding_draft_and_reconciles_wi
 def test_known_non_dispatched_save_can_be_retried(store):
     from yt_playlist.integrations.youtube_music import YouTubeMusicUnavailable
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     write = fake.edit_song_library_status
 
@@ -498,7 +502,7 @@ def test_known_non_dispatched_save_can_be_retried(store):
 
 @pytest.mark.parametrize('refinement_available', [True, False])
 def test_mixed_query_ranks_original_artist_above_covers_and_recovers_missing_title(store, refinement_available):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     calls = []
 
@@ -523,7 +527,7 @@ def test_mixed_query_ranks_original_artist_above_covers_and_recovers_missing_tit
 
 
 def test_unknown_save_survives_restart_and_only_reconciles(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     fake.uncertain = True
     intent = {'video_id': 'exact-song', 'query': 'favorite'}
@@ -531,6 +535,8 @@ def test_unknown_save_survives_restart_and_only_reconciles(store):
         assert client.post('/search/songs/save', json=intent).json()['state'] == 'pending'
     assert not store.tracks.library_identity_key_for_video('exact-song')
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
+        row = client.get('/search/catalog?q=favorite').json()['songs'][0]
+        assert row['action_state'] == 'pending' and row['pending_saved'] is True
         assert client.post('/search/songs/save', json=intent).json()['state'] == 'pending'
         fake.saved.add('exact-song')  # the original remote request eventually becomes observable
         assert client.post('/search/songs/save', json={**intent, 'check': True}).json()['state'] == 'saved'
@@ -539,10 +545,24 @@ def test_unknown_save_survives_restart_and_only_reconciles(store):
     assert not store.actions.get_pending_actions('save_song')
 
 
+def test_catalog_pending_save_matches_both_account_and_upload(store):
+    account = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
+    for owner, video in [(other, 'exact-song'), (account, 'other-upload')]:
+        params = dict(account_id=owner, query='favorite', song={'video_id': video}, onboarding=False, saved=False)
+        store.actions.record_action('save_song', json.dumps(params), '{}', 'pending', '{}', 1000.)
+    fake = SongCatalog()
+    with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
+        row = client.get('/search/catalog?q=favorite').json()['songs'][0]
+        assert row['video_id'] == 'exact-song'
+        assert 'action_state' not in row and 'pending_saved' not in row
+    assert not fake.writes and len(store.actions.get_pending_actions('save_song')) == 2
+
+
 def test_song_only_onboarding_keeps_the_draft_and_builds_exact_first_set(store):
     from yt_playlist.library.playlist_generated import create_generated_playlist
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     fake = SongCatalog()
     fake.missing_ack = True
@@ -570,8 +590,8 @@ def test_song_only_onboarding_keeps_the_draft_and_builds_exact_first_set(store):
 
 
 def test_catalog_never_writes_through_another_connected_account(store):
-    main = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('other', 'other', None, False)
+    main = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
     fake = SongCatalog()
     with TestClient(app_for(store, {other: fake}), base_url='http://127.0.0.1') as client:
         assert client.get('/search/catalog?q=favorite').status_code == 503
@@ -580,7 +600,7 @@ def test_catalog_never_writes_through_another_connected_account(store):
 
 
 def test_query_cannot_supply_a_save_token_or_an_unreturned_video(store):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     with TestClient(app_for(store, {account: fake}), base_url='http://127.0.0.1') as client:
         assert client.post('/search/songs/save', json={
@@ -593,7 +613,7 @@ def test_native_song_sync_imports_ownership_without_inventing_ratings_and_retrie
     from yt_playlist.library.sync import sync_all
     from yt_playlist.library.sync_outcomes import sync_due
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     fake.get_library_playlists = lambda limit=None: PlaylistSnapshot()
     reads = []
@@ -633,7 +653,7 @@ def test_native_song_sync_imports_ownership_without_inventing_ratings_and_retrie
 def test_native_snapshot_cannot_restore_a_later_confirmed_removal(store, monkeypatch, when):
     from yt_playlist.controllers.library_synchronization import _sync_saved_songs
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     intent = {'video_id': 'exact-song', 'query': 'favorite'}
     removal = {**intent, 'saved': False}
@@ -686,7 +706,7 @@ def test_native_snapshot_cannot_restore_a_later_confirmed_removal(store, monkeyp
 def test_exact_song_and_artist_picks_combine_without_three_artist_requirement(store):
     from tests.test_artist_start import Catalog
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     with TestClient(app_for(store, {account: SongCatalog()}), base_url='http://127.0.0.1') as client:
         assert client.post('/search/songs/save', json={
@@ -704,7 +724,7 @@ def test_exact_song_and_artist_picks_combine_without_three_artist_requirement(st
 def test_liking_still_admits_a_song_through_liked_music(store):
     from yt_playlist.library.ops import PlaylistOps
 
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     fake = SongCatalog()
     fake._catalog['exact-song'] = fake.search('favorite')[0]
     store.tracks.observe_track_entry('exact-song', 'A favorite song', 'Favorite artist', now=999.)

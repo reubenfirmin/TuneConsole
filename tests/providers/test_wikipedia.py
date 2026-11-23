@@ -40,6 +40,21 @@ def test_fetch_summary_disambiguation_is_miss(monkeypatch):
     assert wikipedia.fetch_summary("artist", "Mercury") is None
 
 
+@pytest.mark.parametrize('extract, musical', [
+    ('Mercury is a planet.', False), ('Mercury is a rock band.', True),
+])
+def test_story_requires_a_music_biography_even_for_a_single_exact_name(monkeypatch, extract, musical):
+    _stub_json(monkeypatch, {
+        'list=search': {'query': {'search': [{'title': 'Mercury'}]}},
+        'page/summary': {'type': 'standard', 'title': 'Mercury', 'extract': extract},
+    })
+    result = wikipedia.fetch_summary('artist', 'Mercury', artist_genres=[])
+    if musical:
+        assert result['matched_genres'] == []
+    else:
+        assert result is None
+
+
 def test_fetch_summary_empty_extract_is_miss(monkeypatch):
     _stub_json(monkeypatch, {
         "list=search": {"query": {"search": [{"title": "Whatever"}]}},

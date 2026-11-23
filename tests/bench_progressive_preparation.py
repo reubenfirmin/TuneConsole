@@ -27,17 +27,15 @@ def test_continual_writes_publish_thin_then_richer_catalog(tmp_path, monkeypatch
     with store.conn:
         for i in range(n):
             key, video = f'song {i:04}|artist {i}', f'v{i}'
-            store.conn.execute('INSERT INTO recordings(id,identity_key,title,artist,genre,bpm,energy) '
+            store.conn.execute('INSERT INTO recordings(id,identity_key,title,artist,genre,bpm,danceability) '
                                'VALUES (?,?,?,?,?,?,?)',
                                (i + 1, key, f'Song {i}', f'Artist {i}',
                                 ('Techno', 'Jazz', 'Rock')[i % 3] if i % 4 == 0 else None,
                                 80 + i % 100, (i % 10) / 10))
-            store.conn.execute('INSERT INTO youtube_items(video_id,recording_id,title,artist,available,duration_s) '
-                               'VALUES (?,?,?,?,1,200)', (video, i + 1, f'Song {i}', f'Artist {i}'))
-            store.conn.execute('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-                               (i + 1, i + 1, video))
-            store.conn.execute("INSERT INTO library_memberships(entry_id,origin) VALUES (?,'fixture')", (i + 1,))
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+            store.conn.execute('INSERT INTO track_sources(id,recording_id,video_id,title,artist,available,duration_s) '
+                               'VALUES (?,?,?,?,?,1,200)', (i + 1, i + 1, video, f'Song {i}', f'Artist {i}'))
+            store.conn.execute("UPDATE track_sources SET library_origin='fixture' WHERE id=?", (i + 1,))
+    iid = store.accounts.upsert_account('Listener', None, True)
     for i in range(n // 48):
         pid = store.playlists.upsert_playlist(iid, f'playlist-{i}', f'Playlist {i}', 64, '', 1)
         store.playlists.set_playlist_tracks(pid, [(i * 48 + j) % n + 1 for j in range(64)])
@@ -62,7 +60,7 @@ def test_continual_writes_publish_thin_then_richer_catalog(tmp_path, monkeypatch
                     # accepted independently, and basis fits read accepted inputs.
                     store.conn.execute('UPDATE recordings SET bpm=? WHERE id=?',
                                        (90 + i % 100, n - i % 2))
-                    assert store.conn.execute('SELECT COUNT(*) FROM tracks').fetchone()[0] == n
+                    assert store.conn.execute('SELECT COUNT(*) FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)').fetchone()[0] == n
                 latencies.append(time.monotonic() - before)
                 writes.append(i)
                 started.set()

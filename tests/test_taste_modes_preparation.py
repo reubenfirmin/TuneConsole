@@ -1,5 +1,6 @@
 import numpy as np
 from yt_playlist.rec import embedding_vectors as embed, taste_modes as tm
+from yt_playlist.core.model_state import RecordingModelUpdate
 from tests.model_support import publish_modes
 
 
@@ -70,9 +71,9 @@ def test_preparation_keeps_empty_library_empty(monkeypatch, store):
 
 def _set_model(store, cat_tokens, cont=()):
     import json
-    store.settings.set_setting("rec_content_model", json.dumps(
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder=json.dumps(
         {"cat": {t: i for i, t in enumerate(cat_tokens)}, "ncat": len(cat_tokens),
-         "cont": [[c, 0.0, 1.0] for c in cont]}))
+         "cont": [[c, 0.0, 1.0] for c in cont]})))
 
 
 def test_preparation_survives_a_content_space_rebuild(monkeypatch, store):

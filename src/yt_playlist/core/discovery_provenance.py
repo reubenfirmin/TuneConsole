@@ -1,13 +1,18 @@
 """Typed discovery inputs and retained exposure facts. Callers own transactions."""
 import json
+import math
 
-from . import artist_keys, catalog_keys, collection_recovery, genre_identity
+from . import artist_keys, catalog_keys, collection_recovery, discovery_candidates, genre_identity
+from .artist_reconciliation import candidate, move_image_retry, move_scan_time
 
 
 SUBJECTS = {'track':'recording_id','artist':'artist_id','album':'album_id'}
-CANDIDATES = {'track':('discovery_memberships','recording_id'),
-              'artist':('discovered_artists','artist_id'),
-              'album':('album_discovery_memberships','album_id')}
+OFFER_OWNERS = {'track':'recordings','artist':'artists','album':'albums'}
+CANDIDATE_FILTERS = {'track': 'discovery_entry_id IS NOT NULL', 'artist': 'discovery_candidate=1',
+                     'album': 'discovery_found_at IS NOT NULL'}
+EARLIER_OFFERS = (('earlier_offer_count', 'offered_count', 'INTEGER NOT NULL DEFAULT 0'),
+                  ('earlier_first_shown', 'first_shown', 'REAL'),
+                  ('earlier_last_shown', 'last_shown', 'REAL'))
 
 
 def available(conn):
@@ -38,7 +43,7 @@ def origin_fields(conn, token, *, account_id=None, import_key=None):
     elif separator and kind in ('radio','genre','artist','artist_start'):
         target = None
         if kind=='radio':
-            row = conn.execute('SELECT video_id FROM youtube_items WHERE video_id=?',(value,)).fetchone()
+            row = conn.execute('SELECT video_id FROM track_sources WHERE video_id=?',(value,)).fetchone()
             target = row[0] if row else None
             column = 'seed_video_id'
         elif kind=='genre':
@@ -105,35 +110,22 @@ def retain_artist(conn, artist_id, origin_id, score):
 
 
 def explain(conn, artist_id, because, fits):
-    if not available(conn):
-        conn.execute('UPDATE main.discovered_artists SET because=?,fits=? WHERE artist_id=?',
-            (json.dumps(because or [], allow_nan=False), json.dumps(fits or [], allow_nan=False), artist_id))
-        return
     reference = collection_recovery.publish(conn,'discovery-candidate',artist_id,
         {'because':because or [],'fits':fits or []})
-    conn.execute('UPDATE discovered_artists SET recovery_filename=?,recovery_digest=?,recovery_bytes=? WHERE artist_id=?',
-        (*reference,artist_id))
+    write_explanation_reference(conn, artist_id, reference)
 
 
-def explanation(conn, row):
-    if 'preparation_artist_id' in row.keys():
-        identity = row['preparation_artist_id'] if row['preparation_artist_id'] is not None else row['artist']
-        return collection_recovery.read(row['recovery_filename'], row['recovery_digest'], row['recovery_bytes'],
-            kind='discovery-candidate', owner=identity)
-    if not available(conn):
-        return {field:json.loads(row[field] or '[]') for field in ('because','fits')}
-    if row['recovery_filename'] is None:
-        return {'because':[],'fits':[]}
-    return collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
-        kind='discovery-candidate',owner=row['artist_id'])
+def write_explanation_reference(conn, artist_id, reference, *, folded=True):
+    if folded:
+        conn.execute('UPDATE artists SET discovery_recovery_filename=?,discovery_recovery_digest=?,'
+                     'discovery_recovery_bytes=? WHERE id=? AND discovery_candidate=1', (*reference, artist_id))
+    else:
+        conn.execute('UPDATE discovered_artists SET recovery_filename=?,recovery_digest=?,recovery_bytes=? '
+                     'WHERE artist_id=?', (*reference, artist_id))
 
 
-def invalidate_explanation(conn, artist_id):
-    if not available(conn):
-        conn.execute("UPDATE main.discovered_artists SET because='[]',fits='[]' WHERE artist_id=?", (artist_id,))
-        return
-    conn.execute('UPDATE discovered_artists SET recovery_filename=NULL,recovery_digest=NULL,recovery_bytes=NULL '
-        'WHERE artist_id=?',(artist_id,))
+def invalidate_explanation(conn, artist_id, *, folded=True):
+    write_explanation_reference(conn, artist_id, (None, None, None), folded=folded)
 
 
 def subject(conn, kind, value):
@@ -154,87 +146,83 @@ def subject(conn, kind, value):
     raise ValueError('Unsupported discovery subject')
 
 
-def refresh_counts(conn, kind, identifier):
-    if not available(conn):
-        # Legacy counters include offers for which no distinct visit was captured.
-        # Existing writers increment them together with their visible receipt;
-        # reconstructing them from receipts would discard that older evidence.
+def offer_views(conn, kind, identifier):
+    row = conn.execute(f'SELECT discovery_views FROM {OFFER_OWNERS[kind]} WHERE id=?', (identifier,)).fetchone()
+    return json.loads(row[0]) if row else {}
+
+
+def refresh_counts(conn, kind, identifier, views=None):
+    if kind == 'album':
         return
-    table,column = CANDIDATES[kind]
-    count,first,last = conn.execute('SELECT count(*),min(shown_at),max(shown_at) '
-        'FROM discovery_impressions WHERE '+column+'=?',(identifier,)).fetchone()
-    conn.execute('UPDATE '+table+' SET offered_count=?,first_shown=?,last_shown=? WHERE '+column+'=?',
-        (count,first,last,identifier))
-    if kind!='track':
-        legacy = conn.execute('SELECT offered_count,first_shown,last_shown FROM discovery_legacy_offers WHERE '+
-            column+'=?',(identifier,)).fetchone()
-        conn.execute('UPDATE '+table+' SET legacy_offered_count=?,legacy_first_shown=?,legacy_last_shown=? WHERE '+column+'=?',
-            (*(tuple(legacy) if legacy else (0,None,None)),identifier))
+    if views is None:
+        views = offer_views(conn, kind, identifier)
+    times = views.values()
+    conn.execute(f'UPDATE {OFFER_OWNERS[kind]} SET discovery_offered_count=?,discovery_first_shown=?,'
+                 f'discovery_last_shown=? WHERE id=? AND {CANDIDATE_FILTERS[kind]}',
+                 (len(views), min(times, default=None), max(times, default=None), identifier))
 
 
-def impression(conn, kind, identifier, view_id, now, *, require_candidate=True):
-    table,column = CANDIDATES[kind]
-    if require_candidate and not conn.execute('SELECT 1 FROM '+table+' WHERE '+column+'=?',(identifier,)).fetchone():
+def _save_views(conn, kind, identifier, views):
+    conn.execute(f'UPDATE {OFFER_OWNERS[kind]} SET discovery_views=? WHERE id=?',
+                 (json.dumps(views, separators=(',', ':')), identifier))
+    refresh_counts(conn, kind, identifier, views)
+
+
+def impression(conn, kind, identifier, view_id, now):
+    row = conn.execute(f'SELECT discovery_views FROM {OFFER_OWNERS[kind]} '
+                       f'WHERE id=? AND {CANDIDATE_FILTERS[kind]}', (identifier,)).fetchone()
+    if row is None or view_id is None or not isinstance(now, (int, float)) or not math.isfinite(now):
         return False
-    if not available(conn):
-        if kind == 'artist':
-            key = str(identifier)
-        elif kind == 'track':
-            key = conn.execute('SELECT identity_key FROM recordings WHERE id=?', (identifier,)).fetchone()[0]
-        else:
-            row = conn.execute("SELECT provider_id FROM album_primary_provider_ids WHERE provider='youtube' AND album_id=?", (identifier,)).fetchone()
-            if row is None:
-                return False
-            key = row[0]
-        inserted = conn.execute('INSERT OR IGNORE INTO discovery_visible_impressions VALUES (?,?,?,?)',
-            (view_id, kind, key, now)).rowcount
-        if inserted:
-            conn.execute('UPDATE '+table+' SET offered_count=offered_count+1,'
-                'first_shown=CASE WHEN first_shown IS NULL THEN ? ELSE min(first_shown,?) END,'
-                'last_shown=CASE WHEN last_shown IS NULL THEN ? ELSE max(last_shown,?) END WHERE '+column+'=?',
-                (now, now, now, now, identifier))
-        return bool(inserted)
-    inserted = conn.execute('INSERT OR IGNORE INTO discovery_impressions(view_id,'+column+',shown_at) VALUES (?,?,?)',
-        (view_id,identifier,now)).rowcount
-    refresh_counts(conn,kind,identifier)
-    return bool(inserted)
+    views = json.loads(row[0])
+    view_id = str(view_id)
+    if view_id in views:
+        return False
+    views[view_id] = now
+    _save_views(conn, kind, identifier, views)
+    return True
 
 
-def retain_legacy(conn, kind, identifier, count, first, last):
-    column = SUBJECTS[kind]
-    existing = conn.execute('SELECT id,offered_count,first_shown,last_shown FROM discovery_legacy_offers WHERE '+column+'=?',
-        (identifier,)).fetchone()
-    if existing:
-        starts = [v for v in (existing['first_shown'],first) if v is not None]
-        ends = [v for v in (existing['last_shown'],last) if v is not None]
-        conn.execute('UPDATE discovery_legacy_offers SET offered_count=offered_count+?,first_shown=?,last_shown=? WHERE id=?',
-            (count,min(starts) if starts else None,max(ends) if ends else None,existing['id']))
-    else:
-        conn.execute('INSERT INTO discovery_legacy_offers('+column+',offered_count,first_shown,last_shown) VALUES (?,?,?,?)',
-            (identifier,count,first,last))
+def merge_earlier_offers(conn, kind, previous, target):
+    table = OFFER_OWNERS[kind]
+    moved = conn.execute(f'''UPDATE {table} AS current SET
+        earlier_offer_count=current.earlier_offer_count+old.earlier_offer_count,
+        earlier_first_shown=min(coalesce(current.earlier_first_shown,old.earlier_first_shown),
+                                coalesce(old.earlier_first_shown,current.earlier_first_shown)),
+        earlier_last_shown=max(coalesce(current.earlier_last_shown,old.earlier_last_shown),
+                               coalesce(old.earlier_last_shown,current.earlier_last_shown))
+        FROM {table} old WHERE current.id=? AND old.id=? AND current.id<>old.id
+          AND (old.earlier_offer_count<>0 OR old.earlier_first_shown IS NOT NULL OR old.earlier_last_shown IS NOT NULL)
+    ''', (target, previous)).rowcount
+    if moved:
+        conn.execute(f'UPDATE {table} SET earlier_offer_count=0,earlier_first_shown=NULL,earlier_last_shown=NULL '
+                     'WHERE id=?', (previous,))
 
 
-def merge_subject(conn, kind, previous, target, *, reason):
+def merge_subject(conn, kind, previous, target):
     """Fold visible impressions and legacy offer counts into the surviving subject."""
-    column = SUBJECTS[kind]
-    facts = [dict(r) for r in conn.execute('SELECT * FROM discovery_impressions WHERE '+column+' IN (?,?)',
-        (previous,target))]
-    legacy = [dict(r) for r in conn.execute('SELECT * FROM discovery_legacy_offers WHERE '+column+' IN (?,?)',
-        (previous,target))]
-    for row in facts:
-        if row[column]==previous:
-            conn.execute('INSERT INTO discovery_impressions(view_id,'+column+',shown_at) VALUES (?,?,?) '
-                'ON CONFLICT(view_id,'+column+') WHERE '+column+' IS NOT NULL '
-                'DO UPDATE SET shown_at=min(shown_at,excluded.shown_at)',(row['view_id'],target,row['shown_at']))
-    conn.execute('DELETE FROM discovery_impressions WHERE '+column+'=?',(previous,))
-    for row in legacy:
-        if row[column]==previous:
-            retain_legacy(conn,kind,target,row['offered_count'],row['first_shown'],row['last_shown'])
-    conn.execute('DELETE FROM discovery_legacy_offers WHERE '+column+'=?',(previous,))
-    refresh_counts(conn,kind,target)
+    if previous == target:
+        return
+    old = offer_views(conn, kind, previous)
+    if old:
+        views = offer_views(conn, kind, target)
+        for view, shown in old.items():
+            views[view] = min(shown, views.get(view, shown))
+        _save_views(conn, kind, target, views)
+        _save_views(conn, kind, previous, {})
+    else:
+        refresh_counts(conn, kind, target)
+    merge_earlier_offers(conn, kind, previous, target)
 
 
-def merge_origins(conn, column, previous, target, *, reason):
+def merge_fetches(conn, previous, target):
+    conn.execute('''UPDATE discovery_origins SET fetch_sources=(SELECT json_group_array(json(value)) FROM (
+        SELECT value FROM json_each(fetch_sources) UNION
+        SELECT value FROM json_each((SELECT fetch_sources FROM discovery_origins WHERE id=?))))
+        WHERE id=? AND EXISTS(SELECT 1 FROM discovery_origins WHERE id=? AND fetch_sources<>'[]')''',
+        (previous, target, previous))
+
+
+def merge_origins(conn, column, previous, target, *, reason, folded=True):
     if column not in ('artist_id','album_id','genre_key'):
         raise ValueError('Unsupported discovery origin identity')
     for old in conn.execute('SELECT * FROM discovery_origins WHERE '+column+'=?',(previous,)).fetchall():
@@ -243,53 +231,56 @@ def merge_origins(conn, column, previous, target, *, reason):
         if current is None:
             conn.execute('UPDATE discovery_origins SET '+column+'=? WHERE id=?',(target,old['id']))
             for aid, in conn.execute('SELECT artist_id FROM discovery_artist_sources WHERE origin_id=?',(old['id'],)):
-                invalidate_explanation(conn,aid)
+                invalidate_explanation(conn,aid,folded=folded)
             continue
         oid = current[0]
+        merge_fetches(conn, old['id'], oid)
         sources = conn.execute('SELECT * FROM discovery_sources WHERE origin_id=?',(old['id'],)).fetchall()
         for row in sources:
             retain(conn,row['recording_id'],oid,row['input_video_id'],row['last_found_at'],first_found_at=row['first_found_at'])
         for row in conn.execute('SELECT * FROM discovery_artist_sources WHERE origin_id=?',(old['id'],)).fetchall():
             retain_artist(conn,row['artist_id'],oid,row['score'])
-            invalidate_explanation(conn,row['artist_id'])
+            invalidate_explanation(conn,row['artist_id'],folded=folded)
         conn.execute('DELETE FROM discovery_sources WHERE origin_id=?',(old['id'],))
         conn.execute('DELETE FROM discovery_artist_sources WHERE origin_id=?',(old['id'],))
         conn.execute('DELETE FROM discovery_origins WHERE id=?',(old['id'],))
 
 
-def reconcile_artist_sources(conn, previous, target, *, reason='canonical artist reconciliation'):
+def reconcile_artist_sources(conn, previous, target, *, reason='canonical artist reconciliation', folded=True):
     for row in conn.execute('SELECT * FROM discovery_artist_sources WHERE artist_id IN (?,?)',
                             (previous,target)).fetchall():
         if row['artist_id']==previous:
             retain_artist(conn,target,row['origin_id'],row['score'])
     conn.execute('DELETE FROM discovery_artist_sources WHERE artist_id=?',(previous,))
-    merge_origins(conn,'artist_id',previous,target,reason=reason)
+    merge_origins(conn,'artist_id',previous,target,reason=reason,folded=folded)
 
 
 def reconcile_artist(conn, previous, target, *, source):
-    reconcile_artist_sources(conn,previous,target,reason=source)
+    folded = discovery_candidates.artists_folded(conn)
+    reconcile_artist_sources(conn,previous,target,reason=source,folded=folded)
     if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='discovery_artist_image_state'").fetchone():
         conn.execute('INSERT INTO discovery_artist_image_state(artist_id,retry_at) SELECT ?,retry_at '
             'FROM discovery_artist_image_state WHERE artist_id=? ON CONFLICT(artist_id) DO UPDATE SET '
             'retry_at=max(retry_at,excluded.retry_at)',(target,previous))
         conn.execute('DELETE FROM discovery_artist_image_state WHERE artist_id=?',(previous,))
-    for table,clock in (('artist_scans','scanned_at'),('discovered_artists','found_at')):
-        rows = [dict(r) for r in conn.execute('SELECT * FROM '+table+' WHERE artist_id IN (?,?)',(previous,target))]
-        if not rows:
-            continue
-        winner = max(rows,key=lambda r:(r[clock] if r[clock] is not None else float('-inf'),r['artist_id']==target))
-        if table=='discovered_artists':
-            starts = [r['found_at'] for r in rows if r['found_at'] is not None]
-            winner['found_at'] = min(starts) if starts else None
-            winner.update(recovery_filename=None,recovery_digest=None,recovery_bytes=None)
-        winner['artist_id'] = target
-        conn.execute('DELETE FROM '+table+' WHERE artist_id IN (?,?)',(previous,target))
-        conn.execute('INSERT INTO '+table+'('+','.join(winner)+') VALUES ('+','.join('?' for _ in winner)+')',tuple(winner.values()))
-    merge_subject(conn,'artist',previous,target,reason=source)
-    invalidate_explanation(conn,target)
+    elif conn.execute("SELECT 1 FROM pragma_table_info('artists') WHERE name='discovery_image_retry_at'").fetchone():
+        move_image_retry(conn, previous, target)
+    move_scan_time(conn, previous, target)
+    rows = [dict(row) for row in conn.execute('SELECT * FROM discovered_artists WHERE artist_id IN (?,?)',
+                                             (previous, target))]
+    winner = candidate(rows, target)
+    if winner is not None:
+        if folded:
+            discovery_candidates.merge_artist(conn, previous, target, winner)
+        else:
+            conn.execute('DELETE FROM discovered_artists WHERE artist_id IN (?,?)', (previous, target))
+            conn.execute('INSERT INTO discovered_artists('+','.join(winner)+') VALUES ('+
+                         ','.join('?' for _ in winner)+')', tuple(winner.values()))
+    merge_subject(conn, 'artist', previous, target)
+    invalidate_explanation(conn,target,folded=folded)
 
 
-def remove_spotify_artists(conn, *, account_id=None, import_key=None):
+def remove_spotify_artists(conn, *, account_id=None, import_key=None, folded=True):
     where = "o.kind IN ('spotify_export','spotify_model')"
     parameters = []
     if account_id is not None:
@@ -307,26 +298,40 @@ def remove_spotify_artists(conn, *, account_id=None, import_key=None):
     for aid in affected:
         remaining = conn.execute('SELECT max(score) FROM discovery_artist_sources WHERE artist_id=?',(aid,)).fetchone()[0]
         if remaining is None:
-            removed += conn.execute('DELETE FROM discovered_artists WHERE artist_id=?',(aid,)).rowcount
+            if folded:
+                removed += discovery_candidates.clear_artist(conn, aid)
+            else:
+                removed += conn.execute('DELETE FROM discovered_artists WHERE artist_id=?',(aid,)).rowcount
         else:
-            conn.execute('UPDATE discovered_artists SET score=? WHERE artist_id=?',(remaining,aid))
+            if folded:
+                conn.execute('UPDATE artists SET discovery_score=? WHERE id=? AND discovery_candidate=1', (remaining, aid))
+            else:
+                conn.execute('UPDATE discovered_artists SET score=? WHERE artist_id=?',(remaining,aid))
             if aid in derived:
-                invalidate_explanation(conn,aid)
+                invalidate_explanation(conn,aid,folded=folded)
     return removed
 
 
-def finish_reassociation(conn, video_id, previous, target, member, remaining, now, *, association_id):
+def finish_reassociation(conn, video_id, previous, target, member, now, *, merge_recordings, association_id,
+                         merge_offers=merge_subject, refresh_offers=refresh_counts):
+    folded = discovery_candidates.tracks_folded(conn)
     sources = conn.execute('SELECT * FROM discovery_sources WHERE recording_id=? '+
-        ('' if remaining is None else 'AND input_video_id=?'),
-        (previous,) if remaining is None else (previous,video_id)).fetchall()
-    if member and (remaining is None or sources):
-        entry = conn.execute('SELECT id FROM catalog_entries WHERE recording_id=? AND video_id=?',(target,video_id)).fetchone()[0]
-        conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) '
-            'ON CONFLICT(recording_id) DO UPDATE SET found_at=min(coalesce(found_at,excluded.found_at),coalesce(excluded.found_at,found_at))',
-            (target,entry,member['found_at']))
+        ('' if merge_recordings else 'AND input_video_id=?'),
+        (previous,) if merge_recordings else (previous,video_id)).fetchall()
+    if member and (merge_recordings or sources):
+        found = member['found_at'] if merge_recordings else min(
+            (row['first_found_at'] for row in sources if row['first_found_at'] is not None), default=now)
+        entry = conn.execute('SELECT id FROM track_sources WHERE recording_id=? AND video_id=?',(target,video_id)).fetchone()[0]
+        if folded:
+            discovery_candidates.admit_track(conn, target, entry, found, merge=True)
+        else:
+            conn.execute('INSERT INTO discovery_memberships(recording_id,entry_id,found_at) VALUES (?,?,?) '
+                'ON CONFLICT(recording_id) DO UPDATE SET found_at=min(coalesce(found_at,excluded.found_at),coalesce(excluded.found_at,found_at))',
+                (target,entry,found))
     for row in sources:
         retain(conn,target,row['origin_id'],row['input_video_id'],row['last_found_at'],first_found_at=row['first_found_at'])
         conn.execute('DELETE FROM discovery_sources WHERE id=?',(row['id'],))
-    if remaining is None:
-        merge_subject(conn,'track',previous,target,reason='recording reassociation '+str(association_id))
-    refresh_counts(conn,'track',target)
+    if merge_recordings:
+        merge_offers(conn, 'track', previous, target)
+    else:
+        refresh_offers(conn, 'track', target)

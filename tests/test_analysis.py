@@ -24,7 +24,7 @@ def _memberships(store, rows):
     return [p.id for p in playlists]
 
 def _seed_two_playlists(store, keys_a, keys_b):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pa = store.playlists.upsert_playlist(iid, "PLA", "A", len(keys_a), "ha", 100.0)
     pb = store.playlists.upsert_playlist(iid, "PLB", "B", len(keys_b), "hb", 100.0)
     # Shared fixture songs refer to the same exact upload in both playlists.
@@ -33,7 +33,7 @@ def _seed_two_playlists(store, keys_a, keys_b):
     tids_b = []
     for i, k in enumerate(keys_b):
         # reuse existing track if key already inserted (shared tracks between playlists)
-        existing = store.conn.execute("SELECT id FROM tracks WHERE video_id=?", ('track:'+k,)).fetchone()
+        existing = store.conn.execute("SELECT id FROM catalog_tracks WHERE video_id=?", ('track:'+k,)).fetchone()
         if existing:
             tids_b.append(existing[0])
         else:
@@ -169,7 +169,7 @@ def test_merge_signature_is_canonical():
 def test_ignored_merge_reappears_when_membership_changes(store):
     """The dismissal is keyed to the exact set: a NEW copy joining the cluster re-surfaces it."""
     from yt_playlist.library.analysis import find_identical_groups, merge_signature
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Mix", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Mix", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "S1", "X", None, 1)

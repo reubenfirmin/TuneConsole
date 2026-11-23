@@ -61,10 +61,10 @@ def seed_choice_catalog(store, first):
     vectors = []
     for index, track in enumerate(payload['tracks']):
         key = f'track {index}|all them witches'
-        entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+        entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                    (track['videoId'],)).fetchone()[0]
         with store.conn:
-            store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)", (entry,))
+            store.conn.execute("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL", (entry,))
         tracks.append({'key': key, 'video_id': track['videoId']})
         vectors.append((key, np.array([1., 0.], dtype=np.float32).tobytes()))
     store.collection.add_saved_album({'browse': 'anchor', 'title': 'Anchor', 'artist': 'Anchor'})
@@ -167,25 +167,28 @@ def setup_choices(store, first, second, before, scenario, *, catalog, distinct=F
     return events
 
 
-def measure(store, now):
+def measure(store, now, *, corroborated_track=None):
     frozen = raw(store)
     choice_evidence.refresh_report(store, now)
     projection = store.rec_proposals.get_proposals('choice_interests')
-    assert not projection.get('album_track_days')
     contexts = [row for row in choice_learning.contexts(store, now) if row['format'] == 'albums']
+    expected_track_days = {contexts[0]['option_id']: {corroborated_track: 1}} if corroborated_track else {}
+    assert (projection.get('album_track_days') or {}) == expected_track_days
     tastes = (scoring.playlist_taste(store, now=now), scoring.content_taste(store, now=now))
     assert raw(store) == frozen
     return contexts, tastes
 
 
-def assert_release(store, now, days, latest):
-    contexts, tastes = measure(store, now)
+def assert_release(store, now, days, latest, *, corroborated_track=None):
+    contexts, tastes = measure(store, now, corroborated_track=corroborated_track)
     context, = contexts
     assert context['days'] == days
-    standing = .5 if days >= 3 else 0.
+    assert context['sustained'] is bool(corroborated_track)
+    # The latest selection is unplayed, even when an earlier choice is corroborated.
+    standing = rec_params.get_param(store, 'choice_saved_w') / 2 if corroborated_track else 0.
     assert context['layer_weights']['saved'] == pytest.approx(standing)
     assert context['layer_weights']['now'] == context['layer_weights']['session'] == 0
-    recent = rec_params.get_param(store, 'choice_recent_w') * 2 ** (
+    recent = rec_params.get_param(store, 'choice_recent_w') / 2 * 2 ** (
         -(now - latest) / (DAY * rec_params.get_param(store, 'choice_halflife_d')))
     assert context['layer_weights']['recent'] == pytest.approx(recent)
     for taste in tastes:
@@ -225,6 +228,30 @@ def test_withdrawal_keeps_a_shared_date_until_its_last_choice_is_withdrawn(store
     assert current['opportunity'] == original['opportunity']
     assert all(row in current['response'] for row in original['response'])
     assert all(current_files.get(path) == value for path, value in files.items())
+
+
+@pytest.mark.parametrize('first', [OLD, ALIAS])
+@pytest.mark.parametrize('before', [True, False])
+def test_corroborated_alias_choice_graduates_and_withdrawal_keeps_the_date(store, first, before, choice_catalog):
+    second = ALIAS if first == OLD else OLD
+    setup_choices(store, first, second, before, 'overlap', catalog=choice_catalog)
+    assert store.collection.album_id(first) == store.collection.album_id(second)
+    latest = START + 2 * DAY + 1
+    assert_release(store, NOW, 3, latest)
+
+    account = store.accounts.upsert_account('listener', None, True)
+    _, tracks = choice_catalog
+    track = tracks[0]
+    played_at = START + DAY + 2
+    store.history.record_play_event(account, track['key'], track['video_id'], played_at,
+                                    context_choice=True, source_timezone='UTC')
+    choice_evidence.respond(store, 'choice:1:0', 'start', played_at, option_id=first,
+                            action_id='confirmed-start', details={'account_id': account, 'video_id': track['video_id']})
+    assert_release(store, NOW + 1, 3, latest, corroborated_track=track['key'])
+
+    choice_evidence.respond(store, 'choice:1:0', 'withdraw', NOW + 2,
+                            action_id='withdraw-confirmed', details={'action_id': 'choice:1:0'})
+    assert_release(store, NOW + 3, 3, latest)
 
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])

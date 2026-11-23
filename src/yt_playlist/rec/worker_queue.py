@@ -24,6 +24,7 @@ class Job(StrEnum):
     CHOICES = "choices"
     GROUPS = "groups"
     MODEL_HEALTH = "model_health"
+    LIBRARY_TASTE = "library_taste"
 
 
 @dataclass
@@ -81,7 +82,9 @@ class PendingJobs:
     @property
     def visible(self):
         """Measurements, summaries and shadow groups do not show a model refresh."""
-        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES, Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH} for job in self.pending)
+        return any(job not in {Job.MEASUREMENT, Job.EVIDENCE_STORAGE, Job.RETENTION, Job.CHOICES,
+                               Job.ANALYTICS, Job.GROUPS, Job.TV, Job.MODEL_HEALTH, Job.LIBRARY_TASTE}
+                   for job in self.pending)
 
     @property
     def measurements(self):
@@ -136,7 +139,7 @@ class PendingJobs:
         """Detach one ordered pass. Arrivals during execution belong to the next pass.
 
         Keep FULL and MODES intent together: FULL absorbs local repair on success,
-        but a failed full pass must hand MODES back. Home also prepares stories.
+        but a failed full pass must hand MODES back.
         """
         batch = {}
         for job in Job:
@@ -152,7 +155,6 @@ class PendingJobs:
             batch[job] = payload
         if Job.HOME in batch:
             self.retry[Job.HOME].dirty = False
-            batch.setdefault(Job.STORIES, True)
         return batch
 
     def cancel(self):

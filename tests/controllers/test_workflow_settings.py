@@ -89,18 +89,8 @@ def test_family_validates_every_receipt_before_publishing_any(service):
     service.files.publish_reserved.assert_not_called()
 
 
-def test_gc_delete_and_receipt_family_delete_do_not_write_files(service):
-    key = workflows._gc_key(7, 'remote')
-    plans = service.prepare_values({key: None, workflows.PLAYLIST+':7': None})
-    assert plans[0][0] == 'gc'
-    assert plans[0][1]['value'] is None
-    assert plans[1] == ('delete', ('playlist', 7), None)
-    service.files.publish_reserved.assert_not_called()
-
-
-def test_gc_value_cannot_change_its_target(service):
-    with pytest.raises(ValueError, match='captured target'):
-        service.prepare_values({workflows._gc_key(7, 'remote'): json.dumps({'identity': 8, 'ytm': 'remote'})})
+def test_receipt_family_delete_does_not_write_files(service):
+    assert service.prepare_values({workflows.PLAYLIST+':7': None}) == [('delete', ('playlist', 7), None)]
     service.files.publish_reserved.assert_not_called()
 
 
@@ -121,7 +111,7 @@ def test_receipt_reads_overlay_sql_fields_and_keep_opaque_evidence(service):
 def test_settings_prefix_reads_captured_manifests_outside_the_repository(service):
     files = create_autospec(RecommendationFiles, instance=True, spec_set=True)
     files.retained.side_effect = nullcontext
-    service.repository.prefix_documents.return_value = ({'ordinary': 'value'}, {}, [workflows.PLAYLIST+':7'])
+    service.repository.prefix_documents.return_value = ({'ordinary': 'value'}, [workflows.PLAYLIST+':7'])
     service.repository.workflow_documents.return_value = []
     settings = Settings(service.repository, files, service.files)
     assert settings.get_settings_with_prefix('') == {'ordinary': 'value', workflows.PLAYLIST+':7': None}

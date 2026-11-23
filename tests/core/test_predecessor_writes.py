@@ -23,9 +23,6 @@ def admitted_installed(request, tmp_path, _admitted_installed_schema):
     store = Store(tmp_path / 'installed.db')
     try:
         template.restore(store)
-        for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-            setattr(store, name, getattr(template.source, name))
-        assert store._rebuild_source_version is None
         store._bind_repositories()
         assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
         # restore owns the source's complete TEMP revision guards as well as
@@ -53,7 +50,7 @@ def installed(request, tmp_path, _pristine_installed_schema):
         setup.conn.close()
     store = Store(path)
     try:
-        store.init_schema(defer_metadata=True)
+        store.init_schema()
         history = [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')]
         yield store, request.param
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')] == history
@@ -83,8 +80,6 @@ def consumer_installed(request, tmp_path, monkeypatch, _bounded_installed_schema
         template = _bounded_installed_schema(version)
         template.restore(store)
         store._fixture_installed_template = template
-        for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-            setattr(store, name, getattr(template.source, name))
         store._bind_repositories()
         assert store.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0].lower() == 'wal'
         assert store._snapshot_revisions.conn is store.conn
@@ -118,10 +113,10 @@ def test_admitted_publication_inputs_keep_pinned_reads_and_real_write_guards(
 
 def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
     store, version = installed
-    main = store.accounts.upsert_account('Main', 'main.json', None, True)
-    brand = store.accounts.upsert_account('Brand', 'brand.json', 'remote-brand', False)
-    configs = [AccountConfig('Brand', 'main.json', None, True, main),
-               AccountConfig('Main', 'brand.json', 'remote-brand', False, brand)]
+    main = store.accounts.upsert_account('Main', None, True)
+    brand = store.accounts.upsert_account('Brand', 'remote-brand', False)
+    configs = [AccountConfig('Brand', None, True, main),
+               AccountConfig('Main', 'remote-brand', False, brand)]
     before = store.accounts.get_accounts()
     table = 'identities' if version < 103 else 'accounts'
     store.conn.execute(f"CREATE TEMP TRIGGER fail_account_update BEFORE UPDATE OF label ON {table} "
@@ -133,15 +128,15 @@ def test_account_reconciliation_keeps_physical_ids_and_rolls_back(installed):
     assert store.accounts.replace_accounts(configs) == {'Brand': main, 'Main': brand}
     assert store.accounts.get_master_account().id == main
     with pytest.raises(ValueError, match='retargeted'):
-        store.accounts.upsert_account('Brand', 'new.json', 'another-remote-account', True)
+        store.accounts.upsert_account('Brand', 'another-remote-account', True)
     assert [tuple(row) for row in store.conn.execute(f'SELECT id,label FROM main.{table} ORDER BY id')] == [
         (main, 'Brand'), (brand, 'Main')]
 
 
 def test_playlist_sync_and_curation_keep_memberships_accounts_and_revisions(installed):
     store, _ = installed
-    accounts = [store.accounts.upsert_account('Main', 'main.json', None, True),
-                store.accounts.upsert_account('Other', 'other.json', None, False)]
+    accounts = [store.accounts.upsert_account('Main', None, True),
+                store.accounts.upsert_account('Other', None, False)]
     song = store.tracks.upsert_track('upload', 'Song', 'Artist', None, 123)
     memberships = [store.playlists.upsert_playlist(account, 'LM', 'Liked Music', 0, '', 1)
                    for account in accounts]
@@ -181,7 +176,7 @@ def test_playlist_sync_and_curation_keep_memberships_accounts_and_revisions(inst
 
 def test_ratings_and_raw_player_events_keep_upsert_order_and_inserted_ids(installed):
     store, _ = installed
-    account = store.accounts.upsert_account('Main', 'main.json', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     store.tracks.upsert_track('upload', 'Song', 'Artist', None, 123)
     store.tracks.record_item_rating(account, 'upload', 'LIKE', source='api', now=10)
     store.tracks.record_item_rating(account, 'upload', 'DISLIKE', source='sync', now=9)
@@ -192,6 +187,7 @@ def test_ratings_and_raw_player_events_keep_upsert_order_and_inserted_ids(instal
     ids = [store.player_events.record_player_event(account, 'next', 'upload', 3, 123, None, '{}', at)
            for at in (12, 13)]
     assert ids[1] > ids[0]
-    assert [row[0] for row in store.conn.execute('SELECT id FROM main.player_events ORDER BY id')] == ids
+    assert [row[0] for row in store.conn.execute(
+        "SELECT id FROM main.player_events WHERE kind='next' ORDER BY id")] == ids
     with store.read_view() as reader:
-        assert [row['account_id'] for row in reader.player_events.player_events_since(12)] == [account, account]
+        assert [row['account_id'] for row in reader.player_events.player_events_since(12, kind='next')] == [account, account]

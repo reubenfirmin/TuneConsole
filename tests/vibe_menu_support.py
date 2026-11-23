@@ -19,7 +19,14 @@ class PublishedMenus:
         return {'id': 1}
 
     def framing(self, surface, **kwargs):
-        return {'vibe_version': home_vibe.VERSION, 'comfort_pool': 36, 'year_low': None}
+        return {'generation_id': 1, 'vibe_version': home_vibe.VERSION, 'comfort_pool': 36, 'year_low': None}
+
+    def vibe_fresh_candidates(self, surface, generation, *, include, avoid, limit):
+        pools = self.bundle['_vibes']['pools'][surface.removeprefix('vibe:')]
+        return [{**deepcopy(item), '_mix_selection': surface} for item in pools['fresh'][:limit]]
+
+    def explain_mix(self, tracks):
+        pass
 
     def output(self, surface, name):
         return {'vibe_readiness': self.index}
@@ -41,15 +48,15 @@ def vibe_selection():
     # The original 116 subjects, six presets, shared library reserves and full
     # profiles remain. Catalog acquisition, inference and publication are below
     # this boundary; both selection algorithms and profile hydration stay real.
-    stamp = vibe_preparation.serving_prefix() + 'completed-provider-inputs'
+    stamp = vibe_preparation.serving_prefix() + 'completed-measurement-inputs'
     profiles = {}
     for soft in (True, False):
-        attributes = {'energy': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
+        attributes = {'intensity': .1 if soft else .9, 'mood_relaxed': .9 if soft else .1,
                       'mood_happy': .8 if soft else .2}
-        profile = musical_profiles.resolve([], selected=attributes)
+        profile = musical_profiles.resolve([], overrides=attributes)
         profile['vibes'] = {'inputs_version': stamp, 'fits': {
             preset: {'score': home_vibe.heuristic_affinity(profile, preset), 'support': .8,
-                     'source': 'provider_measurement'} for preset in home_vibe.PRESETS}}
+                     'source': 'audio_measurement'} for preset in home_vibe.PRESETS}}
         profiles[soft] = profile
     lanes, by_key = {}, {}
     for lane, count in (('wheelhouse', 16), ('explore', 16), ('fresh', 48), ('comfort', 36)):
@@ -70,8 +77,14 @@ def vibe_selection():
     items = {item['key']: item for values in lanes.values() for item in values}
     owned = {key: item for key, item in items.items() if not item['_radio_fresh']}
     fresh = {key: item for key, item in items.items() if item['_radio_fresh']}
+    comfort = {
+        item['key']: {'key': item['key'], 'liked': index % 2 == 0,
+                      'plays': 6 if index % 2 else 0,
+                      'last_played': -90 * 86400 if index % 2 else None}
+        for index, item in enumerate(lanes['comfort'])
+    }
     store = SimpleNamespace(
-        _recommendation_files=True, _read_only=True,
+        _read_only=True,
         settings=SimpleNamespace(get_setting=lambda key: None),
         recommendations=PublishedMenus(bundle),
         musical_profiles=SimpleNamespace(
@@ -84,8 +97,8 @@ def vibe_selection():
         rec_model=SimpleNamespace(suppressed_keys=lambda *args, **kwargs: set(),
                                  get_weights=lambda **kwargs: {}, muted_artists=lambda: ()),
         rec_query=SimpleNamespace(group_candidates=lambda keys: {key: owned[key] for key in keys if key in owned}),
-        rec_candidates=SimpleNamespace(comfort_candidates=lambda now, *, keys, limit, **kwargs:
-            [item for item in lanes['comfort'] if item['key'] in keys][:limit]),
+        rec_candidates=SimpleNamespace(comfort_facts=lambda keys:
+            [comfort[key] for key in keys if key in comfort]),
         discovery=SimpleNamespace(candidate_tracks_by_keys=lambda keys:
                                   {key: fresh[key] for key in keys if key in fresh}),
         genres=SimpleNamespace(feature_axes=lambda labels: {label: ('jazz', None) for label in labels}),

@@ -83,7 +83,7 @@ ALLOWED_DOMAINS = frozenset({
     "audioscrobbler.com",  # enrichment: Last.fm API (ws.audioscrobbler.com)
     "last.fm",            # enrichment: Last.fm album HTML page, for the Release Date (www.last.fm)
     "deezer.com",         # enrichment: BPM (api.deezer.com), no auth
-    "acousticbrainz.org",  # enrichment: BPM/energy/danceability by MusicBrainz recording MBID
+    "acousticbrainz.org",  # enrichment: native audio features by MusicBrainz recording MBID
     "coverartarchive.org",  # enrichment: album art by MusicBrainz release MBID, no auth
     "archive.org",        # where coverartarchive.org redirects its JSON + images (its CDN)
     "wikipedia.org",      # into-recently card: keyless page summaries (en.wikipedia.org)

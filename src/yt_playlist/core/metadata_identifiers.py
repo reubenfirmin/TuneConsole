@@ -12,7 +12,7 @@ def record(conn, entry_id, provider, field, value, delivery_id, *, observation_i
         raise ValueError('Identifier evidence requires bounded nonempty text')
     now = evidence._clock(now)
     with evidence._atomic(conn):
-        subject = conn.execute('SELECT recording_id,video_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id,video_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         delivery = conn.execute('SELECT provider,input_entry_id,input_recording_id,input_video_id,observed_at '
                                 'FROM metadata_deliveries WHERE id=?', (delivery_id,)).fetchone()
         if subject is None or delivery is None or tuple(delivery[:4]) != (provider, entry_id, *tuple(subject)):

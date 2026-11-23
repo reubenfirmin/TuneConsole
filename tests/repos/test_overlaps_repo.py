@@ -56,7 +56,7 @@ def test_bulk_suppression_resolves_each_reference_once_and_commits_once(store, m
 
 def test_bulk_suppression_rolls_back_pairs_and_new_scopes_on_failure(store):
     store.overlaps.suppress_overlap('KEEP', 'STAY', now=1)
-    store.conn.execute("CREATE TEMP TRIGGER reject_test_pair BEFORE INSERT ON suppressed_overlaps "
+    store.conn.execute("CREATE TEMP TRIGGER reject_test_pair BEFORE INSERT ON playlist_overlap_decisions "
                        "WHEN NEW.second_playlist_scope_id='PLZ' BEGIN SELECT RAISE(ABORT,'rejected pair'); END")
     with pytest.raises(sqlite3.IntegrityError, match='rejected pair'):
         store.overlaps.suppress_overlaps([['PLA', 'PLB'], ['PLA', 'PLZ']], now=2)
@@ -65,7 +65,7 @@ def test_bulk_suppression_rolls_back_pairs_and_new_scopes_on_failure(store):
 
 
 def test_bulk_suppression_normalizes_account_references_before_deduplication(store):
-    owner = store.accounts.upsert_account('main', 'cred', None, True)
+    owner = store.accounts.upsert_account('main', None, True)
     pid = store.playlists.upsert_playlist(owner, 'LM', 'Liked Music', 0, '', 1)
     ref = store.playlists.get_playlist(pid).playlist_scope_id
     store.overlaps.suppress_overlaps([['LM', 'OTHER'], ['OTHER', ref]], now=2)

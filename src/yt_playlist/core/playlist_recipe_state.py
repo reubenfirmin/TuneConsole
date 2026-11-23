@@ -1,94 +1,94 @@
-"""Saved playlist documents with relational current facets and frozen evidence."""
+"""Saved recipe and canvas fields on a playlist scope."""
+import json
 import uuid
 
-from . import collection_recovery, taste_axes
+from . import append_work, collection_recovery, playlist_recipe_policy, taste_axes
 
-FIELDS = ('media','model','journey','opportunity_id','option_id')
+PREFIXES = {'recipes': 'recipe', 'canvases': 'canvas'}
+REFERENCE = ('recovery_filename', 'recovery_digest', 'recovery_bytes')
+HEADER = ('id', 'revision', 'created_at', *REFERENCE)
+RECIPE_FIELDS = (*playlist_recipe_policy.FIELDS, 'facets')
+COUNTERS = {prefix: 'playlist_' + prefix + '_id_high_water' for prefix in PREFIXES.values()}
 
 
-def available(conn):
-    return any(row[1]=='playlist_scope_id' for row in conn.execute('PRAGMA table_info(rec_recipes)'))
+def reserve_identity(conn, scope, prefix):
+    identity = conn.execute(f'SELECT {prefix}_id FROM playlist_scopes WHERE id=?', (scope,)).fetchone()[0]
+    if identity is None:
+        identity = conn.execute('UPDATE settings SET value=CAST(value AS INTEGER)+1 WHERE key=? '
+                                'RETURNING CAST(value AS INTEGER)', (COUNTERS[prefix],)).fetchone()[0]
+        conn.execute(f'UPDATE playlist_scopes SET {prefix}_id=? WHERE id=?', (identity, scope))
+    return identity
 
 
-def save(conn,scope,value,created_at):
-    if not isinstance(value,dict):
-        raise ValueError('A saved playlist recipe requires an object')
-    conn.execute('UPDATE rec_recipes SET revision=revision WHERE 0')
-    row = conn.execute('SELECT id FROM rec_recipes WHERE playlist_scope_id=?',(scope,)).fetchone()
-    identity = row[0] if row else conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM rec_recipes').fetchone()[0]
-    facets = []
-    selections = {} if value.get('facets') is None else value['facets']
-    if not isinstance(selections,dict):
-        raise ValueError('Playlist recipe facets require an object')
-    for kind,field in (('genre','genres'),('era','eras')):
-        if field not in selections or selections[field] is None:
-            continue
-        if not isinstance(selections[field],list):
-            raise ValueError('Playlist recipe facets require ordered lists')
-        for position,label in enumerate(selections[field]):
-            if not isinstance(label,str) or not label.strip():
-                raise ValueError('Playlist recipe facets require nonempty labels')
-            axis = taste_axes.identity(conn,('genre:' if kind=='genre' else 'era:')+label,create=True)
-            facets.append((identity,kind,position,axis,label))
-    reference = collection_recovery.publish(conn,'playlist-recipe',identity,value)
-    conn.execute('INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,media,model,journey,opportunity_id,option_id,'
-                 'recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) '
-                 'ON CONFLICT(playlist_scope_id) DO UPDATE SET revision=excluded.revision,created_at=excluded.created_at,'
-                 'media=excluded.media,model=excluded.model,journey=excluded.journey,opportunity_id=excluded.opportunity_id,'
-                 'option_id=excluded.option_id,recovery_filename=excluded.recovery_filename,'
-                 'recovery_digest=excluded.recovery_digest,recovery_bytes=excluded.recovery_bytes',
-                 (identity,scope,uuid.uuid4().hex,created_at,*(value.get(field) for field in FIELDS),*reference))
-    conn.execute('DELETE FROM playlist_recipe_facets WHERE recipe_id=?',(identity,))
-    conn.executemany('INSERT INTO playlist_recipe_facets VALUES (?,?,?,?,?)',facets)
-    from . import append_work
-    if append_work.available(conn):
-        append_work.save_tv(conn,identity,scope,value)
+def header(conn, scope, prefix):
+    fields = HEADER + (RECIPE_FIELDS if prefix == 'recipe' else ())
+    columns = ','.join(f'{prefix}_{field} AS {field}' for field in fields)
+    return conn.execute(f'SELECT {columns} FROM playlist_scopes '
+                        f'WHERE playlist_scopes.id=? AND {prefix}_revision IS NOT NULL', (scope,)).fetchone()
+
+
+def facets(conn, value, selections):
+    rows = [(kind, position, taste_axes.identity(conn, axis, create=True), label)
+            for kind, position, axis, label in selections]
+    return (*(value.get(field) for field in playlist_recipe_policy.FIELDS), json.dumps(rows))
+
+
+def current_facets(conn, facets):
+    return [tuple(item) for item in conn.execute("""
+        SELECT f.value->>0,
+               CASE a.kind WHEN 'genre' THEN coalesce(g.redirect_key,a.genre_key)
+                    WHEN 'family' THEN a.family_key WHEN 'unresolved_genre' THEN a.value ELSE f.value->>3 END
+        FROM json_each(?) f LEFT JOIN taste_axes a ON a.id=f.value->>2
+        LEFT JOIN genre_catalog g ON g.key=a.genre_key
+        ORDER BY f.key
+    """, (facets,))]
+
+
+def publish(conn, scope, prefix, identity, revision, created_at, reference, fields=()):
+    columns = HEADER[1:] + (RECIPE_FIELDS if prefix == 'recipe' else ())
+    assignments = ','.join(f'{prefix}_{field}=?' for field in columns)
+    updated = conn.execute(f'UPDATE playlist_scopes SET {assignments} WHERE id=? AND {prefix}_id=?',
+                           (revision, created_at, *reference, *fields, scope, identity))
+    if not updated.rowcount:
+        raise ValueError('Saved playlist identity changed during publication')
+
+
+def created_ats(conn, prefix):
+    return dict(conn.execute(f'SELECT id,{prefix}_created_at FROM playlist_scopes '
+                             f'WHERE {prefix}_revision IS NOT NULL'))
+
+
+def save(conn, scope, value, created_at):
+    fields = facets(conn, value, playlist_recipe_policy.facets(value))
+    identity = reserve_identity(conn, scope, 'recipe')
+    recipe, append = append_work.prepare(value)
+    reference = collection_recovery.publish(conn, 'playlist-recipe', identity, recipe)
+    publish(conn, scope, 'recipe', identity, uuid.uuid4().hex, created_at, reference, fields)
+    append_work.install(conn, scope, append)
 
 
 @collection_recovery.pinned_read
-def load(conn,scope):
-    row = conn.execute('SELECT * FROM rec_recipes WHERE playlist_scope_id=?',(scope,)).fetchone()
+def load(conn, scope):
+    row = header(conn, scope, 'recipe')
     if row is None:
         return None
-    value = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
-                                     kind='playlist-recipe',owner=row['id'])
-    # Presence/null and unqueried attributes come from the captured document;
-    # execution fields and ordered facets come from the current relational owner.
-    value.update({field:row[field] for field in FIELDS if field in value})
-    selections = {} if value.get('facets') is None else value['facets']
-    for kind,field in (('genre','genres'),('era','eras')):
-        if field not in selections or selections[field] is None:
-            continue
-        selections[field] = [item[0] for item in conn.execute(
-            "SELECT CASE a.kind WHEN 'genre' THEN a.genre_key WHEN 'family' THEN a.family_key "
-            "WHEN 'unresolved_genre' THEN a.value ELSE f.captured_value END "
-            'FROM playlist_recipe_facets f JOIN taste_axes a ON a.id=f.axis_id '
-            'WHERE f.recipe_id=? AND f.kind=? ORDER BY f.position',(row['id'],kind))]
-    from . import append_work
-    if append_work.available(conn):
-        append_work.load_tv(conn,row['id'],value)
-    else:
-        from .append_reads import apply_tv
-        apply_tv(conn,row['id'],value)
+    value = collection_recovery.read(*(row[field] for field in REFERENCE), kind='playlist-recipe', owner=row['id'])
+    playlist_recipe_policy.project(value, row, current_facets(conn, row['facets']))
+    if 'tv_refill' in value:
+        append_work.project(value, append_work.entries(conn, scope))
     return value
 
 
-def save_canvas(conn,scope,state,created_at):
-    if state is not None and not isinstance(state,str):
+def save_canvas(conn, scope, state, created_at):
+    if state is not None and not isinstance(state, str):
         raise ValueError('A saved canvas requires its serialized text')
-    conn.execute('UPDATE cluster_canvas SET revision=revision WHERE 0')
-    row = conn.execute('SELECT id FROM cluster_canvas WHERE playlist_scope_id=?',(scope,)).fetchone()
-    identity = row[0] if row else conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM cluster_canvas').fetchone()[0]
-    reference = collection_recovery.publish(conn,'playlist-canvas',identity,state)
-    conn.execute('INSERT INTO cluster_canvas VALUES (?,?,?,?,?,?,?) '
-                 'ON CONFLICT(playlist_scope_id) DO UPDATE SET revision=excluded.revision,created_at=excluded.created_at,'
-                 'recovery_filename=excluded.recovery_filename,recovery_digest=excluded.recovery_digest,'
-                 'recovery_bytes=excluded.recovery_bytes',
-                 (identity,scope,uuid.uuid4().hex,created_at,*reference))
+    identity = reserve_identity(conn, scope, 'canvas')
+    reference = collection_recovery.publish(conn, 'playlist-canvas', identity, state)
+    publish(conn, scope, 'canvas', identity, uuid.uuid4().hex, created_at, reference)
 
 
 @collection_recovery.pinned_read
-def load_canvas(conn,scope):
-    row = conn.execute('SELECT * FROM cluster_canvas WHERE playlist_scope_id=?',(scope,)).fetchone()
-    return collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
-                                    kind='playlist-canvas',owner=row['id']) if row else None
+def load_canvas(conn, scope):
+    row = header(conn, scope, 'canvas')
+    return (collection_recovery.read(*(row[field] for field in REFERENCE), kind='playlist-canvas', owner=row['id'])
+            if row else None)

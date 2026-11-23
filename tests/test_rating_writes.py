@@ -16,8 +16,8 @@ from yt_playlist.web.routes.bridge import build
 
 @pytest.mark.parametrize("outcome", ["success", "retry", "rejected", "lost_reply"])
 def test_operations_instances_order_same_upload_and_allow_unrelated_work(store, monkeypatch, outcome):
-    main = store.accounts.upsert_account("Main", "bridge", None, True)
-    other = store.accounts.upsert_account("Other", "bridge", "other", False)
+    main = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     entered, release, queued = threading.Event(), threading.Event(), threading.Event()
     calls, remote = [], {}
     attempts = 0
@@ -72,7 +72,7 @@ def test_operations_instances_order_same_upload_and_allow_unrelated_work(store, 
 
 
 def test_native_reconciliation_holds_the_turn_and_late_confirmation_clock_cannot_reject_final_intent(store):
-    owner = store.accounts.upsert_account("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", None, True)
     entered, release, second_sent = threading.Event(), threading.Event(), threading.Event()
     client = FakeClient()
     original = client.rate_song
@@ -106,7 +106,7 @@ def test_native_reconciliation_holds_the_turn_and_late_confirmation_clock_cannot
 
 
 def test_failed_player_mirror_cannot_report_a_confirmed_rating_as_rejected(store):
-    owner = store.accounts.upsert_account("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", None, True)
     ops = PlaylistOps(store, lambda: {owner: FakeClient()}, lambda: 100)
 
     def failed(account_id):
@@ -119,7 +119,7 @@ def test_failed_player_mirror_cannot_report_a_confirmed_rating_as_rejected(store
 
 @pytest.mark.parametrize('failed_at', ['provider', 'player'])
 def test_rating_http_boundary_keeps_diagnostics_in_logs_and_reports_confirmation(store, monkeypatch, caplog, failed_at):
-    owner = store.accounts.upsert_account('Main', 'bridge', None, True)
+    owner = store.accounts.upsert_account('Main', None, True)
     diagnostic = 'internal-diagnostic-879: provider/native response lost'
     remote, commands = FakeClient(), []
     if failed_at == 'provider':
@@ -160,7 +160,7 @@ def test_rating_http_boundary_keeps_diagnostics_in_logs_and_reports_confirmation
 
 
 def test_cancelled_http_waiter_keeps_native_work_owned_and_next_intent_ordered(store):
-    owner = store.accounts.upsert_account("Main", "bridge", None, True)
+    owner = store.accounts.upsert_account("Main", None, True)
     remote = FakeClient()
 
     async def scenario():

@@ -15,18 +15,8 @@ from yt_playlist.util import genre_catalog, genre_map
 
 POLICY = 'musical-neighbors-2/' + musical_profiles.VERSION
 DIMENSIONS = musical_profiles.DIMENSIONS
-CHANNELS = (('intensity', 'aggression', 'relaxed', 'density'), ('happiness', 'sadness'),
-            ('groove',), ('instrumental',), ('acoustic',), ('tempo',))
+CHANNELS = musical_profiles.CHANNELS
 AUDIO_ONLY_SUPPORT = 3.
-
-
-def _independent(value):
-    evidence = value.get('evidence', [])
-    if value.get('kind') in ('curated', 'inherited'):
-        return False
-    # A mixed aggregate cannot be separated back into observations reliably.
-    # Keep it unknown rather than count inherited genre traits as fresh audio.
-    return all(_independent(item) for item in evidence)
 
 
 @dataclass(frozen=True)
@@ -62,7 +52,7 @@ def recording(key, features, profile=None, *, genre_axes=None):
         dimension = dimensions.get(name, {})
         value = musical_profiles.number(dimension.get('value'))
         weight = musical_profiles.number(dimension.get('support')) or 0
-        if value is None or not _independent(dimension):
+        if value is None or not musical_profiles.independent(dimension):
             value, weight = 0., 0.
         if dimension.get('conflict'):
             weight *= .5

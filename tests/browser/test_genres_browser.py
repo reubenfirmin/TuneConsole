@@ -31,7 +31,7 @@ def _free_port():
 def live_app(store):
     # Background catalog preparation is disabled in these isolated app tests.
     store.genres.configure_catalog()
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
@@ -137,7 +137,7 @@ def test_remove_chip_drops_it_and_lowers_count(live_app, page, store):
         page.get_by_role('button', name='Remove Rock', exact=True).click()
     _chip(page, "Rock").wait_for(state="hidden", timeout=3000)
     assert _count(page) == before - 1
-    assert store.conn.execute("SELECT enabled FROM genre_preferences WHERE genre_key='rock'").fetchone()[0] == 0
+    assert store.conn.execute("SELECT enabled FROM genre_catalog WHERE key='rock'").fetchone()[0] == 0
 
 
 def test_reset_restores_defaults(live_app, page, store):

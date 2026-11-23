@@ -10,6 +10,17 @@ import math
 
 KINDS = ('familiar', 'unplayed', 'new')
 WINDOW = 24
+ARTIST_GAP = 6
+
+
+def artist_gap(track, history):
+    """Unknown artists do not collide; thin pools prefer the oldest repeat."""
+    artist = " ".join((track.get("artist") or "").casefold().split())
+    if artist:
+        for gap, previous in enumerate(reversed(history[-ARTIST_GAP:]), 1):
+            if artist == " ".join((previous.get("artist") or "").casefold().split()):
+                return gap
+    return ARTIST_GAP + 1
 
 
 def shares(comfort):

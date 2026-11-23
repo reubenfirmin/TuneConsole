@@ -30,7 +30,7 @@ def _live_server(app):
 @pytest.fixture
 def live_identity_setup(store, tmp_path, monkeypatch):
     store.settings.set_setting("last_sync_at", "1.0")
-    runtime = Runtime(store, tmp_path / "config.toml", tmp_path)
+    runtime = Runtime(store, tmp_path / "config.toml")
     clients = {"main": CheckedClient("Main account"), "Brand": CheckedClient("My brand", handle="@mybrand")}
     monkeypatch.setattr("yt_playlist.core.runtime.build_client", lambda cfg, bridge: clients[cfg.label])
     runtime.apply_setup([{"label": "main", "credential_ref": "browser.json", "is_master": True}])

@@ -1,6 +1,5 @@
 """Optional TV photography acquisition, separate from playback and image policy."""
 from yt_playlist.util.matching import search_squash
-from yt_playlist.util.thumbnails import best_thumb
 
 
 def pending_names(requests, names, cache, now):
@@ -9,10 +8,9 @@ def pending_names(requests, names, cache, now):
 
 
 def search_images(name, results):
-    return [image for artist in results[:5]
+    return [image for artist in results
             if search_squash(artist.get('artist') or artist.get('title') or '') == search_squash(name)
-            and artist.get('resultType') in (None, 'artist')
-            if (image := best_thumb(artist.get('thumbnails')))]
+            if (image := artist.get('thumbnail'))]
 
 
 def artwork_value(photos, now, failed, retry_at=0):
@@ -36,5 +34,6 @@ class TVArtwork:
         found, failed = self.search(name)
         vendor, vendor_failed, retry = self.vendor(name, now)
         value = artwork_value([*photos, *search_images(name, found), *vendor], now, failed or vendor_failed, retry)
-        published = self.observations.publish_artwork(key, value, now, observation, complete=not (failed or vendor_failed))
+        published = self.observations.publish_artwork(key, value, now, observation, name=name,
+                                                     complete=not (failed or vendor_failed))
         return len(pending) > 1 or not published

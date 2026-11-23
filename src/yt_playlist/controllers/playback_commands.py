@@ -21,9 +21,9 @@ class PlaybackCommands:
     def admit(self):
         return self.player.begin_playback_intent()
 
-    def status(self):
+    def status(self, *, reader=None):
         bridge = self.player
-        session = self.radio.state() if self.radio is not None else {}
+        session = self.radio.state(reader=reader) if self.radio is not None else {}
         playing, seen = bridge.now_playing, getattr(bridge, 'now_playing_seen_at', None)
         if playing is not None and seen is not None and self.monotonic() - seen > 8:
             bridge.now_playing = playing = None
@@ -56,16 +56,27 @@ class PlaybackCommands:
             radio_ready=bool(session.get('active') and not session.get('starting')))
 
     async def rate(self, action, video_id, like_status=None):
+        playing = self.player.now_playing or {}
+        requested_at = self.now()
         if like_status is None:
             rating = await asyncio.to_thread(self.rating, video_id)
-            playing = self.player.now_playing or {}
             current = rating['status'] if rating else playing.get('likeStatus') if playing.get('video_id') == video_id else None
             want = 'LIKE' if action == 'like' else 'DISLIKE'
             like_status = 'INDIFFERENT' if current == want else want
         loop = asyncio.get_running_loop()
+
         def mirror(account_id):
             return asyncio.run_coroutine_threadsafe(self.mirror_rating(action, video_id, like_status, account_id), loop).result()
-        return await self.work.to_thread(self.ops().set_rating, video_id, like_status, after_confirmed=mirror)
+
+        def rate():
+            playback = None
+            if playing.get('video_id') == video_id and playing.get('brand_known') is True:
+                account = self.identity(playing.get('brand_id') or '')
+                if account is not None:
+                    playback = dict(account_id=account, playlist=playing.get('playlist_ytm_id'), at=requested_at)
+            return self.ops().set_rating(video_id, like_status, after_confirmed=mirror, playback=playback)
+
+        return await self.work.to_thread(rate)
 
     def play(self, url, intent):
         try:
@@ -98,6 +109,8 @@ class PlaybackCommands:
             player_failed = False
             native_diagnostics = None
             identity = None
+            advanced = False
+            rated_at = self.now()
             try:
                 identities = await asyncio.to_thread(self.accounts.get_accounts)
                 identity = next(i for i in identities if i.id == account_id)
@@ -109,6 +122,11 @@ class PlaybackCommands:
                 native_diagnostics = result.get("diagnostics")
                 if status != 200 or not result.get("ok"):
                     raise ValueError(result.get("error") or "Player command failed")
+                current = self.player.now_playing or {}
+                advanced = result.get('advanced') is True or bool(
+                    current.get('video_id') and current['video_id'] != video_id
+                    and current.get('brand_known') is True
+                    and (current.get('brand_id') or '') == (identity.brand_account_id or ''))
             except Exception:
                 self.logger.warning("rating saved but native thumb update failed: video=%s diagnostics=%s",
                                video_id, json.dumps(native_diagnostics, ensure_ascii=True)[:4000], exc_info=True)
@@ -117,9 +135,16 @@ class PlaybackCommands:
             # skip after the exact song's dislike has already been saved.
             if like_status == "DISLIKE" and identity is not None:
                 try:
-                    skipped = await self.skip(video_id, brand_id=identity.brand_account_id or "")
-                    if not skipped.get("ok"):
-                        raise ValueError(skipped.get("error") or "The player did not advance")
+                    if advanced:
+                        # The browser can report the exit before confirming the
+                        # native thumb. Retain the request time for inference.
+                        await asyncio.to_thread(self.record_next, identity.id, video_id, playing.get('position'),
+                                                None, playing.get('playlist_ytm_id'), rated_at, rating_advance=True)
+                    else:
+                        skipped = await self.skip(video_id, brand_id=identity.brand_account_id or "",
+                                                  rating_advance=True)
+                        if not skipped.get("ok"):
+                            raise ValueError(skipped.get("error") or "The player did not advance")
                 except Exception:
                     self.logger.warning("rating saved but skip failed: video=%s", video_id, exc_info=True)
                     player_failed = True
@@ -127,7 +152,7 @@ class PlaybackCommands:
                 return {"ok": True, "error": "", "player_error": "Player update not confirmed"}
         return {"ok": True, "error": ""}
 
-    async def skip(self, video_id, *, brand_id=None):
+    async def skip(self, video_id, *, brand_id=None, rating_advance=False):
         playing, now = dict(self.player.now_playing or {}), self.now()
         if (brand_id is not None and playing.get('brand_known') is True
                 and (playing.get('brand_id') or '') != brand_id):
@@ -137,34 +162,31 @@ class PlaybackCommands:
         if brand_id is not None and getattr(self.player, 'account_bound_next', None) is not True:
             return {'ok': False, 'error': 'Update the TuneConsole extension before skipping for this account'}
         radio = self.radio
+        advance = {'rating_advance': True} if rating_advance else {}
         if radio is not None and not self.paused():
             options = {'brand_id': brand_id} if brand_id is not None else {}
-            result = await self.work.to_thread(radio.skip, video_id, **options)
+            result = await self.work.to_thread(radio.skip, video_id, **options, **advance)
             if result is not None:
                 return result
-        # Gather optional catalog context before sending the command. A
-        # confirmed Next must reach its durable inbox even if replacement
-        # closes every main handle while the extension is responding.
+        # Gather optional catalog context before sending the command.
         identity, duration = None, None
         if playing.get('video_id') == video_id and playing.get('brand_known') is True:
             identity = self.identity( playing.get('brand_id') or '')
             if identity is not None:
-                from yt_playlist.core.db_space import StorageCompacting
-                try:
-                    duration = self.duration(video_id)
-                except StorageCompacting:
-                    pass  # Unknown duration remains explicit in the retained observation.
+                duration = self.duration(video_id)
         frame = {"type": "next", "videoId": video_id}
         if brand_id is not None:
             frame['brandId'] = brand_id
+        if rating_advance:
+            frame['ratingAdvance'] = True
         status, body = await self.player.request_control(frame, timeout=10)
         result = json.loads(body)
         if status != 200 or not result.get("ok"):
             return {"ok": False, "error": result.get("error") or "The player did not advance"}
         if identity is not None:
             def retain():
-                self.record_next( identity, video_id, playing.get('position'),
-                    duration, playing.get('playlist_ytm_id'), now)
+                self.record_next(identity, video_id, playing.get('position'),
+                    duration, playing.get('playlist_ytm_id'), now, **advance)
             try:
                 await asyncio.to_thread(retain)
             except Exception:
@@ -173,7 +195,7 @@ class PlaybackCommands:
         return {"ok": True}
 
     async def toggle(self, action: str = "toggle", resume: bool = False, videoId: str = "",
-                                 confirm: bool = False):
+                     confirm: bool = False, *, playlist: str | None = None, queue_index: int | None = None):
         if action not in ("toggle", "play", "pause"):
             return {"ok": False, "error": "invalid playback action"}
         frame = {"type": "playpause"}
@@ -192,6 +214,17 @@ class PlaybackCommands:
             if not player or player.get("video_id") != videoId:
                 return {"ok": False, "error": "The playing song changed. Try again."}
             frame["videoId"] = videoId
+            if action == 'play':
+                current_playlist = player.get('playlist_ytm_id')
+                current_index = (player.get('queue_item') or {}).get('index')
+                if playlist is None and queue_index is None:
+                    playlist, queue_index = current_playlist, current_index
+                elif playlist != current_playlist or queue_index != current_index:
+                    return {"ok": False, "error": "The selected playlist entry changed. Try again."}
+                if playlist:
+                    frame['playlist'] = playlist
+                if queue_index is not None:
+                    frame['queueIndex'] = queue_index
             paused = action == "pause"
             started = self.monotonic()
             connection_id = self.player.connection_id
@@ -214,6 +247,8 @@ class PlaybackCommands:
                     if (self.player.playback_confirmation is False and self.player.connection_id == connection_id
                             and self.player.connected and observed
                             and observed.get("video_id") == videoId and observed.get("paused") is paused
+                            and ('playlist' not in frame or observed.get('playlist_ytm_id') == playlist)
+                            and ('queueIndex' not in frame or (observed.get('queue_item') or {}).get('index') == queue_index)
                             and (self.player.now_playing_seen_at or 0) > started):
                         return {"ok": True, "paused": paused}
             except Exception:

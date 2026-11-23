@@ -5,10 +5,9 @@ import sqlite3
 
 import pytest
 
-from tests.store_fixture_support import native_sql_calls, numbered_store, without_query_timing
-from yt_playlist.core import account_auth_state, action_work, collection_recovery, playlist_scopes
-from yt_playlist.core import entity_names, schema_inspection, workflow_settings
-from yt_playlist.core.migrations import current, migrate, registry
+from yt_playlist.core import action_backup_files, collection_recovery, fao, playlist_scopes
+from yt_playlist.core import workflow_settings
+from yt_playlist.core.store import Store
 
 
 @pytest.fixture(autouse=True)
@@ -25,30 +24,27 @@ def backup(tmp_path, account, remote):
 
 
 def test_expired_claim_requires_reconciliation_and_fences_stale_completion(store,tmp_path):
-    account = store.accounts.upsert_account('Owner','owner.json',None,True)
+    account = store.accounts.upsert_account('Owner',None,True)
     store.playlists.upsert_playlist(account,'SOURCE','Source',2,'',1)
     undo = {'deletions':[{'identity':account,'ytm':'SOURCE','phase':'pending','backup':backup(tmp_path,account,'SOURCE')}]}
     action = store.actions.record_action('delete_playlist','{}','{}','delete_pending',json.dumps(undo),2)
-    target = store.conn.execute('SELECT id FROM action_targets WHERE action_id=?',(action,)).fetchone()[0]
-    with store.conn:
-        first = action_work.claim_target(store.conn,target,3,lease_seconds=5)
-        store.conn.execute("UPDATE action_steps SET phase='uncertain',outcome='unknown' WHERE target_id=?",(target,))
+    target, first = store.actions.begin_deletion(action, account, 'SOURCE', 3)
     with pytest.raises(ValueError,match='Another action worker'):
-        with store.conn:
-            action_work.claim_target(store.conn,target,4,reconcile=True)
+        store.actions.begin_deletion(action, account, 'SOURCE', 4, reconcile=True)
+    competing = store.actions.record_action('copy_playlist', '{}', '{}', 'executed',
+        json.dumps({'new_ytm': 'SOURCE', 'target_identity': account}), 5)
     with pytest.raises(ValueError,match='outcome is unknown'):
-        with store.conn:
-            action_work.claim_target(store.conn,target,9)
-    with store.conn:
-        replacement = action_work.claim_target(store.conn,target,9,reconcile=True)
+        store.actions.claim_forward_targets(competing, 'destination', 64)
+    _, replacement = store.actions.begin_deletion(action, account, 'SOURCE', 64, reconcile=True)
     with pytest.raises(ValueError,match='stale worker'):
-        action_work.require_claim(store.conn,target,first)
-    action_work.require_claim(store.conn,target,replacement)
+        store.actions.repository.require_claim(target, first)
+    store.actions.release_deletion((target, first))
+    store.actions.repository.require_claim(target, replacement)
 
 
 def test_idempotent_intent_and_target_agreement_are_enforced(store):
-    account = store.accounts.upsert_account('Owner','owner.json',None,True)
-    other = store.accounts.upsert_account('Other','other.json',None,False)
+    account = store.accounts.upsert_account('Owner',None,True)
+    other = store.accounts.upsert_account('Other',None,False)
     membership = store.playlists.upsert_playlist(account,'LM','Liked',1,'',1)
     plan = json.dumps({'playlist_id':membership,'after_video_id':'anchor','video_ids':['one','one'],
                        'set_video_ids':{'one':'exact-occurrence'}})
@@ -88,7 +84,7 @@ def test_reviewed_draft_is_frozen_before_merge_and_stale_review_cannot_write(sto
     from yt_playlist.library.executor import apply_result
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path))
     client = RecoveryClient({'FIRST':['one','two'],'SECOND':['one']})
-    account = store.accounts.upsert_account('Owner','owner.json',None,True)
+    account = store.accounts.upsert_account('Owner',None,True)
     memberships = [store.playlists.upsert_playlist(account,remote,remote,2,'',1) for remote in ('FIRST','SECOND')]
     draft_id = store.actions.record_action('merge_draft','{"keep":"all"}','FIRST|SECOND','draft','opaque',1)
     stale = store.actions.get_action(draft_id)
@@ -99,13 +95,13 @@ def test_reviewed_draft_is_frozen_before_merge_and_stale_review_cannot_write(sto
     draft = store.actions.get_action(draft_id)
     remove = client.remove_playlist_items
     def guarded_remove(remote,tracks):
-        step = store.conn.execute("SELECT s.*,a.reviewed_draft_revision FROM action_steps s JOIN actions a ON a.id=s.action_id "
+        step = store.conn.execute("SELECT s.*,a.reviewed_draft_revision,t.claim_token AS target_claim FROM action_steps s JOIN actions a ON a.id=s.action_id "
             "JOIN action_targets t ON t.id=s.target_id WHERE s.operation='merge_plan' AND t.provider_playlist_id_snapshot=?",
             (remote,)).fetchone()
         assert step['phase']=='uncertain' and step['outcome']=='unknown'
         assert step['reviewed_draft_revision']==draft.revision
-        assert step['claim_token']
-        action_work.backup_reference(step['backup_filename'])
+        assert step['target_claim']
+        store.actions.backups.reference(step['backup_filename'])
         return remove(remote,tracks)
     monkeypatch.setattr(client,'remove_playlist_items',guarded_remove)
     apply_result(store,{account:client},memberships,['one'],'all',2,reviewed_draft=(draft_id,draft.revision))
@@ -114,7 +110,7 @@ def test_reviewed_draft_is_frozen_before_merge_and_stale_review_cannot_write(sto
     assert captured['reviewed_draft']['params']=='{"keep":"all","edited":true}'
     store.actions.delete_action(draft_id)
     assert store.actions.get_action(row['id']) is not None
-    assert store.conn.execute('SELECT count(*) FROM action_target_claims').fetchone()[0]==0
+    assert store.conn.execute('SELECT count(*) FROM action_targets WHERE claim_token IS NOT NULL').fetchone()[0]==0
 
 
 def test_export_retains_backup_bytes_after_original_file_is_removed(store,tmp_path,monkeypatch):
@@ -125,17 +121,17 @@ def test_export_retains_backup_bytes_after_original_file_is_removed(store,tmp_pa
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     client = RecoveryClient({'SOURCE':['one','one','two']})
     account,action = _deleted(store,client)
-    original = store.conn.execute('SELECT filename,retained_filename FROM action_backups WHERE action_id=?',(action,)).fetchone()
-    assert action_backup_files.record_id(original[1]) is not None
-    assert fao.read(original[0]).bytes==fao.read(original[1]).bytes
+    reference, = store.actions.repository.backups(action)
+    original, retained = reference['filename'], reference['retained_filename']
+    assert action_backup_files.record_id(retained) is not None
+    assert fao.read(original).bytes == fao.read(retained).bytes
     store.conn.execute('BEGIN')
     manifest = action_backup_files.export(store.conn,tmp_path/'export')
     store.conn.rollback()
-    Path(original[0]).unlink()
-    Path(original[1]).unlink()
+    Path(original).unlink()
+    Path(retained).unlink()
     action_backup_files.restore(store.conn,manifest)
-    assert store.conn.execute('SELECT retained_filename FROM action_backups WHERE action_id=?',
-                              (action,)).fetchone()[0] == original[1]
+    assert store.actions.repository.backups(action)[0]['retained_filename'] == retained
     undo_action(store,action,{account:client},3)
     assert store.actions.get_action(action).status=='undone'
     assert [row['videoId'] for row in client._tracks['PL_NEW_0']]==['one','one','two']
@@ -162,7 +158,7 @@ def test_unknown_copy_deletion_reconciles_without_replaying_write(store,tmp_path
 
 def test_spotify_receipt_revision_and_destination_fence_stale_workers(store):
     from yt_playlist.core import workflow_settings
-    account = store.accounts.upsert_account('Owner','owner.json',None,True)
+    account = store.accounts.upsert_account('Owner',None,True)
     original = {'creation_phase':'prepared','marker':'marker','complete':False}
     store.settings.save_spotify_transfer(account,'fingerprint',original)
     first = store.settings.spotify_transfer_receipts(account)['fingerprint']
@@ -184,7 +180,8 @@ def test_tv_append_intent_preserves_order_and_completion_across_reload(store):
     recipe = {'tv_stream':'stream','tv_refill':checkpoint}
     store.playlist_recipes.set_recipe('TV',recipe,3)
     assert store.playlist_recipes.get_recipe('TV')==recipe
-    assert [row[0] for row in store.conn.execute("SELECT video_id_snapshot FROM tv_append_items WHERE role='before' ORDER BY position")]==['one','one']
+    assert json.loads(store.conn.execute("SELECT tv_appends FROM playlist_scopes WHERE id='TV'").fetchone()[0])[0][
+        'checkpoint']['before'] == ['one', 'one']
     complete = {**recipe,'tv_refill':{'request_id':'request','state':'complete','items':checkpoint['items']}}
     store.playlist_recipes.set_recipe('TV',complete,4)
     assert store.playlist_recipes.get_recipe('TV')==complete
@@ -195,7 +192,7 @@ def test_tv_append_intent_preserves_order_and_completion_across_reload(store):
 
 def test_radio_pending_and_replacement_have_typed_receipts_and_revision_fence(store):
     from yt_playlist.core import radio_storage
-    account = store.accounts.upsert_account('Owner','owner.json',None,True)
+    account = store.accounts.upsert_account('Owner',None,True)
     state = {'version':2,'episode_id':'episode','identity':account,'phase':'appending','playlist':'RADIO',
              'tracks':[{'video_id':'one'}],'pending':{'video_id':'two'},'pending_sent':True,
              'pending_started_at':3,'pending_result':{'status':'STATUS_SUCCEEDED','videoId':'two','setVideoId':'handle'},'position':0}
@@ -213,7 +210,7 @@ def test_radio_pending_and_replacement_have_typed_receipts_and_revision_fence(st
     with pytest.raises(ValueError,match='changed'),store.conn:
         radio_storage.save(store.conn,state,expected=token,now=5)
     with pytest.raises(sqlite3.IntegrityError,match='revision'),store.conn:
-        store.conn.execute('UPDATE radio_operations SET session_revision=1')
+        store.conn.execute("UPDATE radio_sessions SET operation_json=json_set(operation_json,'$.session_revision',1)")
 
 
 def test_terminal_action_and_frozen_review_are_guarded_in_sql(store):
@@ -228,6 +225,8 @@ def test_terminal_action_and_frozen_review_are_guarded_in_sql(store):
 def test_cloned_recovery_relocates_backup_references_without_original_directory(
         tmp_path, monkeypatch, _pristine_current_schema):
     from pathlib import Path
+    from tests.library_image.capture import rebase
+    from tests.library_image.file_references import action_backup_references
     from tests.test_undo_recovery import RecoveryClient, _deleted
     from tests.store_fixture_support import initialize_consumer
     from yt_playlist.core import action_backup_files, fao
@@ -260,6 +259,14 @@ def test_cloned_recovery_relocates_backup_references_without_original_directory(
             Path(row['filename']).unlink(missing_ok=True)
             Path(row['retained_filename']).unlink(missing_ok=True)
         restored = Store(tmp_path/'restored.db')
+        original_refs = action_backup_files.inventory(original.conn)
+        captured = rebase(restored.conn, tmp_path/'original.db', tmp_path/'restored.db')
+        assert {Path(item['retained_filename']) for item in original_refs} <= captured
+        assert {path for _, _, path in action_backup_references(restored.conn)} == {
+            action_backup_files.record_path(collection_recovery.directory(restored.conn), identity)
+            for identity in retained_ids.values()}
+        assert [item['filename'] for item in action_backup_files.inventory(restored.conn)] == [
+            item['filename'] for item in original_refs]
         collection_recovery.restore(restored.conn,collection_manifest)
         action_backup_files.restore(restored.conn,backup_manifest)
         for row in action_backup_files.inventory(restored.conn):

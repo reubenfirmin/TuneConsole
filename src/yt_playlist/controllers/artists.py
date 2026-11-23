@@ -1,6 +1,5 @@
 """Choose artist identity evidence while the repository stores its rows."""
 import json
-from itertools import islice
 from yt_playlist.core import artist_credits, artist_policy
 from yt_playlist.core.metadata_contract import clock
 
@@ -164,6 +163,10 @@ class Artists:
     def resolve_exact(self, value):
         return self.resolve_many([value], exact=True)[value]
 
+    def name_matches(self, names):
+        """All canonical subjects for provider names, including ambiguous aliases."""
+        return artist_policy.normalized_matches(self.repository.alias_rows(), names)
+
     def resolve_many(self, values, *, exact=False):
         values = list(dict.fromkeys(values))
         references = {value: artist_policy.reference_id(value) for value in values if artist_policy.is_reference(value)}
@@ -238,10 +241,9 @@ class Artists:
         return {key: {artist_policy.token(identity) for identity in identities} for key, identities
                 in self.repository.track_artist_ids(library=library, keys=keys).items()}
 
-    def credited_pages(self, rows, *, size=128):
-        """Resolve a compact rank stream without retaining its full catalog."""
-        rows = iter(rows)
-        while batch := list(islice(rows, size)):
-            identities = self.track_keys(keys=[row['key'] for row in batch])
-            for row in batch:
-                yield {**row, 'artist_ids': sorted(identities.get(row['key'], ()))}
+    def credited_rows(self, rows):
+        """Attach artist identities in one read while keeping candidate order."""
+        rows = list(rows)
+        identities = self.track_keys(keys=[row['key'] for row in rows])
+        for row in rows:
+            yield {**row, 'artist_ids': sorted(identities.get(row['key'], ()))}

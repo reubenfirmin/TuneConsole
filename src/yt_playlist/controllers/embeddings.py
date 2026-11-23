@@ -8,9 +8,8 @@ from yt_playlist.core import embeddings
 
 
 class Embeddings:
-    def __init__(self, repository, files, *, file_repository=None):
+    def __init__(self, repository, files):
         self.repository, self.files = repository, files
-        self.file_repository = repository if file_repository is None else file_repository
 
     def retained(self):
         return self.files.retained()
@@ -56,7 +55,7 @@ class Embeddings:
             raise ValueError('Embedding publication time must be finite')
         retracted = list(self.repository.subjects(kind, removed, retired=True).values())
         files = None
-        if admitted and self.repository.file_owned():
+        if admitted:
             orders, order = ({}, 0) if replace else self.repository.insertion_orders(
                 kind, space, [subject for subject, _vector in admitted], retracted)
             for subject in retracted:
@@ -67,12 +66,7 @@ class Embeddings:
                 if previous_order is None:
                     order += 1
                 values.append((subject, vector, now, previous_order if previous_order is not None else order))
-            records = self.files.describe(kind, size, values)
-            identities = self.file_repository.reserve_files(records)
-            if len(identities) != len(records):
-                raise ValueError('Embedding reservation count differs from its packs')
-            records = [dict(record, file_id=identity) for record, identity in zip(records, identities, strict=True)]
-            files = self.files.write_reserved(records)
+            files = self.files.write(kind, size, values)
         return embeddings.Publication(name, model_version, tuple(admitted), tuple(retracted), replace, now, size, files)
 
     def publish(self, publications):

@@ -59,7 +59,7 @@ def test_proposals_roundtrip_and_missing(store):
 
 def test_tracks_total_replaces_raw_sql(store):
     dao = store.rec_query
-    assert dao.tracks_total() == store.conn.execute("SELECT COUNT(*) c FROM tracks").fetchone()["c"]
+    assert dao.tracks_total() == store.conn.execute("SELECT COUNT(*) c FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)").fetchone()["c"]
 
 
 # --- the learned-model methods folded in from the former god class ---
@@ -110,7 +110,7 @@ def test_model_state_is_separate_from_library_queries(store):
 
 
 def test_track_decades_and_artists_and_era_distribution(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.tracks.upsert_track("v1", "A", "Alpha", None, None)   # key "a|alpha"
     b = store.tracks.upsert_track("v2", "B", "Beta", None, None)    # key "b|beta"
     store.tracks.set_track_year(a, "1991")                          # -> decade "1990"

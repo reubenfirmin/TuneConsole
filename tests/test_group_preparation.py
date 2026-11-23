@@ -61,6 +61,7 @@ def store(tmp_path, _pristine_current_schema, monkeypatch):
 
 
 def seed(store, tracks):
+    profiles = []
     with store.conn:
         for i, track in enumerate(tracks):
             library = {'genre': track.genre, 'year': str(track.year or ''), 'audio': {}}
@@ -72,8 +73,9 @@ def seed(store, tracks):
             profile = {'schema': 1, 'version': musical_profiles.VERSION, 'dimensions': {
                 name: {'value': value, 'support': support, 'evidence': [{'kind': 'explicit'}]}
                 for name, value, support in zip(musical_profiles.DIMENSIONS, track.values, track.support)}}
-            store.conn.execute('INSERT OR REPLACE INTO rec_musical_profiles VALUES (?,?,?,?,?)',
-                               (track.key, json.dumps(profile), musical_profiles.VERSION, str(i), 1))
+            raw = json.dumps(profile)
+            profiles.append((track.key, raw, musical_profiles.VERSION, hashlib.sha256(raw.encode()).hexdigest()))
+    store.musical_profiles.publish_recordings(profiles, 1)
 
 
 def observe_artist(store, track_id, artist, genre):
@@ -94,7 +96,7 @@ def test_background_shadow_is_coalesced_and_does_not_replace_live_modes(store):
     assert not store.modes.list_modes()
     # Even one change is checked after coalescing; unchanged inputs are cheap acknowledgements.
     with store.conn:
-        store.conn.execute('UPDATE rec_musical_profiles SET prepared_at=2 WHERE identity_key=?', (tracks[0].key,))
+        store.conn.execute('UPDATE recordings SET musical_profile_prepared_at=2 WHERE identity_key=?', (tracks[0].key,))
     assert worker.due(1100)
     # Unchanged musical inputs advance the acknowledgement, not the immutable definition.
     assert not worker.step(1100)
@@ -132,8 +134,9 @@ def test_stale_work_preserves_last_good_and_short_allowance_finishes_admitted_pl
 
     def race(*args, **kwargs):
         result = original(*args, **kwargs)
-        with store.conn:
-            store.conn.execute("UPDATE rec_musical_profiles SET payload='{}'")
+        raw = '{}'
+        store.musical_profiles.publish_recordings(
+            [(tracks[0].key, raw, musical_profiles.VERSION, hashlib.sha256(raw.encode()).hexdigest())], 1100)
         return result
 
     monkeypatch.setattr(group_discovery, 'discover', race)
@@ -232,13 +235,7 @@ def test_member_that_loses_all_support_becomes_unknown_without_stale_assignment(
     assert worker.step(1900)
     current = store.taste_groups.head(members=True)
     assert all(changed.key not in g['members'] for g in current['groups'])
-    unknown = store.conn.execute(
-        'SELECT u.reason FROM group_unknown u '
-        'JOIN group_generations g ON g.id=u.generation_id '
-        'JOIN recordings r ON r.id=u.recording_id '
-        'WHERE g.external_key=? AND r.identity_key=?',
-        (current['generation'], changed.key)).fetchone()
-    assert unknown and unknown[0] == 'insufficient-shared-evidence'
+    assert current['payload']['counts']['unknown'] == original['payload']['counts']['unknown'] + 1
     assert store.taste_groups.definitions(original['generation'], members=True) == original['groups']
 
 

@@ -124,7 +124,7 @@ def _exists(path):
 
 
 class _Reader:
-    def __init__(self, stream, info, max_bytes, work_bytes, required_digest=None):
+    def __init__(self, stream, info, max_bytes, work_bytes, required_digest=None, *, verify_digest=True):
         if type(max_bytes) is not int or max_bytes < 0 or max_bytes > MAX_BYTES:
             raise ValueError('Invalid managed file byte budget')
         if info.logical_bytes > max_bytes:
@@ -133,7 +133,8 @@ class _Reader:
         self.raw = stream
         self.stream = bz2.BZ2File(stream, 'rb') if info.compressed else stream
         self.position, self.work = 0, 0
-        self.digest = hashlib.sha256()
+        self.file_digest = info.digest if verify_digest else None
+        self.digest = hashlib.sha256() if self.file_digest or required_digest is not None else None
         self.required_digest = required_digest
         self.verified = False
 
@@ -152,13 +153,14 @@ class _Reader:
             raise CorruptFile('Managed file cannot be decompressed or verified against its digest') from exc
         self.work += len(data)
         self.position += len(data)
-        self.digest.update(data)
+        if self.digest is not None:
+            self.digest.update(data)
         if self.position > self.info.logical_bytes:
             raise CorruptFile('Managed file differs from its logical byte size')
         if not data or self.position == self.info.logical_bytes:
             if self.position != self.info.logical_bytes:
                 raise CorruptFile('Managed file is truncated')
-            if self.info.digest and self.digest.hexdigest() != self.info.digest:
+            if self.file_digest and self.digest.hexdigest() != self.file_digest:
                 raise CorruptFile('Managed file failed integrity verification')
             if self.required_digest is not None and self.digest.hexdigest() != self.required_digest:
                 raise CorruptFile('Managed content differs from its required content digest')
@@ -177,7 +179,9 @@ class _Reader:
             raise FileBudgetExceeded('Managed seek exceeds its logical byte budget')
         if target < self.position:
             self.stream.seek(0)
-            self.position, self.digest, self.verified = 0, hashlib.sha256(), False
+            self.position, self.verified = 0, False
+            if self.digest is not None:
+                self.digest = hashlib.sha256()
         while self.position < target:
             self.read(min(BLOCK, target-self.position))
         return target
@@ -187,7 +191,7 @@ class _Reader:
 
 
 @contextmanager
-def _open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None):
+def _open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None, verify_digest=True):
     """Pin the inode for streams/leases. Collectors never remove active readers."""
     with Path(path).open('rb') as stream:
         unlock = _try_file_lock(stream, exclusive=False)
@@ -195,7 +199,8 @@ def _open_reader(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None):
             raise FileChanged('Managed file is being collected')
         try:
             reader = _Reader(stream, _info(stream), max_bytes,
-                             work_bytes if work_bytes is not None else max_bytes*2, digest)
+                             work_bytes if work_bytes is not None else max_bytes*2, digest,
+                             verify_digest=verify_digest)
             try:
                 yield reader
             finally:
@@ -327,6 +332,12 @@ def read(path, *, max_bytes=MAX_BYTES, work_bytes=None, digest=None):
     its timestamps. A write back to the same path also fences replacement.
     """
     return Content(path=Path(path), max_bytes=max_bytes, work_bytes=work_bytes, digest=digest)
+
+
+def read_cache(path, *, max_bytes):
+    """Read a replaceable cache file with bounded decompression and no digest check."""
+    with _open_reader(path, max_bytes=max_bytes, verify_digest=False) as source:
+        return source.read()
 
 
 def prepare(path, content):

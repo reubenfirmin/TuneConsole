@@ -28,7 +28,7 @@ def _sound(keys, audio, model):
     """Only summarize measured features covering at least half of a group, with sample counts."""
     traits = []
     stats = {name: (mu, sd) for name, mu, sd in model["cont"]}
-    features = [("bpm", None, None), ("energy", "Higher energy", "Lower energy"),
+    features = [("bpm", None, None),
                 ("danceability", "More danceable", "Less danceable"),
                 ("mood_relaxed", "More relaxed", "Less relaxed"),
                 ("instrumental", "More instrumental", "Less instrumental")]

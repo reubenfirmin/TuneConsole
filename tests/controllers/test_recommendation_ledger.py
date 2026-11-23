@@ -147,16 +147,18 @@ def test_evidence_budget_follows_current_membership_and_projects_detached_facts(
     from yt_playlist.core.evidence_ledger import library_byte_budget
     ledger.repository.library_recording_count.return_value = 2000
     ledger.evidence()
-    assert ledger.ledger_factory.call_args.args == (library_byte_budget(2000),)
+    ledger.repository.library_recording_count.assert_not_called()
+    (budget,) = ledger.ledger_factory.call_args.args
+    assert budget() == library_byte_budget(2000)
     project = ledger.ledger_factory.call_args.kwargs['opportunity_projection']
     record = {'id': 'menu', 'context': 'old', 'format': 'albums'}
-    ledger.repository.mix_projection_facts.return_value = {'installed': True, 'context': 'new'}
+    ledger.repository.mix_projection_facts.return_value = {'context': 'new'}
     assert project(record) == {**record, 'context': 'new'}
 
 
 def test_unpublished_compact_menu_is_hidden_but_legacy_menu_remains_readable(ledger):
     from yt_playlist.core.mix_choice_policy import PRECISION
-    ledger.repository.mix_projection_facts.return_value = {'installed': True, 'context': None}
+    ledger.repository.mix_projection_facts.return_value = {'context': None}
     record = {'id': 'menu', 'context': 'old', 'format': 'mixes', 'options': []}
     assert ledger._mix_projection(record) == record
     assert ledger._mix_projection({**record, 'precision': PRECISION}) is None
@@ -174,7 +176,7 @@ def test_mix_projection_requires_every_frozen_option_and_expands_only_display_va
     record = {'id': 'menu', 'at': 10, 'context': 'old', 'format': 'mixes',
               'options': [{'id': 'a', 'label': 'House', 'genres': ['House'], 'tracks': [{'key': 'hidden'}]}]}
     ledger.repository.mix_projection_facts.return_value = {
-        'installed': True, 'context': 'new', 'context_at': 10, 'options': {}}
+        'context': 'new', 'context_at': 10, 'options': {}}
     with pytest.raises(ValueError, match='incomplete'):
         ledger.publish_mix_menu(record, 'new')
     assert 'tracks' not in ledger.repository.publish_mix_menu.call_args.args[0]['options'][0]

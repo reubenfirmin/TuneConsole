@@ -33,7 +33,7 @@ def check(path, report_path):
               'controls': 'Real trend snapshot/calculation/publication; no network or background workers.'}
     store = Store(path)
     try:
-        store.init_schema(defer_metadata=True)
+        store.init_schema()
         history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
         sources = {table: fingerprint(store.conn, table)
                    for table in ('play_events', 'listening_observations')}

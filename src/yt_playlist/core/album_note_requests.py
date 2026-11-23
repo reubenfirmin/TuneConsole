@@ -1,4 +1,4 @@
-"""Coalesced release-note demand, independently of disposable note output."""
+"""Coalesced editorial demand keyed by the exact provider release."""
 from .recommendation_work import finite
 
 MAX_REQUESTS = 24
@@ -40,98 +40,91 @@ def _transaction(conn):
         raise RuntimeError('Album note demand requires an outer writer transaction')
 
 
-def _reference(conn, browse):
-    known = conn.execute("SELECT 1 FROM album_provider_ids WHERE provider='youtube' AND provider_id=?",
-                         (browse,)).fetchone()
-    return (browse, None) if known else (None, 'provider_album_not_admitted')
+def admit(conn, browse, fields=None):
+    from . import albums
+
+    album_id = albums.lookup(conn, browse)
+    metadata = (None, None, None, None)
+    if fields is not None:
+        _, artist, title, year_text, year_number, thumbnail, _ = fields
+        year = str(year_number) if year_number is not None else year_text
+        metadata = (artist, title, year or None, thumbnail or None)
+    # Editorial inputs can fill release metadata ahead of the catalog fetch.
+    # Album credits are supplied by catalog observations.
+    if album_id is None:
+        album_id = conn.execute(
+            'INSERT INTO albums(artist,title,year,thumbnail,metadata_rank) VALUES (?,?,?,?,-1)',
+            metadata).lastrowid
+        conn.execute("INSERT INTO album_provider_ids(provider,provider_id,album_id) VALUES ('youtube',?,?)",
+                     (browse, album_id))
+    elif fields is not None:
+        columns = ('artist', 'title', 'year', 'thumbnail')
+        assignments = ','.join(f'{column}=CASE WHEN metadata_rank=-1 THEN COALESCE(:{column},{column}) '
+                               f'ELSE COALESCE({column},:{column}) END' for column in columns)
+        conn.execute(f'UPDATE albums SET {assignments} WHERE id=:id',
+                     {'id': album_id, **dict(zip(columns, metadata, strict=True))})
 
 
 def _album(row):
-    result = {'browse_id': row['browse_id'], 'artist': row['artist'], 'title': row['title'],
-              'year': row['year_number'] if row['year_number'] is not None else row['year_text'],
-              'thumbnail': row['thumbnail']}
-    if row['requested_until'] is not None:
-        result['requested_until'] = row['requested_until']
-    return result
+    year = row['year']
+    if row['note_numeric_year'] and year is not None:
+        try:
+            year = int(year)
+        except ValueError:
+            pass
+    value = dict(browse_id=row['provider_id'], artist=row['artist'], title=row['title'],
+                 year=year, thumbnail=row['thumbnail'])
+    if row['note_requested_until'] is not None:
+        value['requested_until'] = row['note_requested_until']
+    return value
+
+
+def _rows(conn, *, first=False):
+    return conn.execute("SELECT p.provider_id,p.note_requested_until,p.note_numeric_year,"
+        "p.note_request_order,p.note_work_revision,a.artist,a.title,a.year,a.thumbnail "
+        "FROM album_provider_ids p JOIN albums a ON a.id=p.album_id "
+        "WHERE p.note_pending=1 ORDER BY p.note_request_order" + (" LIMIT 1" if first else ""))
 
 
 def read(conn):
-    return {row['browse_id']: _album(row) for row in conn.execute('SELECT * FROM album_note_requests ORDER BY id')}
+    return {row['provider_id']: _album(row) for row in _rows(conn)}
 
 
 def next_request(conn):
-    row = conn.execute('SELECT * FROM album_note_requests ORDER BY id LIMIT 1').fetchone()
-    return (_album(row), (row['id'], row['work_revision'] if 'work_revision' in row.keys() else row['revision'])) if row else (None, None)
+    row = _rows(conn, first=True).fetchone()
+    return (_album(row), (row['note_request_order'], row['note_work_revision'])) if row else (None, None)
 
 
 def matches(conn, browse, expected):
-    row = conn.execute('SELECT * FROM album_note_requests WHERE browse_id=? AND id=?',
-                        (browse, expected[0])).fetchone()
-    return row is not None and (row['work_revision'] if 'work_revision' in row.keys() else row['revision']) == expected[1]
+    return conn.execute("SELECT 1 FROM album_provider_ids WHERE provider='youtube' AND provider_id=? "
+        "AND note_pending=1 AND note_request_order=? AND note_work_revision=?",
+        (browse, *expected)).fetchone() is not None
 
 
 def complete(conn, browse, expected=None):
     _transaction(conn)
-    if expected is None:
-        conn.execute('DELETE FROM album_note_requests WHERE browse_id=?', (browse,))
-    else:
-        if matches(conn, browse, expected):
-            conn.execute('DELETE FROM album_note_requests WHERE browse_id=? AND id=?', (browse, expected[0]))
+    if expected is None or matches(conn, browse, expected):
+        conn.execute("UPDATE album_provider_ids SET note_pending=0,note_requested_until=NULL "
+                     "WHERE provider='youtube' AND provider_id=? AND note_pending=1", (browse,))
 
 
-def _insert(conn, fields, at, *, historical=False):
-    browse, artist, title, year_text, year_number, thumbnail, until = fields
-    reference, reason = _reference(conn, browse)
-    conn.execute('INSERT INTO album_note_requests(browse_id,album_provider_id,unresolved_reason,artist,title,'
-                 'year_text,year_number,thumbnail,requested_until,revision,requested_at,updated_at) '
-                 'VALUES (?,?,?,?,?,?,?,?,?,1,?,?)',
-                 (browse, reference, reason, artist, title, year_text, year_number, thumbnail, until,
-                  None if historical else at, at))
+def store(conn, fields):
+    _transaction(conn)
+    browse, _, _, _, year_number, _, until = fields
+    admit(conn, browse, fields)
+    numeric = int(year_number is not None)
+    conn.execute("UPDATE album_provider_ids SET note_pending=1,note_requested_until=?,note_numeric_year=?, "
+                 "note_request_order=CASE WHEN note_pending=0 THEN "
+                 "(SELECT COALESCE(MAX(note_request_order),0)+1 FROM album_provider_ids) ELSE note_request_order END,"
+                 "note_work_revision=note_work_revision+(note_pending=0 OR note_numeric_year<>?) "
+                 "WHERE provider='youtube' AND provider_id=? "
+                 "AND (note_pending=0 OR note_requested_until IS NOT ? OR note_numeric_year<>?)",
+                 (until, numeric, numeric, browse, until, numeric))
 
 
-def replace(conn, value, at, *, historical=False):
+def replace(conn, value, at):
     _transaction(conn)
     records = parse(value, at)
-    conn.execute('DELETE FROM album_note_requests')
+    conn.execute("UPDATE album_provider_ids SET note_pending=0,note_requested_until=NULL WHERE note_pending=1")
     for fields in records:
-        _insert(conn, fields, at, historical=historical)
-
-
-def request(conn, albums, cache, now, *, current_only=False, visible=False):
-    _transaction(conn)
-    finite(now)
-    albums = tuple(albums)
-    current_ids = {album['browse_id'] for album in albums}
-    if current_only:
-        for row in conn.execute('SELECT browse_id,requested_until FROM album_note_requests').fetchall():
-            if row['browse_id'] not in current_ids and (row['requested_until'] is None or row['requested_until'] <= now):
-                complete(conn, row['browse_id'])
-    for album in albums:
-        browse = album['browse_id']
-        cached = cache.get(browse, {})
-        if (not album.get('artist') or not album.get('title')
-                or cached.get('editorial_version') == 7 and cached.get('retry_at', 0) > now):
-            continue
-        previous = conn.execute('SELECT * FROM album_note_requests WHERE browse_id=?', (browse,)).fetchone()
-        until = previous['requested_until'] if previous else None
-        if visible:
-            until = max(until if until is not None else now, now + 900)
-        value = {key: album.get(key) for key in ('browse_id', 'artist', 'title', 'year', 'thumbnail')}
-        if until is not None:
-            value['requested_until'] = until
-        fields = parse({browse: value}, now)[0]
-        if previous:
-            reference, reason = _reference(conn, browse)
-            if _album(previous) != value or previous['album_provider_id'] != reference:
-                before, after = _album(previous), dict(value)
-                before.pop('requested_until', None)
-                after.pop('requested_until', None)
-                changed_work = before != after or previous['album_provider_id'] != reference
-                fence = ',work_revision=work_revision+' + str(int(changed_work)) if 'work_revision' in previous.keys() else ''
-                conn.execute('UPDATE album_note_requests SET album_provider_id=?,unresolved_reason=?,artist=?,title=?,'
-                             'year_text=?,year_number=?,thumbnail=?,requested_until=?,revision=revision+1' + fence + ',updated_at=? '
-                             'WHERE id=?', (reference, reason, *fields[1:], now, previous['id']))
-        else:
-            if conn.execute('SELECT count(*) FROM album_note_requests').fetchone()[0] == MAX_REQUESTS:
-                conn.execute('DELETE FROM album_note_requests WHERE id=(SELECT min(id) FROM album_note_requests)')
-            _insert(conn, fields, now)
+        store(conn, fields)

@@ -99,8 +99,7 @@ def build(ctx) -> APIRouter:
             for group_title, prefixes in groups:
                 params = []
                 for spec in rec_params.PARAMS:
-                    if (adaptive and spec.name.startswith(
-                            ('modes_k', 'modes_min_', 'modes_match_', 'modes_menu_', 'ppr_'))):
+                    if spec.name in rec_params.LEGACY_MODE_PARAMS or adaptive and spec.name.startswith('modes_menu_'):
                         continue
                     if (spec.group in param_groups and spec.name.startswith(prefixes)
                             and spec.name not in rec_params.SEMANTIC_PARAMS):
@@ -134,17 +133,13 @@ def build(ctx) -> APIRouter:
                  ("Track length", ("max_track_",)),
                  ("Comfort listening", ("comfort_",)),
              ]),
-            ("styles", "Listening-style grouping", "violet",
-             "Choose how tracks are grouped into listening styles and how those groups carry over when the model rebuilds.", [
-                 ("", ("modes_k", "modes_min_", "modes_match_")),
-             ]),
             ("discovery", "Finding new music", "blue",
              "Choose how widely Discover searches and how long unadded suggestions stay available. Your library is kept.", [
                  ("", ("discovery_",)),
              ]),
             ("preferences", "Ranking & feedback", "amber",
              "Set how strongly stated preferences affect rankings, how long dislikes exclude tracks, and what counts as mainstream for feedback.", [
-                 ("", ("breadth_gain", "axis_weight_cap", "dislike_suppress_", "dislike_durable_w", "pop_")),
+                 ("", ("breadth_gain", "axis_weight_cap", "dislike_suppress_", "pop_")),
                  ("Album interests · shared, standing support", ("album_saved_", "album_feedback_", "album_return_")),
                  ("Listening choice measurement", ("choice_",)),
                  ("Mix menu allocation", ("bandit_",)),
@@ -170,27 +165,19 @@ def build(ctx) -> APIRouter:
     def _learning_sections(controls):
         return _settings_sections([
             ("influence", "Recent influence", "blue",
-             "Set how dislikes, skips, mood choices, and recent genre, era, and artist preferences shift current picks. Overall influence from plays, likes, and sound is in Recommendations, under Main controls.", [
-                 ("", ("dislike_transient_w", "skip_transient_w", "facet_gain", "mood_alpha", "facet_mult_")),
+             "Set how skips, mood choices, and recent genre, era, and artist preferences shift current picks. Overall influence from plays, likes, and sound is in Recommendations, under Main controls.", [
+                 ("", ("skip_transient_w", "facet_gain", "mood_alpha", "facet_mult_")),
              ]),
             ("memory", "Listening memory", "teal",
              "Choose how long recent activity matters and how much history to consider. Each half-life is the time until a signal has half its original influence.", [
-                 ("", ("play_halflife_d", "mood_halflife_d", "like_halflife_d", "dislike_halflife_d", "skip_halflife_d", "recent_play_limit")),
+                 ("", ("play_halflife_d", "mood_halflife_d", "like_halflife_d", "skip_halflife_d",
+                       "recent_play_limit", "recent_horizon_days")),
              ]),
             ("session", "Current session", "violet",
-             "Control how Home recognizes your current listening style and how strongly the session carries over between plays.", [
-                 ("", ("now_", "session_")),
+             "Set how much the current session and earlier listening today influence picks.", [
+                 ("", ("now_min_events", "now_gain", "session_")),
              ]),
-            ("saved", "Saved preferences", "amber",
-             "Choose when repeated activity changes saved taste and how large each change is. Saved genre and mix adjustments also fade toward neutral over time, including manual changes.", [
-                 ("Learning behavior", ("theme_threshold", "graduate_")),
-                 ("Adjustment memory", ("weight_revert_halflife_d",)),
-             ]),
-            ("rates", "Learning rates", "blue",
-             "Choose how much each source contributes to learning saved preferences. Higher values accumulate evidence faster; 0 stops that source from contributing to learning.", [
-                 ("", ("source_w_",)),
-             ]),
-        ], ("transient", "graduation"), controls)
+        ], ("transient",), controls)
 
     def _model_context():
         return queries.model_status()

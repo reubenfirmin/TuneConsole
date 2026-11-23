@@ -26,7 +26,7 @@ def test_known_start_share_includes_unknowns_without_rewriting_them_from_current
 
 def test_confirmed_reversals_and_clears_remain_actions_and_collection_is_undated(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     for i in range(9):
         seed_catalog_track(store, f'k{i}', f'Song {i}', f'Artist {i}', video_id=f'v{i}',
                            genre=('Jazz' if i < 5 else 'House') if i != 8 else None)
@@ -175,7 +175,7 @@ def test_discovery_requires_history_and_real_plays_and_retains_daily_denominator
 def test_rating_story_song_details_reconcile_with_confirmed_actions_and_daily_totals(store, monkeypatch):
     monkeypatch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
     store.settings.set_setting('listening_timezone', 'America/Costa_Rica')
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     for i in range(8):
         seed_catalog_track(store, f'action-{i}', f'Song {i}', f'Artist {i}', video_id=f'actionvid{i}')
         at = NOW - (i % 3) * 86400

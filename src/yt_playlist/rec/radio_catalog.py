@@ -1,4 +1,4 @@
-"""Bounded catalog hydration for continuing Radio style streams.
+"""Bounded catalog hydration for continuing On Air streams.
 
 Membership is prepared by the existing recommendation worker. Legacy sessions
 without that index retain the #286 genre fallback until their next launch.

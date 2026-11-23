@@ -4,7 +4,7 @@ DAY = 86400.0
 
 
 def _store(s):
-    s.accounts.upsert_account("main", "bridge", None, True)
+    s.accounts.upsert_account("main", None, True)
     return s
 
 

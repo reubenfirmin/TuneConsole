@@ -29,6 +29,19 @@ def with_remote_durations(remote, **durations):
     remote.get_playlist = detail
 
 
+def test_startup_prefers_known_duration_within_the_same_rotation_slot():
+    from yt_playlist.rec.radio_startup import _pick_startup
+
+    seed = {'key': 'seed', 'video_id': 'seed', 'artist': 'First', '_radio_rotation_slot': 'familiar'}
+    unknown = {'key': 'unknown', 'video_id': 'unknown', 'artist': 'Second', '_radio_rotation': 'new'}
+    known = {'key': 'known', 'video_id': 'known', 'artist': 'Third',
+             '_radio_rotation': 'new', 'duration': 180}
+    familiar = {'key': 'familiar', 'video_id': 'familiar', 'artist': 'Fourth',
+                '_radio_rotation': 'familiar', 'duration': 180}
+    assert _pick_startup([unknown, familiar, known], 1, [seed], bool, .5)[0]['video_id'] == 'known'
+    assert _pick_startup([unknown, familiar], 1, [seed], bool, .5)[0]['video_id'] == 'unknown'
+
+
 def test_initial_and_appended_radio_times_survive_readback_and_render(poc):
     c, remote, *_ = poc
     with_remote_durations(remote, v1={'duration_seconds': 363}, v4={'duration': '6:42'})

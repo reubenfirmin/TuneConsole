@@ -73,3 +73,7 @@ Set `YT_PLAYLIST_LISTENING_CHARTS=0` to disable the Charts journal and Listening
 analytics and their background work. Developer vibe ratings default off;
 `YT_PLAYLIST_AUDIO_VIBES=1` enables them without changing normal collection.
 Use the [audio model settings](src/yt_playlist/rec/README.md#audio-model-settings).
+
+Home assembles Mix Tapes on demand. Choosing a Vibe returns the replacement cards
+in the same request. The background worker maintains the ranked song pools,
+track groups and other inputs used during assembly.

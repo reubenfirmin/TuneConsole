@@ -68,9 +68,9 @@ def test_quarantine_and_explicit_adoption_agree_across_all_evidence_reads(store)
     path = _track(store, 'Parent', 'Other')
     pid = _playlist(store, iid, 'Ritmo generated', [child, path], ytm='generated')
     # Add modelled tracks so search would find this playlist without quarantine.
-    seed_id = store.conn.execute("SELECT id FROM tracks WHERE title='Spektrum'").fetchone()[0]
+    seed_id = store.conn.execute("SELECT id FROM catalog_tracks WHERE title='Spektrum'").fetchone()[0]
     store.playlists.set_playlist_tracks(pid, [seed_id, *[
-        store.conn.execute('SELECT id FROM tracks WHERE identity_key=?', (key,)).fetchone()[0]
+        store.conn.execute('SELECT id FROM catalog_tracks WHERE identity_key=?', (key,)).fetchone()[0]
         for key in (child, path)]])
     store.playlists.mark_generated_playlist('generated')
     store.playlists.set_playlist_group('generated', 'Favorites')
@@ -86,7 +86,7 @@ def test_quarantine_and_explicit_adoption_agree_across_all_evidence_reads(store)
 
 
 def test_playlist_cap_is_strict_and_duplicate_path_tracks_do_not_inflate_counts(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     child = _track(store, 'Child', 'Artist')
     path = _track(store, 'Parent', 'Other')
     _playlist(store, iid, 'Small', [child, path])
@@ -97,8 +97,8 @@ def test_playlist_cap_is_strict_and_duplicate_path_tracks_do_not_inflate_counts(
 
 
 def test_shared_album_and_same_account_day_are_grounded_separately(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('other', 'other-cred', None, False)
+    iid = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
     child = _track(store, 'Child', 'Artist', album='Album', album_browse_id='release')
     path = _track(store, 'Parent', 'Artist', album='Album', album_browse_id='release')
     store.history.record_history_plays(iid, 43200, [(child, 'Today')], source_timezone='UTC')

@@ -1,10 +1,9 @@
-"""Prepared Home feed, mix rotation and asynchronous pool-job routes."""
+"""Home feed, mix rotation and asynchronous pool-job routes."""
 import json
 
 from fastapi import APIRouter, Depends, Request, Response
 
-from yt_playlist.rec import home_cards, home_prepared, rec_params
-from yt_playlist.rec.home_cards import _epoch
+from yt_playlist.rec import home_cards
 from yt_playlist.web.context import request_form
 from yt_playlist.web.routes.home_onboarding import sample_fragment
 from yt_playlist.web.routes.home_access import mix_guard
@@ -12,8 +11,7 @@ from yt_playlist.web.routes.home_access import mix_guard
 
 def build(ctx, views):
     router = APIRouter(dependencies=[Depends(mix_guard(ctx))])
-    store, now_fn, templates = ctx.store, ctx.now_fn, ctx.templates
-    recommendations = views.recommendations
+    now_fn, templates = ctx.now_fn, ctx.templates
 
     @router.get("/home/feed")
     def home_feed(request: Request):

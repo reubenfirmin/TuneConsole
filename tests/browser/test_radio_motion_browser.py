@@ -192,10 +192,21 @@ def _assert_accepted_junction_shape(session):
         assert row['difference'] is not None and row['difference'] < 4, row
 
 
+def _settle_junction(page, session):
+    settled = 'el => Alpine.$data(el.closest(".radio-home")).junctionFrame === null'
+    # Run the real spring frames until render updates stop. The bound still
+    # catches a route that oscillates or never arrives at the target.
+    for _ in range(12):
+        if session.evaluate(settled):
+            return
+        page.clock.run_for(128)
+    assert session.evaluate(settled)
+
+
 def _assert_junction_motion(page, session, initial, target_x, *, dense=False):
     frames = [initial, *_junction_frames(page, session, count=32 if dense else 10,
                                         step=16 if dense else 48)]
-    page.clock.run_for(1500)
+    _settle_junction(page, session)
     final = _junction_snapshot(session)
     if dense:
         assert len({round(frame['x'], 2) for frame in frames}) > 10
@@ -237,7 +248,7 @@ def test_restored_junction_preserves_all_four_stream_shapes_without_loader_art(p
         queue = session.locator(f'.radio-direction[data-slot="{slot}"]')
         queue.scroll_into_view_if_needed()
         queue.hover(force=True)
-        page.clock.run_for(2000)
+        _settle_junction(page, session)
         _assert_accepted_junction_shape(session)
         for path in _junction_snapshot(session)['paths']:
             assert path['clearance'] >= 1
@@ -298,9 +309,9 @@ def test_artwork_evolves_slowly_with_reduced_motion_and_pauses_when_hidden(page,
     expect(page.locator('#radio-landscape-0')).to_have_css('transition-duration', '0s')
     initial = page.locator('#radio-landscape-0').evaluate('el => getComputedStyle(el).d')
     phase = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase')
-    page.clock.run_for(20_000)
+    page.clock.run_for(4000)
     elapsed = page.evaluate('Alpine.$data(document.querySelector(".radio-home")).artworkPhase') - phase
-    assert .16 < elapsed < .19  # The fastest fold takes twelve minutes.
+    assert .033 < elapsed < .037  # The fastest fold takes twelve minutes.
     expect(page.locator('#radio-landscape-0')).not_to_have_css('d', initial)
     expect(flow).not_to_have_css('stroke-dashoffset', '0px')
 
@@ -426,20 +437,24 @@ def test_artwork_resumes_its_saved_shape_after_visiting_another_page(page, radio
     assert saved['phase'] == page.evaluate('window.leavingPhase')
     assert saved['phase'] >= 15
 
-    page.evaluate('''() => {
-      window.addEventListener('app-page-changed', () => {
-        const model = Alpine.$data(document.querySelector('.radio-home'));
-        // Capture the first restored drawing before a motion frame can advance it.
-        Alpine.effect(() => {
-          if (model.artworkPlaylistId && !window.resumedArtwork) {
-            window.resumedArtwork = {playlistId: model.artworkPlaylistId,
-              phase: model.artworkPhase, seed: model.artworkSeed};
-          }
-        });
-      }, {once: true});
+    # Home can finish mounting before the deferred Radio panel exists. Hold
+    # the returning panel's status until its artwork can be observed.
+    status = []
+    page.route('**/radio/status', lambda route: status.append(route), times=1)
+    with page.expect_request('**/radio/status'):
+        page.get_by_role('link', name='Home', exact=True).click()
+        page.get_by_role('tab', name='On air', exact=True).click()
+    page.locator('.radio-home').evaluate('''root => {
+      const model = Alpine.$data(root);
+      // Capture the first restored drawing before a motion frame can advance it.
+      const effect = Alpine.effect(() => {
+        if (!model.artworkPlaylistId) return;
+        window.resumedArtwork = {playlistId: model.artworkPlaylistId,
+          phase: model.artworkPhase, seed: model.artworkSeed};
+        queueMicrotask(() => Alpine.release(effect));
+      });
     }''')
-    page.get_by_role('link', name='Home', exact=True).click()
-    page.get_by_role('tab', name='On air', exact=True).click()
+    status[0].fulfill(json=api.state)
     expect(page.locator('.radio-session')).to_be_visible(timeout=6000)
     assert page.evaluate('window.resumedArtwork') == saved
     expect(page.locator('#radio-landscape-0')).to_have_css('transition-duration', '0s')
@@ -484,6 +499,9 @@ def test_session_history_rises_from_junction_and_queues_preview_without_switchin
         page, radio_ui, width, height, motion, motion_costs):
     api = radio_ui
     page.set_viewport_size({'width': width, 'height': height})
+    # Keep the page entrance from moving the viewport coordinates while the
+    # test drives the Radio animation with the Playwright clock.
+    page.add_style_tag(content='main { animation-name: none; }')
     page.add_script_tag(content=Path(__file__).with_name('radio_junction_baseline.js').read_text())
     api.ready = {**api.ready, 'directions': [
         {**branch, 'tracks': api.tracks[branch['slot'] + 1:branch['slot'] + 7]}
@@ -567,7 +585,7 @@ def _exercise_preview_motion(page, session, width):
     page.mouse.move(0, 0)
     page.clock.install()
     page.clock.pause_at(page.evaluate('Date.now() / 1000') + .1)
-    page.clock.run_for(2000)
+    _settle_junction(page, session)
     selections = []
 
     def record_selection(route):
@@ -604,7 +622,7 @@ def _exercise_preview_motion(page, session, width):
     # The approved refinement is specifically the middle two streams, including
     # reversing the pull before its shoulders catch up with the foot.
     other.hover(force=True)
-    page.clock.run_for(1500)
+    _settle_junction(page, session)
     _assert_accepted_junction_shape(session)
     capture(page, path=f'/tmp/tuneconsole-411-restored-{width}-02.png')
     third = session.locator('.radio-direction').nth(2)

@@ -53,9 +53,9 @@ def test_explicit_genre_mute_does_not_mean_revert_into_a_soft_preference(store):
 @pytest.mark.parametrize("scorer", [surfaces.for_you, surfaces.explore_for_you,
                                    surfaces.comfort_listening])
 def test_genre_mute_excludes_owned_recommendations_until_manual_unmute(store, scorer):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     techno, folk, unknown = _tracks(store)
-    tids = [row["id"] for row in store.conn.execute("SELECT id FROM tracks ORDER BY id")]
+    tids = [row["id"] for row in store.conn.execute("SELECT id FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL) ORDER BY id")]
     pid = store.playlists.upsert_playlist(iid, "PL", "Listening", 3, "h", 0)
     store.playlists.set_playlist_tracks(pid, tids)
     store.rec_model.replace_rec_vectors([(key, np.array([1., 0.], dtype=np.float32).tobytes())

@@ -45,14 +45,3 @@ def response_intents(previous, action, opportunity_id, browse, kind, now):
         intents.append({'action_id': action, 'opportunity_id': opportunity_id, 'kind': 'feedback',
                         'now': now, 'option_id': browse, 'feedback_kind': kind})
     return intents
-
-
-def replace_legacy(original, preferred, browse, kind, now, opportunity_id):
-    current, previous = dict(original), []
-    for source in original:
-        if preferred[source] == preferred[browse]:
-            previous.append(current.pop(source))
-    action = action_id(kind)
-    if action:
-        current[browse] = {'kind': kind, 'at': now, 'opportunity_id': opportunity_id, 'action_id': action}
-    return current, response_intents(previous, action, opportunity_id, browse, kind, now)

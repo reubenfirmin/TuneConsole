@@ -1,4 +1,6 @@
 """Small independently prepared musical corpora; no captured user library data."""
+from dataclasses import replace
+
 from yt_playlist.rec import group_discovery, group_similarity, group_versions, musical_profiles
 
 
@@ -22,3 +24,13 @@ def publish(store, tracks, now=1000, previous=None, *, policy=group_discovery.Po
         legacy_versions=store.taste_groups.legacy_versions())
     store.taste_groups.publish(prepared)
     return store.taste_groups.head(members=True)
+
+
+def publish_keyed(store, groups, *, now=1):
+    """Publish fixtures with known catalog keys and distinct musical regions."""
+    tracks = []
+    for genre, keys, character in groups:
+        tracks.extend(replace(track, key=key) for key, track in zip(
+            keys, recordings([(genre, len(keys), character)])))
+    head = publish(store, tracks, now)
+    return store.taste_groups.leaf_members(head['generation'])

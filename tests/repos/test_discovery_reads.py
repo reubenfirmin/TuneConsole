@@ -6,7 +6,6 @@ import pytest
 
 from tests.core.test_predecessor_writes import installed
 from tests.store_fixture_support import _publication_preparation_input, native_sql_calls
-from yt_playlist.core.discovery_reads import read_owners
 
 
 @pytest.fixture(autouse=True)
@@ -27,7 +26,7 @@ def seed(store):
     key = store.discovery.upsert_discovered_track(
         'captured spelling', 'upload', 'Song', 'Artist', 'Album', 'art',
         'House', '2001', 'radio:seed', 10)
-    seed_discovered_audio(store, key, bpm=123, energy=.7)
+    seed_discovered_audio(store, key, bpm=123, danceability=.7)
     store.discovery.record_discovery_impressions('track', [key], 'visit', 20)
     return key
 
@@ -76,8 +75,7 @@ def test_full_reads_reuse_detached_rows_and_keep_pinned_state(store, monkeypatch
 
     monkeypatch.setattr(repo, '_dtrack_row', staticmethod(decode))
     with store.read_view(tracked=tracked) as reader:
-        relation = read_owners(reader.conn).relation('discovered_tracks')
-        expected = [original(row) for row in reader.conn.execute('SELECT * FROM ' + relation)]
+        expected = [original(row) for row in reader.conn.execute('SELECT * FROM discovered_tracks')]
         first = reader.discovery.get_discovered_tracks()
         assert first == expected
         first[0]['audio']['bpm'] = -1
@@ -125,9 +123,8 @@ def test_tracked_full_read_invalidates_each_changed_input(store, change):
     else:
         store.discovery.prune_discovered_tracks({key})
     with store.read_view(tracked=True) as reader:
-        relation = read_owners(reader.conn).relation('discovered_tracks')
         expected = [reader.discovery.repository._dtrack_row(row) for row in
-                    reader.conn.execute('SELECT * FROM ' + relation)]
+                    reader.conn.execute('SELECT * FROM discovered_tracks')]
         assert expected != before
         assert reader.discovery.get_discovered_tracks() == expected
         assert reader.discovery.discovered_track_keys() == {row['identity_key'] for row in expected}

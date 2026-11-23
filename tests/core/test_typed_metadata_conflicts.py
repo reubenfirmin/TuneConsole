@@ -1,5 +1,6 @@
 """Conflict policy continues with evidence IDs rather than copied candidates."""
 import json
+import sqlite3
 
 import pytest
 
@@ -54,9 +55,8 @@ def test_recording_conflicts_are_shared_while_year_conflicts_stay_on_the_capture
     store = catalog
     entry, recording, _, _ = capture(store, fields={})
     with store.conn:
-        related = store.conn.execute("INSERT INTO catalog_entries(recording_id,source_ref) VALUES (?,'related')",
-                                     (recording,)).lastrowid
-        store.conn.execute("INSERT INTO unresolved_items(entry_id,title,artist) VALUES (?,'Song','Artist')", (related,))
+        related = store.conn.execute("INSERT INTO track_sources(recording_id,source_ref,title,artist) "
+                                     "VALUES (?,'related','Song','Artist')", (recording,)).lastrowid
     for field in ('bpm', 'year'):
         values = (120, 130) if field == 'bpm' else ('1999', '2000')
         mutate(store, lambda: conflicts.upsert(store.conn, entry, field,
@@ -79,3 +79,23 @@ def test_supplied_evidence_cannot_be_borrowed_from_another_input_or_provider(cat
             mutate(store, lambda: conflicts.upsert(store.conn, target, 'bpm',
                 [{'provider': provider, 'value': 120, 'observation_id': observations['bpm']}]))
     assert list(store.conn.iterdump()) == before
+
+
+def test_conflict_owner_rejects_unrelated_and_duplicate_candidate_keys(catalog):
+    store = catalog
+    entry, _, _, _ = capture(store, fields={})
+    _, _, _, other_observations = capture(store, video='other')
+    conflict = mutate(store, lambda: conflicts.upsert(store.conn, entry, 'bpm',
+        [{'provider': 'a', 'value': 120}, {'provider': 'b', 'value': 130}], now=20))
+    before = conflicts.candidates(store.conn, conflict)
+    observation = before[0]['observation_id']
+    for positions in ({other_observations['bpm']: 0}, {f'0{observation}': 0}):
+        with pytest.raises(sqlite3.IntegrityError, match='Invalid metadata conflict candidates'), store.conn:
+            store.conn.execute('UPDATE metadata_conflicts SET candidate_positions=? WHERE id=?',
+                               (json.dumps(positions), conflict))
+    with pytest.raises(sqlite3.IntegrityError, match='Invalid metadata conflict candidates'), store.conn:
+        store.conn.execute('UPDATE metadata_conflicts SET candidate_positions=? WHERE id=?',
+                           (f'{{"{observation}":0,"{observation}":1}}', conflict))
+    with pytest.raises(sqlite3.IntegrityError, match='belongs to a metadata conflict'), store.conn:
+        store.conn.execute('DELETE FROM metadata_observations WHERE id=?', (observation,))
+    assert conflicts.candidates(store.conn, conflict) == before

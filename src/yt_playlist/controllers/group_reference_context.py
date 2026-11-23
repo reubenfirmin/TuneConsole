@@ -2,7 +2,7 @@
 from yt_playlist.core import choice_checkpoints, group_evidence, recommendation_references
 
 
-def resolve(captured, ledger, *, recommendations):
+def resolve(captured, ledger):
     if not isinstance(captured, dict):
         raise ValueError('Invalid listening context for musical group evidence')
     if captured.get('artifact'):
@@ -25,6 +25,5 @@ def resolve(captured, ledger, *, recommendations):
         result[field] = [{key: value[key] for key in ('version', 'definition_version', 'group_id') if key in value}
                          if isinstance(value, dict) else value for value in values]
     group_evidence.references(result)
-    if recommendations:
-        result['recommendation_generations'] = recommendation_references.references(captured)
+    result['recommendation_generations'] = recommendation_references.references(captured)
     return result

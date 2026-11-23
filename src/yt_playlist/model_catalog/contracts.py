@@ -19,6 +19,7 @@ class Node:
     area: str = "model"
     feature_type: str = ""
     app_area: str = ""
+    ui_location: str = ""
 
 
 @dataclass(frozen=True)
@@ -27,12 +28,13 @@ class Edge:
     target: str
     detail: str
     condition: str = ""
+    feedback: bool = False
 
 
 PERIODS = (
-    ("durable", "Durable", "Saved interests and slow preference changes"),
-    ("recent", "Recent", "Days to weeks; evidence fades with wall-clock time"),
-    ("session", "Session", "Last 24 hours, with an hours-scale decay"),
-    ("now", "NOW", "Current listening window; confidence gated"),
+    ("now", "NOW", "Effective taste, with active listening and temporary steering"),
+    ("session", "TODAY", "Current local calendar day, including earlier sessions"),
+    ("recent", "RECENT", "Bounded multi-day evidence with source-specific decay"),
+    ("durable", "PERMANENT", "Learned taste from sustained evidence across days and episodes"),
     ("structural", "Outside the stack", "Song properties, relationships, services and selection rules"),
 )

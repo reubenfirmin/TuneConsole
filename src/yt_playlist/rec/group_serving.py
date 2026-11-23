@@ -3,17 +3,14 @@ import json
 import logging
 from dataclasses import dataclass, field
 import threading
-import uuid
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing, check_stopping
-from yt_playlist.core import group_preview_work
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.core.work_diagnostics import maintenance_job
 from yt_playlist.rec import group_learning, group_preparation, mode_surfaces
 
 SURFACE = 'adaptive_group_preview'
 SCHEMA = 3
-WORK_PREFIX = f'preview-{SCHEMA}:'
 PHASE = 'rec: adaptive mix shadow'
 
 
@@ -26,20 +23,29 @@ def checkpoint(store):
     return prepared if prepared and prepared['schema'] == SCHEMA and prepared['mix_regions'] else None
 
 
+def matching_preview(store, generation):
+    saved = checkpoint(store)
+    if saved is None or saved['generation'] != generation:
+        return None
+    preview = store.rec_proposals.get_proposals(SURFACE)
+    # Publication can advance between reading the checkpoint and its payload.
+    return preview if preview and preview['generation'] == generation else None
+
+
 def policy(store):
     return 'adaptive' if checkpoint(store) else 'legacy'
 
 
-def calculate(store, head, now, *, progress=None, checkpoint=None):
+def calculate(store, head, now, *, progress=None):
     progress = progress if progress is not None else {}
-    candidates = prepare_candidates(store, head, now, progress=progress, checkpoint=checkpoint)
+    candidates = prepare_candidates(store, head, now, progress=progress)
     return compose(store, head, now, candidates, progress=progress)
 
 
-def prepare_candidates(store, head, now, *, progress=None, checkpoint=None):
+def prepare_candidates(store, head, now, *, progress=None):
     """Candidate eligibility and diversity do not consume allocation reports."""
     from yt_playlist.library.group_composition import candidates
-    return candidates(store).prepare(head, now, progress=progress, checkpoint=checkpoint)
+    return candidates(store).prepare(head, now, progress=progress)
 
 
 def compose(store, head, now, prepared_candidates, *, progress, allocation_at=None):
@@ -56,7 +62,8 @@ def compose_facts(head, now, prepared_candidates, *, stats, enabled):
     allocation = group_learning.allocation(head, stats)
     groups = [group for group in head['groups'] if not group.get('legacy')]
     by_version = {group['version']: group for group in groups}
-    prepared = prepared_candidates['groups']
+    prepared = {identity: {**group, 'frames': {lane: frame.copy() for lane, frame in group['frames'].items()}}
+                for identity, group in prepared_candidates['groups'].items()}
     for group in groups:
         prepared[group['group_id']]['allocation'] = allocation.get(group['group_id'], 0.)
     for group in groups:
@@ -95,9 +102,8 @@ def compose_facts(head, now, prepared_candidates, *, stats, enabled):
             'serving_policy': 'adaptive' if enabled else 'legacy',
             'groups': list(prepared.values()), 'context': context,
             'counts': head['payload']['counts'], 'menus': menus}
-    if prepared_candidates['typed']:
-        generation = prepared_candidates['generation']
-        result['recommendation_generations'] = [generation] if generation is not None else []
+    generation = prepared_candidates['generation']
+    result['recommendation_generations'] = [generation] if generation is not None else []
     return result
 
 
@@ -105,20 +111,24 @@ def compose_facts(head, now, prepared_candidates, *, stats, enabled):
 class PreviewWork:
     guard: object
     at: float
+    head: dict
     progress: dict = field(default_factory=dict)
     result: dict | None = None
     candidates: dict | None = None
-    token: str = field(default_factory=lambda: WORK_PREFIX + uuid.uuid4().hex)
-    expected_token: str | None = None
-    dependencies: set = field(default_factory=set)
+    publication: object = None
+
+    def candidates_current(self, now):
+        expires = self.progress.get('expires_at')
+        return (now >= self.at and (expires is None or now < expires)
+                and self.guard.is_current())
 
     def current(self, now):
-        expires = self.progress.get('expires_at')
-        if self.result is not None:
-            expires = min((at for at in (expires, self.progress.get('allocation_expires_at'))
-                           if at is not None), default=None)
-        return (now >= self.at and (expires is None or now < expires)
-                and self.guard.is_current(allow_stale_tables=group_preview_work.TABLES))
+        if not self.candidates_current(now):
+            return False
+        if self.publication is None:
+            return True
+        expires = self.progress.get('allocation_expires_at')
+        return (expires is None or now < expires) and self.publication.is_current()
 
 
 class Preparation:
@@ -146,63 +156,39 @@ class Preparation:
                         return self.complete.result
                     if self.pending is not None and not self.pending.current(now):
                         self.pending = None
+                    if self.pending is None and self.complete is not None and self.complete.candidates_current(now):
+                        self.pending = PreviewWork(self.complete.guard, self.complete.at, self.complete.head,
+                                                   {'expires_at': self.complete.progress.get('expires_at')},
+                                                   candidates=self.complete.candidates)
                     # Catalog views also expose enrichment/preparation timestamps;
                     # hydration consumes their metadata and profile definitions.
                     with (store.read_snapshot() as snapshot,
-                          column_group_reads(snapshot.store, 'recordings', 'catalog'),
-                          column_group_reads(snapshot.store, 'rec_musical_profiles', 'definition')):
+                          column_group_reads(snapshot.store, 'recordings', 'catalog')):
                         reader = snapshot.store
                         try:
-                            head = (reader.taste_groups.preview_head() if getattr(reader, '_recommendation_files', False)
-                                    else reader.taste_groups.head(members=True))
-                            if head is None:
-                                store.maintenance_diagnostics.record('deferred', phase=PHASE, reasons=('group-head',))
-                                return None
                             if self.pending is None:
-                                saved = reader.rec_proposals.preview_work()
-                                if (saved is not None and saved['token'].startswith(WORK_PREFIX)
-                                        and not saved['invalid'] and saved['schema_version'] == snapshot._schema
-                                        and saved['at'] <= now
-                                        and (saved['expires_at'] is None or now < saved['expires_at'])):
-                                    from yt_playlist.rec.stored_groups import restore_preview_pages
-                                    self.pending = PreviewWork(snapshot, saved['at'], {
-                                        'expires_at': saved['expires_at'], 'frames': restore_preview_pages(saved['pages'])},
-                                        token=saved['token'], expected_token=saved['token'],
-                                        dependencies=set(saved['dependencies']))
-                                    reader._snapshot_reads.include(saved['dependencies'])
-                                else:
-                                    self.pending = PreviewWork(snapshot, now, {
-                                        'expires_at': reader.rec_model.next_suppression_change(now)},
-                                        expected_token=saved['token'] if saved else None)
+                                head = reader.taste_groups.preview_head()
+                                if head is None:
+                                    store.maintenance_diagnostics.record('deferred', phase=PHASE, reasons=('group-head',))
+                                    return None
+                                self.pending = PreviewWork(snapshot, now, head, {
+                                    'expires_at': reader.rec_model.next_suppression_change(now)})
                             work = self.pending
-
-                            def checkpoint(version, lane, after, delta):
-                                work.guard.store._snapshot_reads.include(reader._snapshot_reads.dependencies)
-                                dependencies = {(table, key) for table, key in work.guard.store._snapshot_reads.dependencies
-                                                if table in store._snapshot_revisions.tables - group_preview_work.TABLES}
-                                unknown = {table for table, _ in dependencies} - group_preview_work.SOURCES
-                                if unknown:
-                                    raise RuntimeError('Adaptive preview consumed unguarded durable inputs: ' + ', '.join(sorted(unknown)))
-                                header = {'token': work.token, 'schema_version': work.guard._schema, 'at': work.at,
-                                          'expires_at': work.progress.get('expires_at')}
-                                if not store.rec_proposals.save_preview_page(work.guard, header, work.expected_token,
-                                        (version, lane, after, delta), dependencies - work.dependencies):
-                                    raise WorkBudgetExceeded('Adaptive preview inputs changed before checkpoint')
-                                work.expected_token = work.token
-                                work.dependencies.update(dependencies)
-
                             if work.candidates is None:
-                                work.candidates = prepare_candidates(reader, head, work.at,
-                                    progress=work.progress, checkpoint=checkpoint)
-                            work.guard.store._snapshot_reads.include(reader._snapshot_reads.dependencies)
+                                work.candidates = prepare_candidates(reader, work.head, work.at,
+                                    progress=work.progress)
+                                work.progress.pop('frames', None)
                         finally:
+                            # An interrupted slice can leave completed frames in memory.
+                            if self.pending is not None:
+                                self.pending.guard.store._snapshot_reads.include(reader._snapshot_reads.dependencies)
                             snapshot.release_reader()
                     # Allocation/report arrivals never own candidate progress.
                     # Read them in a fresh view, then validate both cohorts under
                     # the publication's writer reservation.
                     with store.read_snapshot() as publication:
                         publication.store._snapshot_reads.include(work.guard.store._snapshot_reads.dependencies)
-                        result = compose(publication.store, head, work.at, work.candidates,
+                        result = compose(publication.store, work.head, work.at, work.candidates,
                                          progress=work.progress, allocation_at=now)
                         encoded = json.dumps(result)
 
@@ -213,11 +199,9 @@ class Preparation:
                                 store.rec_proposals.publish_home(prepared, input_revision=publication._changes)
 
                             check_stopping()
-                            if publication.publish(publish, allow_stale_tables=group_preview_work.TABLES):
-                                work.guard, work.result = publication, result
+                            if publication.publish(publish):
+                                work.publication, work.result = publication, result
                                 self.complete, self.pending = work, None
-                                work.progress.pop('frames', None)
-                                work.candidates = None
                                 store.maintenance_diagnostics.record('completed', phase=PHASE)
                                 return result
             except WorkBudgetExceeded as error:

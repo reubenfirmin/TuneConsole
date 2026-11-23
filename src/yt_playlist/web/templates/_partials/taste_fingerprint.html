@@ -1,9 +1,10 @@
+{% if not dialog_only %}
 <section class="fingerprint card" id="fingerprint" x-data="fpPanel()" :class="{ 'is-collapsed': collapsed }"
-         data-tuning-remaining="{{ fingerprint.tuning_remaining|default(0) }}"
+         data-tuning-remaining="{{ tuning_remaining if lazy_tuning else fingerprint.tuning_remaining|default(0) }}"
          data-tuning-active="{{ 'true' if tuning_active else 'false' }}"
          data-vibes-ready="{{ 'true' if vibes_ready|default(false) else 'false' }}"
          data-vibe="{{ vibe }}" @home-vibe-sync.window="vibe = $event.detail"
-         @home-vibe-saving.window="close()" @home-vibe-edit.window="selectTab('vibe'); show()"
+         @home-vibe-saving.window="close()" @home-vibe-edit.window="show('vibe')"
          @home-mix-open.window="close()" @home-mixes-applied.window="close()">
   <button type="button" class="fp-collapse" x-ref="launcher" @click="show()"
           :aria-expanded="(!collapsed).toString()" aria-haspopup="dialog" aria-controls="fp-dialog"
@@ -21,6 +22,8 @@
   <dialog class="fp-dialog" id="fp-dialog" x-ref="dialog" aria-labelledby="fp-title"
           @cancel.prevent="close()" @keydown.escape.prevent.stop="close()"
           @click="dismissBackdrop($event)" @keydown.tab="trapFocus($event)">
+{% endif %}
+{% if not lazy_tuning %}
   <div class="fp-bar fp-dialog-head">
     <div class="fp-title-group">
       <span class="fp-record" aria-hidden="true"><i></i></span>
@@ -73,6 +76,7 @@
     <div class="fp-intro"><h2>Meet the moment.</h2><p>Same taste in music. A different kind of day.</p></div>
     <form id="home-vibe-form" data-write-recovery="local" hx-post="/home/vibe" hx-target="#home-mode-cards" hx-swap="outerHTML"
           hx-trigger="change" hx-sync="#fingerprint:queue last" hx-disabled-elt="find fieldset"
+          hx-indicator="#home-vibe-feedback"
           @keydown.space="if ($event.target.matches('input[type=radio]:checked')) { $event.preventDefault(); close(); }"
           @click="if ($event.target.matches('input[type=radio]')) close()">
       <fieldset class="fp-vibe-fields" :disabled="!vibesAvailable">
@@ -198,5 +202,8 @@
             title="Reset genre choices and weights to your learned preferences">Reset mix adjustments</button>
   </div>
   </div>
+{% endif %}
+{% if not dialog_only %}
   </dialog>
 </section>
+{% endif %}

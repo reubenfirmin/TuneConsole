@@ -16,10 +16,8 @@ class Albums:
             inputs = self.repository.observation_inputs(browse_id)
             current = inputs['album']
             values = dict(title=title, artist=artist, year=year, type=type, thumbnail=thumbnail)
-            if not inputs['keyed_genres']:
-                values['genre'] = genre
             prepared = policy.metadata(current, values, rank)
-            if inputs['keyed_genres'] and genre not in (None, '') and (
+            if genre not in (None, '') and (
                     not current or rank >= current['metadata_rank'] or inputs['genre'] in (None, '')):
                 prepared.update(genre_key=genre_key, unresolved_genre=genre if genre_key is None else None)
             aid = self.repository.store_metadata(browse_id, current.get('id'), prepared)

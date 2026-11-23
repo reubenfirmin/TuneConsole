@@ -11,6 +11,7 @@ import pytest
 from yt_playlist.core import audio_annotations, features
 from yt_playlist.core.store import Store
 from yt_playlist.rec import audio_vibe_prediction, home_vibe
+from experiments.audio_lab_tools.legacy import audio_vibe_prediction as historical_prediction
 from yt_playlist.web.app import create_app
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, mock_snapshot_coordinator,
@@ -60,12 +61,12 @@ def audio_flag_store(tmp_path, audio_flag_schema, monkeypatch, native_sql_calls,
                      without_query_timing, home_page_bytecode, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, audio_vibes, charts, home, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, charts, home, playlists
 
     # Keep the complete rendered flag and origin workflow in one actual app.
     # Other route registration and snapshot conflict handling have their own owners.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
-                        (app_update, audio_preview, audio_vibes, charts, home, playlists)])
+                        (app_update, audio_vibes, charts, home, playlists)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     templates = webapp.Jinja2Templates
@@ -152,19 +153,21 @@ def test_flag_gates_rating_ui_and_feedback_but_not_collection(audio_flag_store, 
             'point': value['point'], 'attempt': 1, 'phase': 'saving', 'message': 'Retry'}).status_code == 200
         assert client.get('/audio-vibes/runs/' + str(uuid4())).status_code == 200
         store.conn.set_trace_callback(None)
-        assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
+        assert not any('audio_taxonom' in sql for sql in statements)
+        annotation_sql = [sql for sql in statements if 'audio_annotation' in sql]
+        assert all("kind='playback'" in sql or "'playback'" in sql
+                   or sql == 'UPDATE audio_annotations SET video_id=video_id WHERE 0' for sql in annotation_sql)
         monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
         for path in ('/', '/playlists', '/charts'):
             response = client.get(path)
             assert response.status_code == 200
             html = response.text
             assert 'audio-vibe-collection.js' in html and 'data-audio-vibe-banner' in html
+            assert 'href="/audio-preview"' not in html
             for key in home_vibe.PRESETS:
                 assert f'data-vibe-choice="{key}"' in html and audio_vibe_prediction.ATTRIBUTE_LABELS[key] in html
             assert 'data-vibe-choice=""' not in html
-        preview = client.get('/audio-preview').text
-        assert 'audio-vibe-collection.js' in preview and 'data-audio-vibe-collection' in preview
-        assert 'data-audio-vibe-banner' in preview
+        assert client.get('/audio-preview').status_code == 404
         from yt_playlist.web.routes.bridge import EXTENSION_ORIGINS
         for origin in EXTENSION_ORIGINS:
             assert client.post('/audio-vibes/samples', json=value, headers={'Origin': origin}).status_code == 200
@@ -226,9 +229,9 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         complete = client.post('/audio-vibes/samples', json=third).json()
         assert complete['prediction']['sample_count'] == 3
         assert complete['prediction']['aggregation'] == 'ordered_arc'
-        assert [row['sample_id'] for row in complete['prediction']['arc']['excerpts']] == [
-            first['id'], second['id'], third['id']]
-        assert complete['prediction']['varying'] is True
+        assert complete['prediction']['ranking'] == []
+        assert complete['prediction']['individual_models'] == {}
+        assert 'dimensions' not in complete['prediction']
         assert complete['prediction']['recommendation_adoption'] is False
         assert client.post('/audio-vibes/feedback', json={**label,
             'sample_ids': [second['id'], first['id'], third['id']], 'vibes': ['relax', 'cruise']}).status_code == 200
@@ -245,9 +248,58 @@ def test_samples_and_feedback_survive_reload_and_freeze_the_labeled_excerpts(sto
         assert state['feedback']['vibes'] == ['relax', 'cruise']
         assert state['feedback']['taxonomy_version'] == audio_vibe_prediction.TAXONOMY_VERSION
         assert state['feedback']['prediction']['sample_count'] == 3
-        assert state['feedback']['prediction']['arc']['order'] == 'position_seconds'
+        assert set(state['feedback']['sample_ids']) == {first['id'], second['id'], third['id']}
     assert store.settings.get_setting(home_vibe.SETTING) == 'release'
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_musical_profiles').fetchone()[0] == 0
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings WHERE musical_profile_version IS NOT NULL').fetchone()[0] == 0
+
+
+def test_embedding_only_capture_and_previous_format_retry(audio_flag_store, monkeypatch):
+    from tests.audio_model_support import enable_models
+    from tests.test_audio_vibe_cruise import samples
+
+    monkeypatch.setenv('YT_PLAYLIST_AUDIO_VIBES', '1')
+    enable_models(monkeypatch)
+    store = audio_flag_store
+    compatible = samples()[0]
+    provenance = {key: compatible[key] for key in ('embedding', 'model_version', 'artifact_hashes')}
+    previous = {**sample(), 'capture_reason': 'scheduled'}
+    store.audio_vibes.save_sample(previous, 1)
+    previous_prediction = historical_prediction.predict([previous], use_model=False, require_complete=False)
+    store.audio_vibes.save_feedback(previous['run_id'], [previous['id']], ['release'],
+                                    audio_vibe_prediction.TAXONOMY_VERSION, previous_prediction, 2)
+    new = {key: value for key, value in sample().items() if key not in ('traits', 'mood_versions')}
+    new.update(provenance)
+
+    with TestClient(create_app(store, lambda: {}, background_work=False), base_url='http://127.0.0.1') as client:
+        legacy = client.get('/audio-vibes/runs/' + previous['run_id']).json()
+        assert legacy['samples'] == [previous]
+        assert legacy['prediction'] is None
+        assert legacy['feedback']['prediction'] == previous_prediction
+        retry = client.post('/audio-vibes/samples', json=previous)
+        assert retry.status_code == 200, retry.text
+        assert retry.json()['samples'] == [previous]
+        for mutation in ({'embedding': None}, {'artifact_hashes': {}}, {'traits': previous['traits']},
+                         {'mood_versions': None}, {'analysed_seconds': 10.0}):
+            assert client.post('/audio-vibes/samples', json={**new, **mutation}).status_code == 422
+        accepted = client.post('/audio-vibes/samples', json=new)
+        assert accepted.status_code == 200, accepted.text
+        state = accepted.json()
+        assert state['samples'] == [{**new, 'capture_reason': 'scheduled'}]
+        assert set(state['prediction']['individual_models']) == set(audio_vibe_prediction.LABELS)
+        for result in state['prediction']['individual_models'].values():
+            excerpt, = result['excerpts']
+            assert excerpt['sample_id'] == new['id']
+            assert excerpt['score'] == result['score']
+        label = {'run_id': new['run_id'], 'sample_ids': [new['id']], 'vibes': ['release'],
+                 'taxonomy_version': state['taxonomy_version']}
+        frozen = client.post('/audio-vibes/feedback', json=label).json()['feedback']
+        assert frozen['prediction'] == state['prediction']
+
+        # A previous build also sent embeddings alongside its mood outputs.
+        later = {**sample(run_id=new['run_id'], point='middle'), **provenance}
+        updated = client.post('/audio-vibes/samples', json=later).json()
+        assert updated['prediction']['sample_count'] == 2
+        assert updated['feedback'] == frozen
 
 
 def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(
@@ -274,19 +326,18 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(
             response = client.post('/audio-vibes/feedback', json=answer)
             assert response.status_code == 200, response.text
             first = latest(run)
-            frozen = audio_annotations.read(store.conn, first)
-            assert frozen['state'] == 'labeled' and frozen['prediction'] is not None
+            frozen = first
+            assert frozen['state'] == 'labeled' and frozen['archive']['prediction'] is not None
             response = client.post('/audio-vibes/feedback', json={**answer, 'vibes': []})
             assert response.status_code == 200, response.text
             assert response.json()['feedback']['vibes'] == []
             cleared = latest(run)
             assert cleared['state'] == 'withdrawn'
-            assert store.conn.execute('SELECT supersedes_id,sealed FROM audio_annotations WHERE id=?',
-                                       (cleared['id'],)).fetchone()[:] == (first['id'], 1)
-            assert audio_annotations.read(store.conn, first) == frozen
-            withdrawn = audio_annotations.read(store.conn, cleared)
+            assert cleared['supersedes_id'] == first['id']
+            assert audio_annotations.read(store.conn, first['id']) == frozen
+            withdrawn = cleared
             assert withdrawn['sample_ids'] == frozen['sample_ids']
-            assert withdrawn['prediction'] == frozen['prediction'] and withdrawn['vibes'] == []
+            assert withdrawn['archive']['prediction'] == frozen['archive']['prediction'] and withdrawn['vibes'] == []
             # An initial empty submission has different meaning from clearing.
             response = client.post('/audio-vibes/feedback', json={**answer,
                 'run_id': empty_sample['run_id'], 'sample_ids': [empty_sample['id']], 'vibes': []})
@@ -297,7 +348,7 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(
         store.init_schema()
         assert latest(run)['id'] == cleared['id'] and latest(run)['state'] == 'withdrawn'
         assert latest(empty_sample['run_id'])['state'] == 'empty'
-        assert audio_annotations.read(store.conn, first) == frozen
+        assert audio_annotations.read(store.conn, first['id']) == frozen
         with (reuse_reporting_reader(store, monkeypatch),
               TestClient(create_app(store, lambda: {}), base_url='http://127.0.0.1') as client):
             assert client.get('/audio-vibes/runs/' + run).json()['feedback']['vibes'] == []
@@ -306,7 +357,7 @@ def test_feedback_route_preserves_withdrawal_and_explicit_empty_after_restart(
             retry = latest(run)
             assert retry['state'] == 'withdrawn'
             assert retry['id'] == cleared['id'], 'An identical retry must preserve the withdrawal revision'
-            assert audio_annotations.read(store.conn, retry) == withdrawn
+            assert retry == withdrawn
     finally:
         store.conn.close()
 
@@ -374,7 +425,7 @@ def test_replacement_provenance_and_attribute_validation(store, monkeypatch):
 
 def heuristic_prediction(samples):
     """Explicit offline baseline; production exposes independent specialists."""
-    return audio_vibe_prediction.predict(samples, use_model=False)
+    return historical_prediction.predict(samples, use_model=False)
 
 
 def test_vibes_are_independent_cross_genre_targets_and_require_three_samples():
@@ -421,7 +472,7 @@ def test_every_complete_song_gets_a_best_guess_even_when_all_fits_are_weak():
         value['traits'][key] = {'score': score, 'per_patch': [score] * 3}
     assert heuristic_prediction([value] * 2) is None
     prediction = heuristic_prediction([value] * 3)
-    assert all(row['score'] < audio_vibe_prediction.MATCH_THRESHOLD for row in prediction['ranking'])
+    assert all(row['score'] < historical_prediction.MATCH_THRESHOLD for row in prediction['ranking'])
     assert prediction['selection_method'] == 'best_available'
     assert prediction['vibe'] == prediction['ranking'][0]['vibe']
     assert prediction['vibes'] == [prediction['vibe']]
@@ -656,8 +707,7 @@ session.current.analysing=true;
 playing={...playing,video_id:'after_analysis'};position=0;resumed.tick();
 assert.equal(resumed.active.run,oldRun);
 resumed.completed({observed_playback:{video_id:oldRun.video_id},song_position_at_start:35,
- prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},
- moods:{traits:{},models:{}}}});
+ prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},embedding:{values:[]}}});
 assert.equal(collected.at(-1).run_id,oldRun.id);
 assert.notEqual(resumed.run.id,oldRun.id);
 session.current=null;
@@ -668,7 +718,7 @@ assert.deepEqual(samplingPoints(60).map(p=>p.seconds),[30,40]);
 // A continuous native media timeline is diagnostic context, not song position.
 const metadata={observed_playback:{video_id:'song'},song_position_at_start:30.25,
   source_position_at_start:1722.25,observed_position_at_start:2,
-  prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},moods:{traits:{},models:{}}}};
+  prediction:{analysed_seconds:10,scores:{},bundle:{files:[]},embedding:{values:Array(200).fill(.1)}}};
 const context={run:{id:'clock-run'},point:{key:'thirty',seconds:30},duration:195};
 const excerpt=sampleMetadata(metadata,context);
 assert.equal(excerpt.position_seconds,30.25);
@@ -731,9 +781,9 @@ const storage={get:async()=>structuredClone(saved),set:async value=>{
 }};
 const settle=async()=>{for(let i=0;i<20;i++) await new Promise(resolve=>setImmediate(resolve))};
 function owner() {
-  const jobs=[],listeners=[];
+  const jobs=[];
   let receive;
-  const capture={previewOpen:false,allowed:()=>true,onCollectionChanged(fn){listeners.push(fn)},
+  const capture={allowed:()=>true,
     openCollection(fn){receive=fn;queueMicrotask(()=>fn({type:'ready'}));
       return {postMessage(value){if(value.type==='capture') jobs.push(value)},disconnect(){}}}};
   const worker=createAudioCollection({appOrigin:'http://127.0.0.1:8765',capture,storage,clock:()=>now,
@@ -748,7 +798,7 @@ function owner() {
       if(loseAcknowledgement){loseAcknowledgement=false;throw Error('response lost after acceptance')}
       return {ok:true,json:async()=>({run_id:value.run_id,samples:[{id:wrongReceipt?'wrong-id':value.id,point:value.point}]})};
     }});
-  return {worker,jobs,capture,receive:data=>receive(data)};
+  return {worker,jobs,receive:data=>receive(data)};
 }
 let firstOwner=owner();await firstOwner.worker.loaded;await settle();
 const frame={type:'now-heartbeat',videoId:'durable-song',title:'Durable song',artist:'Artist',
@@ -762,6 +812,8 @@ firstOwner.receive({id:job.id,type:'result',result:{...metadata,song_position_at
 await settle();
 assert.equal(saved[key].outbox.length,1);
 const immutable=structuredClone(saved[key].outbox[0]);
+assert(!('traits' in immutable) && !('mood_versions' in immutable));
+assert.equal(immutable.embedding.values.length,200);
 assert.equal(uploads.length,1);
 firstOwner.worker.tick();await settle();assert.equal(uploads.length,1,'bounded retry backoff');
 // A fresh worker restores the exact UUID; a lost successful response cannot
@@ -779,7 +831,7 @@ now+=60000;wrongReceipt=false;resumedOwner.worker.tick();await settle();
 assert.equal(saved[key].outbox.length,0);
 assert.equal(saved[key].run.points.thirty,'saved');assert.equal(accepted.size,1);
 assert(uploads.every(value=>value.id===immutable.id));
-// An observer closing does not cancel capture; preview arbitration does.
+// An observer closing does not cancel capture.
 resumedOwner.worker.observe({...frame,position:120});await settle();
 assert.equal(resumedOwner.jobs.length,1);
 const messages=[],disconnects=[],commands=[];
@@ -788,7 +840,6 @@ assert(resumedOwner.worker.connect({name:'tc-audio-collection',sender:{},
   onMessage:{addListener:fn=>commands.push(fn)}}));
 disconnects[0]();resumedOwner.worker.tick();await settle();
 assert.equal(resumedOwner.jobs.length,1,'document disconnect retains the same job');
-resumedOwner.capture.previewOpen=true;
 // A worker restart recovers the interrupted point, without treating it as saved.
 const interruptedOwner=owner();await interruptedOwner.worker.loaded;await settle();
 assert.equal(saved[key].run.points.middle,'interrupted');
@@ -821,7 +872,8 @@ const backlogOwner=owner();await backlogOwner.worker.loaded;await settle();
 const replies=[],restoreCommands=[];
 backlogOwner.worker.connect({name:'tc-audio-collection',sender:{},postMessage:value=>replies.push(value),
   onDisconnect:{addListener(){}},onMessage:{addListener:fn=>restoreCommands.push(fn)}});
-const legacy=Array.from({length:12},()=>({...immutable,id:crypto.randomUUID()}));
+const {embedding,...oldPayload}=immutable;
+const legacy=Array.from({length:12},()=>({...oldPayload,id:crypto.randomUUID(),traits:{},mood_versions:{}}));
 storageFailure=true;
 await restoreCommands[0]({type:'restore',samples:legacy});await settle();
 assert(!replies.some(value=>value.type==='restored'),'no acknowledgement before durable storage');
@@ -832,6 +884,12 @@ assert.equal(saved[key].outbox.length,12);
 backlogOwner.worker.observe({...frame,videoId:'new-song',title:'New song'});await settle();
 assert.equal(saved[key].run.video_id,'new-song','identity advances while uploads are backed up');
 assert.equal(backlogOwner.jobs.length,0,'a full durable queue prevents further capture');
+const earlier = () => replies.at(-1).recent.find(run=>run.id===immutable.run_id);
+assert.equal(earlier().sampling_complete,true,'the previous song will collect no new checks');
+assert.equal(earlier().points.thirty,'saving','the previous song still has an undelivered check');
+offline=false;now+=60000;backlogOwner.worker.tick();await settle();
+assert.equal(saved[key].outbox.length,0);
+assert.equal(earlier().points.thirty,'saved','retain acknowledgment for the receiving card');
 """
     result = subprocess.run([node, '--input-type=module', '-e', script],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10)

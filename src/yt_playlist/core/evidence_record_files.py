@@ -13,8 +13,18 @@ class EvidenceRecordFiles(EvidenceLedger):
                             for (kind, key), reference in self.references.items()}
 
     def with_references(self, references, *, opportunity_projection=None):
-        return type(self)(self.directory, self.byte_budget, references=references,
+        return type(self)(self.directory, self._byte_budget, references=references,
                           opportunity_projection=opportunity_projection)
+
+    @property
+    def byte_budget(self):
+        if callable(self._byte_budget):
+            self._byte_budget = self._byte_budget()
+        return self._byte_budget
+
+    @byte_budget.setter
+    def byte_budget(self, value):
+        self._byte_budget = value
 
     def retained(self):
         return policy_documents.retained_reader(self.directory)

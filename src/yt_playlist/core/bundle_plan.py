@@ -182,7 +182,7 @@ def prepare(bundle, fresh, *, recording_ids, policy_families, external_key, poli
         version = next(iter(versions), default_policy or policy_version)
         family(version)
         fingerprint = inputs.hexdigest()
-        prepared = pools.prepare(lane, version, None, fingerprint, purpose, candidates)
+        prepared = pools.prepare(lane, version, fingerprint, purpose, candidates)
         selected_surface = surface_prefix + (home_surface if surface == 'home' else surface)
         if prepared.content_digest not in distinct:
             admitted += sum(len(row) for row in pools.rows(prepared))
@@ -290,12 +290,12 @@ def reuse_options(plan, recent):
         seen.add(prepared.content_digest)
         if any(isinstance(candidate, pools.UnresolvedCandidate) for candidate in prepared.candidates):
             continue
-        expected = (prepared.pool_key, prepared.group_version_id, prepared.input_fingerprint,
+        expected = (prepared.pool_key, prepared.input_fingerprint,
                     prepared.purpose, len(prepared.candidates))
         candidates = []
         for old in recent.get((slot.surface, slot.mode_key, slot.purpose), ()):
-            identity, key, policy, group, fingerprint, purpose, count, digest = old
-            if (key, group, fingerprint, purpose, count) == expected:
+            identity, key, policy, fingerprint, purpose, count, digest = old
+            if (key, fingerprint, purpose, count) == expected:
                 candidates.append((identity, replace(prepared, policy_version=policy, content_digest=digest)))
         yield prepared.content_digest, candidates
 

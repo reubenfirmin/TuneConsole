@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 from yt_playlist.controllers.taste import Taste
 from yt_playlist.controllers.taste_queries import TasteQueries
-from yt_playlist.rec import (album_choices, album_tuning, autotune_run, group_serving,
+from yt_playlist.rec import (album_choices, album_tuning, autotune_run, group_serving, group_viz,
     model_health, model_selection, progressive, rec_params, scorecard, surfaces, taste_analysis, taste_viz)
 
 
@@ -12,7 +12,7 @@ def taste(store):
     changes = Taste(store.settings, store.rec_model, ranked=ranked, selection=store.model_selection)
     readings = SimpleNamespace(
         engine=lambda: taste_viz.engine_panel(store), maintenance=lambda: progressive.maintenance_view(store),
-        group_checkpoint=lambda: group_serving.checkpoint(store), group_view=lambda: group_serving.view(store),
+        groups_published=lambda: group_viz.prepared(store), group_view=lambda: group_serving.view(store),
         group_progress=lambda: group_serving.progress(store), group_policy=lambda: group_serving.policy(store),
         mix_choices=lambda now: taste_viz.mix_choices(store, now),
         overview=lambda now, **kw: taste_viz.overview(store, now, **kw),

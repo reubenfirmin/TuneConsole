@@ -25,10 +25,6 @@ for operation in ('INSERT', 'UPDATE'):
         BEGIN SELECT RAISE(ABORT,'Provider credits have a different subject or provider'); END'''
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='provider_state_credits'").fetchone() is not None
-
-
 def validate(conn):
     for name, sql in DEFINITIONS.items():
         row = conn.execute('SELECT sql FROM main.sqlite_schema WHERE name=?', (name,)).fetchone()
@@ -42,26 +38,10 @@ def install(conn):
     validate(conn)
 
 
-def state_source(conn):
-    source = 'SELECT recording_id,provider,field,delivery_id FROM provider_state_fields'
-    if available(conn):
-        source += " UNION ALL SELECT recording_id,provider,'artist_credits',delivery_id FROM provider_state_credits"
-    return '(' + source + ')'
-
-
-def attempt_source(conn):
-    source = 'SELECT attempt_id,field FROM provider_attempt_fields'
-    if available(conn):
-        source += " UNION ALL SELECT attempt_id,'artist_credits' FROM provider_attempt_credits"
-    return '(' + source + ')'
-
-
-def reset(conn, recording, provider):
-    if available(conn):
-        conn.execute('DELETE FROM provider_state_credits WHERE recording_id=? AND provider=?', (recording, provider))
-
-
-def record(conn, attempt, recording, provider, delivery):
-    conn.execute('INSERT INTO provider_attempt_credits VALUES (?)', (attempt,))
-    conn.execute('INSERT INTO provider_state_credits VALUES (?,?,?) ON CONFLICT(recording_id,provider) '
-                 'DO UPDATE SET delivery_id=excluded.delivery_id', (recording, provider, delivery))
+STATE_SOURCE = ("(SELECT s.recording_id,s.provider,f.key field,f.value->>0 delivery_id "
+                "FROM enrichment_provider_state s,json_each(s.field_links) f "
+                "UNION ALL SELECT recording_id,provider,'artist_credits',credit_delivery_id "
+                "FROM enrichment_provider_state WHERE credit_delivery_id IS NOT NULL)")
+ATTEMPT_SOURCE = ("(SELECT a.id attempt_id,f.key field,a.delivery_id "
+                  "FROM provider_attempts a,json_each(a.field_links) f "
+                  "UNION ALL SELECT id,'artist_credits',delivery_id FROM provider_attempts WHERE artist_credits=1)")

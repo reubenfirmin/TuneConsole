@@ -1,25 +1,37 @@
 """TV preparation outcome; replacing a display pool cannot erase this state."""
-from yt_playlist.core import recommendation_work
+import json
+
+from yt_playlist.core import recommendation_work, worker_settings
 from .base import Repo, lookup_read, synchronized
 
 
-class TVPreparationRepo(Repo):
-    @lookup_read
-    def available(self):
-        return recommendation_work.available(self.conn)
+DRAW = recommendation_work.TV_DRAW_KEY
 
+
+class TVPreparationRepo(Repo):
     @lookup_read
     def state(self):
         return recommendation_work.read(self.conn, 'tv_preparation')
 
     @synchronized
-    def record(self, value, row, now):
+    def record(self, failed, now):
         with self.conn.atomic():
-            if recommendation_work.prepared_owner(self.conn):
-                import json
-                self.conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
-                    'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
-                    ('tv_preparation', json.dumps(value), now))
-            else:
-                self.conn.execute('INSERT INTO tv_preparation_state VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET '
-                    'failed=excluded.failed,observed_at=excluded.observed_at,updated_at=excluded.updated_at', row)
+            recommendation_work.write(self.conn, 'tv_preparation', {'failed': failed, 'at': now}, now)
+
+    @lookup_read
+    def draw(self):
+        raw = worker_settings.read(self.conn, DRAW)
+        if raw is None:
+            return 0, [], []
+        value = json.loads(raw)
+        return value['number'], value['recent'], value['last']
+
+    @synchronized
+    def record_draw(self, videos):
+        with self.conn.atomic():
+            number, history, _ = self.draw()
+            videos = list(dict.fromkeys(videos))
+            history = [video for video in history if video not in videos]
+            recent = recommendation_work.video_history(json.dumps(history + videos), recommendation_work.TV_POOL_LIMIT)
+            last = recommendation_work.video_history(json.dumps(videos), recommendation_work.TV_QUEUE_LIMIT)
+            worker_settings.save(self.conn, DRAW, json.dumps(dict(number=number + 1, recent=recent, last=last)))

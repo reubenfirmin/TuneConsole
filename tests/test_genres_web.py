@@ -14,6 +14,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.genre_catalog_support import isolate_catalog_caches
 from tests.store_fixture_support import bounded_consumer_schema, consumer_schema, initialize_consumer, reuse_reporting_reader
 from yt_playlist.core.store import Store
 from yt_playlist.util import genre_catalog
@@ -25,10 +26,10 @@ from yt_playlist.web.app import create_app
 @pytest.fixture(autouse=True)
 def genre_routes(monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, enrich, genres, home
+    from yt_playlist.web.routes import app_update, audio_vibes, enrich, genres, home
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, enrich, genres, home)])
+        for module in (app_update, audio_vibes, enrich, genres, home)])
 
 
 @pytest.fixture(scope='module')
@@ -73,6 +74,7 @@ def store(request, tmp_path, monkeypatch):
         # curation and the full-size render are independent owners.
         monkeypatch.setattr(genre_catalog, 'catalog', lambda: (records, labels))
         monkeypatch.setattr(genre_catalog, 'family_labels', lambda: families)
+        isolate_catalog_caches(monkeypatch)
     database = Store(tmp_path / 'genre-editor.db')
     with closing(database.conn):
         initialize_consumer(database, schema, snapshot_guards=False)
@@ -106,7 +108,6 @@ def _repository_client(monkeypatch):
 
     repository = Mock(spec_set=GenreRepo)
     repository.transaction.side_effect = nullcontext
-    repository.uses_keyed_preferences.return_value = True
     repository.label_matches.return_value = set()
     repository.genre_name.return_value = None
     repository.matcher_facts.return_value = None
@@ -164,7 +165,7 @@ def test_page_renders_chip_list_zone(_repository_client):
         asset_v='test', arrow_icon=arrow_icon, mix_launch_tokens=mix_launch_tokens,
         storage_maintenance_status=lambda: {'active': False, 'warning': False},
         initial_setup_pending=lambda: False, has_multiple_identities=lambda: False,
-        audio_preview_available=lambda: False, auth_expired={})
+        auth_expired={})
     ctx.templates.env.globals['early_adopter_notice'] = lambda: False
     c.app.include_router(enrich.build(ctx))
     redirect = c.get("/genres", follow_redirects=False)
@@ -277,9 +278,9 @@ def test_current_taxonomy_controls_read_historical_names_aliases_families_and_re
         store.conn.execute("UPDATE genre_catalog SET name='Renamed style',family_key='jazz',"
                            "family_source='custom' WHERE key='synth pop'")
         store.conn.execute("INSERT INTO genre_alias VALUES ('searchable custom alias','Searchable custom alias','synth pop','custom')")
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('retired custom style','synth pop')")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='synth pop',enabled=0,preference_origin=NULL "
+                           "WHERE key='retired custom style'")
         store.conn.execute("UPDATE genre_alias SET genre_key='synth pop' WHERE genre_key='retired custom style'")
-        store.conn.execute("DELETE FROM genre_preferences WHERE genre_key='retired custom style'")
     body = client.get('/genres/list',params={'q':'Searchable custom alias'}).text
     assert 'Renamed style' in body and 'Jazz' in body
     assert 'aria-label="Remove Synth Pop"' not in body
@@ -294,7 +295,7 @@ def test_current_taxonomy_controls_read_historical_names_aliases_families_and_re
 
 def test_preference_edits_do_not_reconfigure_the_catalog(store, monkeypatch):
     client = _client(store)
-    before = dict(store.conn.execute('SELECT genre_key,enabled FROM genre_preferences'))
+    before = dict(store.conn.execute('SELECT key,enabled FROM genre_catalog WHERE preference_origin IS NOT NULL'))
 
     def unexpected_rebuild(**kwargs):
         raise AssertionError('Preference edits must only reload the matcher')
@@ -302,7 +303,7 @@ def test_preference_edits_do_not_reconfigure_the_catalog(store, monkeypatch):
     monkeypatch.setattr(store.genres, 'configure_catalog', unexpected_rebuild)
     assert client.post('/genres/add', data={'name':'Custom sound'}).status_code == 200
     assert client.post('/genres/remove', data={'name':'rap'}).status_code == 200
-    after = dict(store.conn.execute('SELECT genre_key,enabled FROM genre_preferences'))
+    after = dict(store.conn.execute('SELECT key,enabled FROM genre_catalog WHERE preference_origin IS NOT NULL'))
     assert after == {**before, 'custom sound':1, 'hip hop':0}
 
 

@@ -17,6 +17,21 @@ class Playlists:
     def __init__(self, repository, tracks, radio, guard):
         self.repository, self.tracks, self.radio, self.guard = repository, tracks, radio, guard
 
+    def cleanup_attempts(self):
+        return self.repository.cleanup_attempts()
+
+    def cleanup_retry_deadlines(self):
+        return self.repository.cleanup_retry_deadlines()
+
+    def cleanup_attempt(self, account_id, remote):
+        return self.repository.cleanup_attempt(account_id, remote)
+
+    def set_cleanup_attempt(self, account_id, remote, state):
+        return self.repository.set_cleanup_attempt(account_id, remote, state)
+
+    def count_title_prefix(self, prefix):
+        return self.repository.count_title_prefix(prefix)
+
     def radio_playlist_ids(self):
         return self.radio.playlist_ids()
 

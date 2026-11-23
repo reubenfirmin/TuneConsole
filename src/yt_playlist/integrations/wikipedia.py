@@ -85,6 +85,13 @@ class WikipediaIAO:
                     and params['iiurlwidth'] == '1200' and params['titles'].startswith('File:')
                     and 5 < len(params['titles']) <= 2048):
                 key = ('imageinfo', params['titles'])
+            elif (set(params) == {'action', 'format', 'prop', 'titles', 'clshow', 'cllimit'}
+                    and params['prop'] == 'categories' and params['clshow'] == '!hidden'
+                    and params['cllimit'] == '200'):
+                titles = params['titles'].split('|')
+                if not 1 <= len(titles) <= 5 or any(not 0 < len(title) <= 1024 for title in titles):
+                    raise ValueError('Unsupported Wikipedia category titles')
+                key = ('categories', params['titles'])
             else:
                 raise ValueError('Unsupported Wikipedia query')
             return key, SEARCH + '?' + urllib.parse.urlencode(sorted(params.items()))
@@ -130,7 +137,15 @@ class WikipediaIAO:
             return bool(hits)
         pages = query.get('pages')
         if not isinstance(pages, dict) or not pages:
-            raise ValueError('Wikipedia file pages are invalid')
+            raise ValueError('Wikipedia pages are invalid')
+        if kind == 'categories':
+            if 'continue' in data or any(not isinstance(page, dict)
+                    or not isinstance(page.get('title'), str)
+                    or not isinstance(page.get('categories', []), list)
+                    or any(not isinstance(category, dict) or not isinstance(category.get('title'), str)
+                           for category in page.get('categories', [])) for page in pages.values()):
+                raise ValueError('Wikipedia article categories are invalid or incomplete')
+            return any(page.get('categories') for page in pages.values())
         useful = False
         for page in pages.values():
             if not isinstance(page, dict):

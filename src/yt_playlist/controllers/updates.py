@@ -4,20 +4,20 @@ from yt_playlist.core.update_rules import CHECK_INTERVAL_S, check_due, update_of
 
 
 class UpdateChecks:
-    def __init__(self, settings, latest_release, *, current_version, install_kind):
+    def __init__(self, state, settings, latest_release, *, current_version, install_kind):
+        self.state = state
         self.settings = settings
         self.latest_release = latest_release
         self.current_version = current_version
         self.install_kind = install_kind
 
     def schedule_first(self, now):
-        if all(self.settings.get_setting(key) is None for key in (
-                'latest_version_checked_at', 'latest_version_seen', 'latest_version_check_after')):
-            self.settings.set_setting('latest_version_check_after', str(now + CHECK_INTERVAL_S))
+        if self.state.release_check() == (None, None, None):
+            self.state.schedule_release_check(now + CHECK_INTERVAL_S)
 
     def check(self, now, *, interval_s=CHECK_INTERVAL_S):
-        if not check_due(self.settings.get_setting('latest_version_checked_at'),
-                         self.settings.get_setting('latest_version_check_after'), now, interval_s):
+        checked, deadline, _ = self.state.release_check()
+        if not check_due(checked, deadline, now, interval_s):
             return
         try:
             latest = self.latest_release()
@@ -25,9 +25,7 @@ class UpdateChecks:
             raise
         except Exception:
             latest = None
-        self.settings.set_setting('latest_version_checked_at', str(now))
-        if latest:
-            self.settings.set_setting('latest_version_seen', latest)
+        self.state.record_release_check(now, latest)
 
     def tick(self, now):
         self.schedule_first(now)
@@ -37,7 +35,7 @@ class UpdateChecks:
         kind = self.install_kind()
         if kind == 'dev':
             return None
-        return update_offer(self.current_version(), self.settings.get_setting('latest_version_seen'),
+        return update_offer(self.current_version(), self.state.release_check()[2],
                             self.settings.get_setting('backend_update_dismissed_version'), kind)
 
 

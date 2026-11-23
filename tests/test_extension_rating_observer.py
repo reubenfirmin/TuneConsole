@@ -17,12 +17,12 @@ def test_rating_fetch_outcome(scenario):
 const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 (async()=>{
   const scenario=process.argv[1], sent=[], calls=[];
-  let resolve,reject;
+  let resolve,reject,now=1000;
   const original=new Promise((a,b)=>{resolve=a;reject=b;});
   const window={fetch:function(...args){calls.push([this,args]);return original;},
     postMessage:msg=>sent.push(msg.__tcCuration),ytcfg:{get:()=> 'brand'}};
   vm.runInNewContext(fs.readFileSync('extension/observer_main.js','utf8'),
-    {window,location:{href:'https://music.youtube.com/'},Promise});
+    {window,location:{href:'https://music.youtube.com/'},Promise,Date:{now:()=>now}});
   const body=JSON.stringify({target:{videoId:'v'}});
   const action=scenario==='dislike'?'dislike':'like';
   const url=`https://music.youtube.com/youtubei/v1/like/${action}?key=x`;
@@ -36,6 +36,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
   assert.equal(calls[0][1][1],init);
   await new Promise(setImmediate);
   assert.equal(sent.length,0,'no confirmed event at request time');
+  now=2000;
   const response=new Response('untouched',{status:['403','500'].includes(scenario)?Number(scenario):200});
   if(scenario==='reject') {
     const error=new TypeError('offline');reject(error);
@@ -51,6 +52,7 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
   assert.equal(event.brandKnown,true);
   assert.equal(event.brandId,'brand');
   assert.equal(event.phase,'settled');
+  assert.equal(event.requestedAt,1000);
   assert.equal(event.success,!['403','500','reject'].includes(scenario));
   assert.equal(event.httpStatus,scenario==='reject'?0:response.status);
   assert.equal(event.body,scenario==='override'?'override':body);
@@ -107,17 +109,17 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('nod
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10)
     assert result.returncode == 0, result.stderr
     event = json.loads(result.stdout)
-    main = store.accounts.upsert_account('Main', 'cred', None, True)
-    brand = store.accounts.upsert_account('Brand', 'cred', 'brand-A', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    brand = store.accounts.upsert_account('Brand', 'brand-A', False)
     store.tracks.upsert_track('known-video', 'Song', 'Artist', '', None)
     from yt_playlist.library import player_events
     accepted = before in ('main', 'brand')
     assert player_events.handle_player_event(SimpleNamespace(store=store), event, 100) is accepted
     rows = store.player_events.player_events_since(0)
-    assert len(rows) == int(accepted)
+    assert [row['kind'] for row in rows] == (['rate', 'confirmed_rating'] if accepted else [])
     expected = main if before == 'main' else brand if before == 'brand' else None
     if accepted:
-        assert rows[0]['account_id'] == expected
+        assert all(row['account_id'] == expected for row in rows)
     for identity in (main, brand):
         rating = store.tracks.item_rating(identity, 'known-video')
         assert (rating is not None) is (identity == expected)

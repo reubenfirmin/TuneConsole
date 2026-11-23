@@ -4,7 +4,7 @@ Videos retain their taste connection separately from their playable upload. The
 first resolver uses recordings; artist-connected long-form videos can share the
 same pool without pretending that a concert or set is a single recording.
 """
-from collections import Counter, deque
+from collections import Counter, defaultdict
 import hashlib
 import json
 import math
@@ -12,7 +12,8 @@ import re
 from yt_playlist.controllers.tv_preparation import TVPoolPreparation
 
 from yt_playlist.core.activity import check_cancellable_work, WorkBudgetExceeded, WorkClosing
-from yt_playlist.rec import fresh_pool, home_prepared, mix_tuning, tv_visual
+from yt_playlist.core.recommendation_work import TV_POOL_LIMIT, TV_QUEUE_LIMIT
+from yt_playlist.rec import fresh_pool, mix_tuning, tv_visual
 from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.util.duration import parse_duration
 from yt_playlist.util.matching import identity_key, normalize, search_squash, track_artist
@@ -21,11 +22,11 @@ from yt_playlist.util.thumbnails import best_thumb
 SURFACE = 'tv_pool'
 SETTING = 'tv_max_minutes'
 GROUPS = ('liked', 'your_artists', 'discovery')
-MAX_POOL = 60
+MAX_POOL = TV_POOL_LIMIT
 MAX_SEEDS = 3
 SEARCHES = ('music video', 'live', 'session', 'visualizer')
 SCHEMA = 3
-QUEUE_SIZE = 12
+QUEUE_SIZE = TV_QUEUE_LIMIT
 MAX_AGE = 86400
 SEARCH_RETRY_S = 300
 _VIDEO = re.compile(r'^[A-Za-z0-9_-]{11}$')
@@ -62,26 +63,16 @@ def _interleave(lanes, limit, offset=0):
 
 def seed_tracks(store, now, offset=0):
     """Worker-only: reuse prepared ranks, without fitting or logging mix exposure."""
-    payload = home_prepared.load(store, now)
-    if not payload or not any(m.get('protos') for m in payload['menus']):
-        return []
     library = store.rec_query.library_songs()
-    owned = {t['key'] for t in library}
-    liked = {t['key'] for t in library if t['liked']} | set(store.rec_model.recent_liked_keys())
+    owned = {track['key']: track for track in library}
+    recent_likes = set(store.rec_model.recent_liked_keys())
+    liked = {key: track for key, track in owned.items() if track['liked'] or key in recent_likes}
     artists = {search_squash(t['artist']) for t in library}
-    prepared = [p['tracks'] for m in payload['menus'] for p in m['protos']]
-    if getattr(store, '_recommendation_files', False):
-        ranked = _stored_seeds(store, prepared, 1200)
-    else:
-        bundles = store.rec_proposals.get_proposals('mode_bundles') or {}
-        prepared.extend(bucket.get(lane, []) for mid, bucket in bundles.items()
-                        if not mid.startswith('_') for lane in ('wheelhouse', 'comfort', 'explore'))
-        ranked = _interleave(prepared, 1200)
-    # Likes absent from a shallow prepared menu still deserve a chance, after
-    # model-ranked likes. Never substitute all owned songs for explicit likes.
-    ranked.extend(t for t in library if t['key'] in liked)
+    # Include unranked likes after the model-ranked likes.
+    ranked_keys = _ranked_seed_keys(store, 1200) if liked else []
+    liked_order = dict.fromkeys([*ranked_keys, *liked])
     lanes = {group: [] for group in GROUPS}
-    lanes['liked'] = [{**t, 'group': 'liked'} for t in ranked if t['key'] in liked]
+    lanes['liked'] = [{**liked[key], 'group': 'liked'} for key in liked_order if key in liked]
     for track in fresh_pool.pick(store, now, size=120, minimum=1):
         if track['key'] in owned:
             continue
@@ -93,50 +84,24 @@ def seed_tracks(store, now, offset=0):
     return [t for t in tracks if t['key'] not in blocked and t['artist'] not in muted]
 
 
-def _stored_seeds(store, prepared, limit):
-    """Interleave complete mode ranks, retaining only the bounded search seeds."""
-    if not getattr(store, '_read_only', False):
-        with store.read_view() as reader:
-            return _stored_seeds(reader, prepared, limit)
-    head = store.recommendations.head('home')
-    slots = ([(row['mode_key'], lane) for lane in ('wheelhouse', 'comfort', 'explore')
-              for row in store.recommendations.selections('home', lane, generation=head['id'])]
-             if head else [])
-    # Across all streams, at most limit plus one row per slot waits in Python.
-    batch = max(1, min(128, limit // max(1, len(slots))))
-    def stream(mode, lane):
-        after = -1
-        while True:
-            check_cancellable_work()
-            page = store.recommendations.candidate_page('home', mode, lane,
-                generation=head['id'], after=after, limit=batch)
-            yield from page['tracks']
-            after = page['after']
-            if page['exhausted']:
-                return
-    streams = deque([iter(pool) for pool in prepared if pool] + [stream(*slot) for slot in slots])
-    selected, seen = [], set()
-    while streams and len(selected) < limit:
-        check_cancellable_work()
-        current = streams.popleft()
-        try:
-            track = next(current)
-        except StopIteration:
-            continue
-        streams.append(current)
-        if track['key'] not in seen:
-            selected.append(track)
-            seen.add(track['key'])
-    return selected
+def _ranked_seed_keys(store, limit):
+    """Read ranks together and give each mode a turn in the search seed order."""
+    slots = [('home', None, None, lane) for lane in ('wheelhouse', 'comfort', 'explore')]
+    ranked = defaultdict(list)
+    for row in store.recommendations.complete_ranks(slots):
+        ranked[row['slot'], row['mode_key']].append(row)
+    return [track['key'] for track in _interleave(list(ranked.values()), limit)]
 
 
 def eligible(store, items, maximum, now):
-    """Current suppression is a hard constraint, including while a job was searching."""
+    """Apply current catalog availability and suppression to prepared videos."""
     if not isinstance(items, list) or len(items) > MAX_POOL:
         return []
     items = valid_items(items)
-    identities = store.tracks.identity_keys_for_videos(t['video_id'] for t in items)
-    upload_keys = {t['video_id']: (identities.get(t['video_id'])
+    uploads = store.tracks.video_identity_and_availability(t['video_id'] for t in items)
+    unavailable = {video for video, (_key, available) in uploads.items() if available == 0}
+    items = [t for t in items if t['video_id'] not in unavailable]
+    upload_keys = {t['video_id']: (uploads.get(t['video_id'], (None, None))[0]
                                   or identity_key(t['title'], t['artist'])) for t in items}
     blocked = home_exclusions(store, [t['source_key'] for t in items], now)
     blocked |= store.rec_model.suppressed_keys('for_you', now, keys=list(upload_keys.values()))
@@ -176,35 +141,20 @@ def cached(store):
 
 
 def draw_number(store):
-    try:
-        return max(0, int(store.settings.get_setting('tv_draw') or 0))
-    except (ValueError, TypeError):
-        return 0
-
-
-def _video_history(store, setting, limit):
-    try:
-        values = json.loads(store.settings.get_setting(setting) or '[]')
-        return [v for v in values[-limit:] if isinstance(v, str) and _VIDEO.fullmatch(v)] if isinstance(values, list) else []
-    except (TypeError, ValueError):
-        return []
+    return store.tv_preparation.draw()[0]
 
 
 def record_draw(store, items):
     """Remember confirmed sessions, so a fresh draw favors other prepared videos."""
-    videos = list(dict.fromkeys(item['video_id'] for item in items))
-    history = [v for v in _video_history(store, 'tv_recent_videos', MAX_POOL) if v not in videos]
-    store.settings.set_setting('tv_recent_videos', json.dumps((history + videos)[-MAX_POOL:]))
-    store.settings.set_setting('tv_last_videos', json.dumps(videos))
-    store.settings.set_setting('tv_draw', str(draw_number(store) + 1))
+    store.tv_preparation.record_draw(item['video_id'] for item in items)
 
 
 def queue(store, now, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE):
     """A bounded draw from the pool; length changes never require another search."""
     items = eligible(store, (cached(store) or {}).get('items', []), max_minutes(store), now)
+    number, history, last = store.tv_preparation.draw()
     return draw(items, exclude=exclude, recent=recent, current=current, limit=limit,
-        number=draw_number(store), history=_video_history(store, 'tv_recent_videos', MAX_POOL),
-        last=_video_history(store, 'tv_last_videos', QUEUE_SIZE))
+                number=number, history=history, last=last)
 
 
 def draw(items, *, exclude=(), recent=(), current=None, limit=QUEUE_SIZE, number=0, history=(), last=()):
@@ -288,7 +238,11 @@ def refresh(store):
 
 class Preparation(TVPoolPreparation):
     def __init__(self, store):
-        super().__init__(snapshot=store.read_snapshot, cached=lambda: cached(store),
+        # Session continuity guides tuning and Home menu selection at capture time.
+        # Progress ticks during search cannot change recording eligibility.
+        super().__init__(snapshot=lambda: store.read_snapshot(
+                allow_stale_keys=frozenset({('player_events', 'key:tick')})),
+            cached=lambda: cached(store),
             requested=lambda: getattr(store, '_tv_refresh_requested', 0),
             publish=lambda payload, now: store.rec_proposals.publish_prepared_home(
                 json.dumps(payload, separators=(',', ':')), now, surface=SURFACE),
@@ -410,6 +364,10 @@ def resolve(client, seeds, maximum):
     items, seen = [], set()
     for seed in seeds[:MAX_SEEDS]:
         check_cancellable_work()
+        wanted = search_squash(seed['artist'])
+        title_words = set(normalize(seed['title']).split())
+        if not wanted or not title_words:
+            continue
         # Search the requested editions separately. A broad music-video query
         # often ranks an album upload above an actual performance. At most
         # twelve searches and six detailed lookups are admitted per slice.
@@ -425,13 +383,12 @@ def resolve(client, seeds, maximum):
             if not _VIDEO.fullmatch(vid) or vid in seen or not kind:
                 continue
             artist = track_artist(row)
-            wanted = search_squash(seed['artist'])
-            credits = search_squash(artist or row.get('title', ''))
-            if not wanted or wanted not in credits:
+            credits = {search_squash(credit['name']) for credit in row.get('artists') or []
+                       if isinstance(credit, dict) and credit.get('name')}
+            if wanted != search_squash(artist) and wanted not in credits:
                 continue
             # A visual title alone is not evidence of the recommended recording.
-            title_words = set(normalize(seed['title']).split())
-            if not title_words or not title_words <= set(normalize(row.get('title', '')).split()):
+            if not title_words <= set(normalize(row.get('title', '')).split()):
                 continue
             quality = {'Live session': 3, 'Music video': 2, 'Visualizer': 1}[kind]
             # Prefer footage over a visualizer even when its search position is

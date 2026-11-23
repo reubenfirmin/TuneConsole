@@ -1,7 +1,7 @@
 """Domain recovery must preserve original file clocks, including repacked ranges.
 
-These small SQLite owners isolate the file codecs. Full domain schema/guard and
-workflow acceptance remains covered by each owner's existing recovery checks.
+Most domains use small SQLite owners to isolate the file codecs. Collection
+recovery uses the shipped schema to cover references across its live owners.
 """
 import os
 import hashlib
@@ -13,9 +13,9 @@ import sqlite3
 import pytest
 from tests.file_custody_support import PolicyFiles
 
-from yt_playlist.core import (action_backup_files, album_description_files, audio_annotation_files,
+from yt_playlist.core import (action_backup_files, action_backup_inventory, album_description_files,
     collection_recovery, fao, group_documents, legacy_evidence,
-    metadata_delivery_files, policy_documents, recommendation_outputs)
+    metadata_delivery_files, policy_documents, recommendation_outputs, sync_state)
 
 
 def _seed(conn, domain, *, duplicate=False):
@@ -87,23 +87,17 @@ def _seed(conn, domain, *, duplicate=False):
         def records(db):
             for owner, (kind, key, digest, size, offset, filename) in module._owners(db):
                 yield (owner, kind, key), filename, module._read(owner, filename, digest, size, offset)[1]
-    elif domain == 'annotations':
-        module = audio_annotation_files
-        conn.execute('CREATE TABLE audio_annotations(id INTEGER PRIMARY KEY,model_output_filename TEXT)')
-        for i in range(3):
-            filename = module.publish(module.directory(conn), {'format': module.FILE_FORMAT, 'saved': i})
-            conn.execute('INSERT INTO audio_annotations VALUES (?,?)', (i, filename))
-        def records(db):
-            for key, filename in db.execute('SELECT * FROM audio_annotations'):
-                yield key, filename, module.read(filename)
     elif domain == 'descriptions':
         module = album_description_files
-        for table, (keys, filename, digest) in module.OWNERS.items():
-            conn.execute(f'CREATE TABLE {table}(' + ','.join(key + ' TEXT' for key in keys)
-                         + f',{filename} TEXT,{digest} TEXT)')
+        conn.execute('CREATE TABLE enrichment_provider_config(provider TEXT PRIMARY KEY,description_access TEXT)')
+        conn.execute('CREATE TABLE album_description_requests('
+                     'usage_id INTEGER PRIMARY KEY,evidence_filename TEXT,evidence_digest TEXT)')
         for i in range(3):
             filename, digest, _size = module.publish(module.directory(conn), '{ "saved": ' + str(i) + ' }')
-            conn.execute('INSERT INTO album_descriptions VALUES (?,?,?)', (str(i), filename, digest))
+            conn.execute('INSERT INTO album_description_requests VALUES (?,?,?)', (i, filename, digest))
+        filename, digest, _size = module.publish(module.directory(conn), '{ "status": "blocked" }')
+        conn.execute('''INSERT INTO enrichment_provider_config VALUES ('deepseek',json_object(
+            'remote:test-credential',json_object('evidence_filename',?,'evidence_digest',?)))''', (filename, digest))
         def records(db):
             for owner, key, filename, digest in module._references(db):
                 yield (owner, key), filename, module.read(filename, digest)
@@ -119,27 +113,31 @@ def _seed(conn, domain, *, duplicate=False):
                 yield (owner, key), filename, module.read(filename, digest, size, surface=surface, chunk_key=chunk)
     elif domain == 'actions':
         module = action_backup_files
-        conn.execute('CREATE TABLE action_backups(action_id INTEGER,position INTEGER,filename TEXT,retained_filename TEXT,'
-                     'digest TEXT,bytes INTEGER,availability TEXT)')
+        conn.execute('CREATE TABLE actions(id INTEGER PRIMARY KEY,' + action_backup_inventory.DECLARATION + ')')
         conn.execute('CREATE TABLE action_steps(action_id INTEGER,backup_filename TEXT,backup_digest TEXT,'
                      'backup_bytes INTEGER,backup_status TEXT)')
         for i in range(3):
             encoded = ('{ "tracks": [], "ytm_playlist_id": "source-' + str(i) + '" }').encode()
             digest = hashlib.sha256(encoded).hexdigest()
             filename = policy_documents._publish_encoded(collection_recovery.directory(conn), encoded, digest)
-            conn.execute('INSERT INTO action_backups VALUES (?,?,?,?,?,?,?)',
-                         (i, 0, filename, filename, digest, len(encoded), 'verified'))
+            conn.execute('INSERT INTO actions(id) VALUES (?)', (i,))
+            action_backup_inventory.append(conn, i, 0, (filename, digest, len(encoded), 'verified'), filename)
         def records(db):
             for row in module.inventory(db):
                 yield row['action_id'], row['retained_filename'], module.verified(row['retained_filename'])[0]
     else:
         assert domain == 'collections'
         module = collection_recovery
-        conn.execute('CREATE TABLE road_trip_drafts(id INTEGER PRIMARY KEY,recovery_filename TEXT,recovery_digest TEXT,'
-                     'recovery_bytes INTEGER)')
         for i in range(3):
-            conn.execute('INSERT INTO road_trip_drafts VALUES (?,?,?,?)',
-                         (i, *module.publish(conn, 'road-trip-draft', i, {'saved': i})))
+            draft_id = f'draft-{i}'
+            reference = module.publish(conn, 'road-trip-draft', draft_id, {'saved': i})
+            conn.execute('''INSERT INTO road_trip_recipes(
+                name,own_pct,target_minutes,created_at,updated_at,draft_id,draft_revision,draft_state,
+                draft_updated_at,recovery_filename,recovery_digest,recovery_bytes,draft_selections
+            ) VALUES (?,50,60,1,1,?,'fixture-revision','ready',1,?,?,?,'[]')''',
+                (f'Trip {i}', draft_id, *reference))
+        sync_state.write(conn, {'status': 'complete', 'last_attempt_at': 2}, 2)
+
         def records(db):
             for owner, key, kind, filename, digest, size in module.references(db):
                 yield (owner, key), filename, module.read(filename, digest, size, kind=kind, owner=key)
@@ -148,10 +146,11 @@ def _seed(conn, domain, *, duplicate=False):
 
 
 @pytest.mark.parametrize('domain', ['policies', 'groups', 'metadata', 'archives',
-                                    'annotations', 'descriptions', 'outputs', 'collections', 'actions'])
+                                    'descriptions', 'outputs', 'collections', 'actions'])
 @pytest.mark.parametrize('compressed', [False, True])
-def test_recovery_preserves_each_owned_records_original_clocks(tmp_path, domain, compressed):
-    _check_recovery(tmp_path, domain, compressed)
+def test_recovery_preserves_each_owned_records_original_clocks(
+        tmp_path, domain, compressed, _pristine_current_schema):
+    _check_recovery(tmp_path, domain, compressed, collection_schema=_pristine_current_schema)
 
 
 @pytest.mark.parametrize('domain', ['policies', 'groups', 'metadata', 'archives'])
@@ -161,9 +160,11 @@ def test_equal_retained_payloads_preserve_distinct_source_clocks(tmp_path, domai
     _check_recovery(tmp_path, domain, compressed, duplicate=True, reverse=reverse)
 
 
-def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=False):
+def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=False, collection_schema=None):
     with closing(sqlite3.connect(tmp_path / 'source.db')) as source, closing(sqlite3.connect(tmp_path / 'restored.db')) as target:
         source.row_factory = target.row_factory = sqlite3.Row
+        if domain == 'collections':
+            collection_schema.backup(source)
         module, records, directory = _seed(source, domain, duplicate=duplicate)
         recovery = PolicyFiles if domain == 'policies' else module
         source_root = directory(source)
@@ -191,6 +192,8 @@ def _check_recovery(tmp_path, domain, compressed, *, duplicate=False, reverse=Fa
             return result
 
         expected = snapshot(source)
+        if domain == 'collections':
+            assert len(expected) == 4  # Three trip drafts and the sync attempt.
         with policy_documents.retained_reader(source_root):
             source.execute('BEGIN')
             try:

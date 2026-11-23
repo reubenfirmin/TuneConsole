@@ -40,7 +40,7 @@ def thompson_mode_scores(stats, mode_ids, rng):
     return {mid: rng.betavariate(*mode_eval.choice_posterior(*stats.get(mid, (0, 0)))) for mid in mode_ids}
 
 
-def select_modes(modes, leans, epoch, n=4, stats=None, now_posterior=None, now_gain=None):
+def select_modes(modes, leans, epoch, n=4, stats=None, now_posterior=None, now_gain=None, preferences=None):
     """Choose distinct modes using acceptance, library share, mood and diversity.
 
     Sampling is deterministic for fixed inputs. `now_gain` is only used when
@@ -53,7 +53,7 @@ def select_modes(modes, leans, epoch, n=4, stats=None, now_posterior=None, now_g
     cents = {mode['mode_id']: np.asarray(mode['centroid'], dtype=np.float64) for mode in modes}
     samples = thompson_mode_scores(stats or {}, [mode['mode_id'] for mode in modes], rng)
     scores = {mode['mode_id']: samples[mode['mode_id']] * max(1, mode['size'])
-              * _mode_mood_weight(mode, leans)
+              * (_mode_mood_weight(mode, leans) if preferences is None else preferences.get(mode['mode_id'], 1.))
               * (1.0 + now_gain * now_posterior.get(mode['mode_id'], 0.0) if now_posterior else 1.0)
               for mode in modes}
     chosen = [max(scores, key=scores.get)]

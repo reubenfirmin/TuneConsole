@@ -11,7 +11,7 @@ from yt_playlist.core.db_checkpoint import checkpoint_wal, deferred_autocheckpoi
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import DERIVED_TABLES, Reads
 from yt_playlist.core.db_writes import reserved_write
-from yt_playlist.core.read_memo import ReadMemo
+from yt_playlist.core.read_memo import ReadMemo, preparation_memo
 
 log = logging.getLogger(__name__)
 
@@ -31,15 +31,22 @@ def _capture_lock(source, wait):
 
 
 class ReadSnapshot:
-    def __init__(self, source, reader, changes, version, schema, revision_scope=None):
+    def __init__(self, source, reader, changes, version, revisions, generation, revision_scope=None, *,
+                 allow_stale_keys=frozenset()):
         self.source = source
         self.store = reader
         self._changes = changes
         self._version = version
-        self._schema = schema
+        self._revisions = revisions
+        self._schema = revisions.schema_version
         self._revision_scope = revision_scope
+        self._allow_stale_keys = frozenset(allow_stale_keys)
         self._reader_released = False
-        self._database_generation = getattr(source, '_database_generation', 0)
+        self._database_generation = generation
+
+    def _same_admission(self):
+        return (getattr(self.source, '_database_generation', 0) == self._database_generation
+                and self.source._snapshot_revisions is self._revisions)
 
     def release_reader(self):
         """Retain the publication guard without retaining a connection or pinned WAL view."""
@@ -56,10 +63,10 @@ class ReadSnapshot:
         ``defer_checkpoint=False`` retains SQLite's inline policy for diagnostic comparisons.
         Disposable rankings may explicitly tolerate changes to soft catalog/evidence inputs.
         Their serving path must recheck current eligibility. Models use the strict default;
-        external writers and schema changes invalidate ordinary publication.
+        external writers and database readmission invalidate ordinary publication.
         Captured recommendation outputs may set ``validate_inputs=False``:
-        source updates then belong to a later run, while replacing the database
-        or changing its schema still prevents publication to another destination.
+        source updates then belong to a later run. Database readmission still
+        invalidates a capture from the previous admission.
         """
         timings = PublicationTimings()
         checkpoint = False
@@ -101,7 +108,8 @@ class ReadSnapshot:
 
         The serving lock preserves application ordering. A failed later step
         leaves earlier commits intact; the coordinator acknowledges queued work
-        last so the next attempt can finish it.
+        last so the next attempt can finish it. Captures that skip input checks
+        still verify that the schema they publish into matches their admission.
         """
         timings = PublicationTimings()
         outcome = 'failed'
@@ -113,8 +121,12 @@ class ReadSnapshot:
                     raise RuntimeError('Ordered publication cannot join another transaction')
                 check_cancellable_work()
                 current = (self._inputs_current(timings, allow_stale_tables) if validate_inputs else
-                           getattr(self.source, '_database_generation', 0) == self._database_generation
-                           and self.source.conn.execute('PRAGMA schema_version').fetchone()[0] == self._schema)
+                           self._same_admission())
+                if current and not validate_inputs:
+                    # DDL can change the destination without rebinding the Store.
+                    current = self.source.conn.execute('PRAGMA main.schema_version').fetchone()[0] == self._schema
+                    if not current:
+                        self.source.maintenance_diagnostics.record('deferred', reasons={'schema'})
                 if not current:
                     outcome = 'deferred'
                     return False
@@ -149,37 +161,34 @@ class ReadSnapshot:
         writers remain conservative. The writer reservation closes the check/write race.
         ``target`` must only write prepared results, without doing further calculation or I/O.
         """
-        if getattr(self.source, '_database_generation', 0) != self._database_generation:
+        if not self._same_admission():
             return False
         conn = self.source.conn
         version = conn.execute("PRAGMA data_version").fetchone()[0]
-        schema = conn.execute("PRAGMA schema_version").fetchone()[0]
         dependencies = self.store._snapshot_reads.dependencies
-        tracked = self.source._snapshot_revisions.tables
+        tracked = self._revisions.tables
         guarded = {key for key in dependencies if key[0] in tracked
                    and key[0] not in allow_stale_tables}
         if self._revision_scope is not None and guarded - self._revision_scope:
             raise RuntimeError('Snapshot consumed inputs outside its declared revision scope')
+        # Memoized reads retain all dependencies. An unkeyed read of the same
+        # table also stays guarded when a specific key is allowed to go stale.
+        guarded.difference_update(self._allow_stale_keys)
         with timings.measure('revisions'):
-            current = self.source._snapshot_revisions.capture(guarded)
-        # View reads also report their underlying tables. Definitions are protected by
-        # schema_version; a view itself does not have a row revision.
+            current = self._revisions.capture(guarded)
+        # View reads report their underlying tables in the admitted schema.
         unknown = ({table for table, _key in dependencies
                     if not table.startswith("sqlite_")} - tracked
-                   - self.source._snapshot_revisions.views - DERIVED_TABLES)
+                   - self._revisions.views - DERIVED_TABLES)
         changed = sorted(key for key in guarded
                          if current.get(key, 0) > self._changes)
-        schema_changed = (schema != self._schema
-                          or self.source._snapshot_revisions.schema_version != self._schema)
-        if (schema_changed or version != self._version or changed
+        if (version != self._version or changed
                 or (unknown and conn.total_changes != self._changes)):
-            log.debug('Maintenance publication deferred: changed=%s external_writer=%s schema=%s unknown=%s',
-                     changed[:12], version != self._version, schema_changed, sorted(unknown)[:8])
+            log.debug('Maintenance publication deferred: changed=%s external_writer=%s unknown=%s',
+                     changed[:12], version != self._version, sorted(unknown)[:8])
             reasons = {'source:' + table for table, _key in changed}
             if version != self._version:
                 reasons.add('external_writer')
-            if schema_changed:
-                reasons.add('schema')
             if unknown and conn.total_changes != self._changes:
                 reasons.add('untracked_source')
             self.source.maintenance_diagnostics.record('deferred', reasons=reasons)
@@ -190,8 +199,7 @@ class ReadSnapshot:
         conn = self.source.conn
         try:
             current = (self._inputs_current(timings, allow_stale_tables) if validate_inputs else
-                       getattr(self.source, '_database_generation', 0) == self._database_generation
-                       and conn.execute('PRAGMA schema_version').fetchone()[0] == self._schema)
+                       self._same_admission())
             if not current:
                 conn.rollback()
                 return False
@@ -209,7 +217,7 @@ class ReadSnapshot:
 
 @contextmanager
 def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for_writer=True,
-                  read_transaction=True):
+                  read_transaction=True, allow_stale_keys=frozenset()):
     # A bounded caller may declare all inputs up front. Publication rejects any
     # consumed input outside this scope, including a previously missing row.
     revision_scope = frozenset(dependencies) if dependencies is not None else None
@@ -221,53 +229,66 @@ def read_snapshot(source, make_reader, *, dependencies=None, memo=None, wait_for
             check_cancellable_work()
             if source.conn.in_transaction:
                 raise RuntimeError("Cannot snapshot uncommitted changes")
-            source._snapshot_revisions.refresh()
             changes = source.conn.total_changes
-            schema = source.conn.execute("PRAGMA schema_version").fetchone()[0]
+            revisions = source._snapshot_revisions
             version = source.conn.execute("PRAGMA data_version").fetchone()[0]
             generation = getattr(source, '_database_generation', 0)
             if source._db_path is None:
-                source.conn.backup(reader.conn, pages=128,
-                                   progress=lambda *_: check_cancellable_work())
-                reader._bind_repositories()
+                source._copy_memory_to(reader)
             else:
                 if read_transaction and not reader.conn.in_transaction:
                     reader.conn.execute("BEGIN")
                 reader.conn.execute("SELECT 1 FROM settings LIMIT 1").fetchone()
             # External commits can race reader pinning. Only reuse results when
             # the external-writer epoch stayed stable across that boundary.
-            stable = (source.conn.execute("PRAGMA data_version").fetchone()[0] == version
-                      and source._snapshot_revisions.schema_version == schema)
+            committed = not read_transaction and source._db_path is not None
+            reader_version = reader.conn.execute("PRAGMA data_version").fetchone()[0] if committed else None
+            stable = source.conn.execute("PRAGMA data_version").fetchone()[0] == version
             if memo is None:
                 if not hasattr(source, "_read_memo"):
                     source._read_memo = ReadMemo()
                 memo = source._read_memo
-        reader._snapshot_reads = Reads()
+        reader._snapshot_reads = reader.conn._snapshot_reads = Reads()
+
+        def cache_current():
+            # A committed reader follows writes after admission. Values computed
+            # across those commits cannot enter the memo under the old revision.
+            return reader.conn.execute("PRAGMA data_version").fetchone()[0] == reader_version
 
         def unchanged(dependencies, serial):
-            guarded = {key for key in dependencies if key[0] in source._snapshot_revisions.tables}
+            guarded = {key for key in dependencies if key[0] in revisions.tables}
             # Recomputing on the pinned reader is always safe. Foreground cache
             # validation must not wait behind unrelated preparation writes.
             if not source._lock.acquire(blocking=wait_for_writer):
                 return False
             try:
                 check_cancellable_work()
-                current = source._snapshot_revisions.capture(guarded)
+                if source._snapshot_revisions is not revisions:
+                    return False
+                current = revisions.capture(guarded)
             finally:
                 source._lock.release()
             return all(revision <= serial for revision in current.values())
 
-        reader._memoized_read = lambda name, prepare: memo.calculate(
-            name, prepare, epoch=(generation, version, schema) if stable and revision_scope is None else None,
-            serial=changes, unchanged=unchanged,
-            reads=reader._snapshot_reads, tables=source._snapshot_revisions.tables,
-            views=source._snapshot_revisions.views)
+        def calculate(name, prepare, owner=None):
+            selected = (preparation_memo(source, owner, wait_for_writer=wait_for_writer)
+                        if owner is not None and read_transaction else None)
+            epoch = ((generation, version, revisions) if stable and revision_scope is None
+                     and (not committed or cache_current()) else None)
+            return (selected or memo).calculate(
+                name, prepare, epoch=epoch,
+                serial=changes, unchanged=unchanged,
+                reads=reader._snapshot_reads, tables=revisions.tables, views=revisions.views,
+                cache_current=cache_current if committed else None)
+
+        reader._memoized_read = calculate
         # SQLite 3.40 reports schema writes while first declaring these read-only
         # modules. Prepare them before installing the write-denying authorizer.
         # Qualifying with temp keeps real tables in main from shadowing them.
         reader.conn.execute("SELECT 1 FROM temp.json_each('[]'), temp.json_tree('[]') LIMIT 0").fetchall()
         reader.conn.set_authorizer(reader._snapshot_reads.authorize)
-        yield ReadSnapshot(source, reader, changes, version, schema, revision_scope)
+        yield ReadSnapshot(source, reader, changes, version, revisions, generation, revision_scope,
+                           allow_stale_keys=allow_stale_keys)
     finally:
         # Drop the callback's reader references promptly; repositories also point
         # back to the reader and can otherwise delay collection of a closed Store.

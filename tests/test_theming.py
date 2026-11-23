@@ -10,9 +10,11 @@ from __future__ import annotations
 import re
 from html.parser import HTMLParser
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-from jinja2 import Environment, FileSystemLoader
+
+from tests.template_support import web_templates
 
 WEB = Path(__file__).resolve().parents[1] / "src" / "yt_playlist" / "web"
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -86,26 +88,22 @@ def test_tokens_css_is_the_only_stylesheet_with_literals():
 
 def test_every_referenced_token_is_defined():
     """A var(--x) with no definition renders as nothing — catch typos before a blank UI does."""
-    # Components can declare local properties using the shared role tokens.
-    styles = "\n".join(p.read_text() for p in (WEB / "static").glob("*.css"))
-    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", styles))
-    # set from JS or inline style at runtime, so they have no static definition
-    runtime = {
-        "--topbar-h", "--p", "--card", "--dot", "--heat", "--subj", "--petal-c",
-        "--node-hue", "--node-sat", "--node-light", "--bg-grad", "--v", "--tile",
-        "--mix-order", "--mix-x", "--mix-y", "--genre-tint",
-        "--part-opacity", "--playlist-c", "--share",
-        "--arrival-delay", "--track-delay",
-        "--setup-banner-height", "--playback-dock-height",
-    }
+    sources = {path: path.read_text(errors='ignore') for path in (TOKENS, *_source_files())
+               if path.suffix in {'.css', '.html', '.js'}}
+    declaration = re.compile(r'''(--[a-z0-9-]+)["']?\s*:''')
+    property_setter = re.compile(r'''\.setProperty\(\s*["'](--[a-z0-9-]+)["']\s*,''')
+    defined = set()
+    for path, source in sources.items():
+        # Include literal definitions in HTML style attributes and JS style objects.
+        defined.update(declaration.findall(source))
+        if path.suffix == '.js':
+            defined.update(property_setter.findall(source))
     missing = {}
-    for p in _source_files():
-        if p.suffix not in {".css", ".html", ".js"}:
-            continue
+    for path, source in sources.items():
         # Match complete names; Jinja constructs such as --rose-{{ index }} are dynamic.
-        for tok in re.findall(r"var\((--[a-z0-9-]+)\s*[,)]", p.read_text(errors="ignore")):
-            if tok not in defined and tok not in runtime:
-                missing.setdefault(tok, set()).add(p.name)
+        for token in re.findall(r"var\((--[a-z0-9-]+)\s*[,)]", source):
+            if token not in defined:
+                missing.setdefault(token, set()).add(path.name)
     assert not missing, f"undefined tokens referenced: { {k: sorted(v) for k, v in missing.items()} }"
 
 
@@ -120,22 +118,34 @@ def test_palette_layer_is_not_referenced_by_rules():
     assert not leaks, f"raw palette hues used directly in rules: {leaks}"
 
 
-@pytest.mark.parametrize("template", ["base.html", "story_reel.html", "generating.html"])
-def test_tokens_css_loads_before_the_stylesheets_that_use_it(template):
-    t = (WEB / "templates" / template).read_text()
-    # order the actual <link> tags, not any prose that happens to mention a filename
-    sheets = re.findall(r'<link[^>]+href="/static/([a-z_]+\.css)', t)
-    assert "tokens.css" in sheets, f"{template} must load the token layer"
-    assert sheets[0] == "tokens.css", f"{template} loads stylesheets in the wrong order: {sheets}"
-
-
-@pytest.mark.parametrize("template", ["base.html", "story_reel.html", "generating.html"])
-def test_application_stylesheets_keep_cascade_order(template):
+@pytest.mark.parametrize('template,path', [
+    ('base.html', '/'), ('base.html', '/artists'), ('story_reel.html', None), ('generating.html', None),
+])
+def test_application_stylesheets_keep_cascade_order(template, path):
     expected = ["tokens.css", "app.css", "components.css"]
-    text = (WEB / "templates" / template).read_text()
-    sheets = re.findall(r'<link[^>]+href="/static/([a-z_-]+\.css)', text)
-    assert sheets[:len(expected)] == expected, f"{template} stylesheet order changed: {sheets}"
+    if path is None:
+        markup = (WEB / 'templates' / template).read_text()
+    else:
+        from yt_playlist.web.icons import arrow_icon
+
+        env = web_templates(directory=WEB / 'templates').env
+        request = SimpleNamespace(url=SimpleNamespace(path=path))
+        markup = env.get_template(template).render(request=request, read_recovery=True,
+                                                   auth_expired={}, arrow_icon=arrow_icon)
+    head = markup.partition('</head>')[0]
+    sheets = re.findall(r'<link[^>]+href="/static/([a-z_-]+\.css)', head)
     assert "page-overrides.css" not in sheets
+    if path == '/':
+        from yt_playlist.web.fao_static import HOME_SHELL_STYLES, ManagedStaticFiles
+
+        assert sheets[0] == 'home-shell.css'
+        assert set(expected).isdisjoint(sheets)
+        assert 'page-overrides' not in HOME_SHELL_STYLES
+        assets = WEB / 'static'
+        bundle, _ = ManagedStaticFiles(directory=assets).bundle('home-shell.css')
+        assert bundle.startswith(b'\n'.join((assets / name).read_bytes() for name in expected))
+    else:
+        assert sheets[:len(expected)] == expected, f"{template} stylesheet order changed: {sheets}"
     if template == "story_reel.html":
         assert sheets == ["tokens.css", "app.css", "components.css", "story.css"]
     if template == "generating.html":
@@ -301,9 +311,7 @@ def test_composed_launch_surfaces_have_one_shared_console_heading(template, stat
 
     # The interstitial composes the shared loader through mix_launch_loader.
     # Inspect the rendered composition so wrapper partials retain this check.
-    from yt_playlist.web.theme import mix_launch_tokens
-    env = Environment(loader=FileSystemLoader(WEB / 'templates'), autoescape=True)
-    env.globals['mix_launch_tokens'] = mix_launch_tokens
+    env = web_templates(directory=WEB / 'templates').env
     markup = LoaderMarkup()
     markup.feed(env.get_template(template).render(radio_bootstrap={}, tv_max_minutes=60))
     assert markup.loaders == 1

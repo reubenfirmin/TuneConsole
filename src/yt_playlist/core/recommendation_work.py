@@ -1,22 +1,34 @@
 """Fixed work-state contracts for daily model selection and TV preparation."""
-import math
 import json
+import math
+import re
+
+from . import worker_settings
+from .db_revisions import setting_reads
 
 SURFACES = ('daily_model_schedule', 'tv_preparation')
+TV_POOL_LIMIT = 60
+TV_QUEUE_LIMIT = 12
+TV_DRAW_KEY = 'tv_draw'
+TV_DRAW_COLUMNS = (
+    'pool_state_present INTEGER NOT NULL DEFAULT 1 CHECK(pool_state_present IN (0,1))',
+    "draw_number INTEGER NOT NULL DEFAULT 0 CHECK(typeof(draw_number)='integer' AND draw_number>=0)",
+    "recent_videos TEXT NOT NULL DEFAULT '[]' CHECK(json_type(recent_videos) IS 'array' "
+    f'AND json_array_length(recent_videos)<={TV_POOL_LIMIT})',
+    "last_videos TEXT NOT NULL DEFAULT '[]' CHECK(json_type(last_videos) IS 'array' "
+    f'AND json_array_length(last_videos)<={TV_QUEUE_LIMIT})',
+)
+_VIDEO = re.compile(r'^[A-Za-z0-9_-]{11}$')
 
 
-def prepared_owner(conn):
-    # The genuine historical owner takes precedence after an explicit frozen
-    # upgrade. Publication never collides with its table names or stamps history.
-    if conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_schedule'").fetchone():
-        return False
-    return bool(conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='published_work'").fetchone()
-                and conn.execute('SELECT 1 FROM published_work WHERE id=1').fetchone())
-
-
-def available(conn):
-    return bool(conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='model_selection_schedule'").fetchone()
-                or prepared_owner(conn))
+def video_history(raw, limit):
+    try:
+        values = json.loads(raw or '[]')
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(values, list):
+        return []
+    return [video for video in values[-limit:] if isinstance(video, str) and _VIDEO.fullmatch(video)]
 
 
 def finite(value):
@@ -42,32 +54,26 @@ def parse(surface, value, built_at):
 
 def write(conn, surface, value, built_at):
     row = parse(surface, value, built_at)
-    if prepared_owner(conn):
-        # Publication triggers validate even writes from older connections and
-        # atomically maintain the typed owner alongside its retained document.
-        conn.execute('INSERT INTO rec_proposals(surface,payload,built_at) VALUES (?,?,?) '
-                     'ON CONFLICT(surface) DO UPDATE SET payload=excluded.payload,built_at=excluded.built_at',
-                     (surface, json.dumps(value), built_at))
-        return
     if surface == 'daily_model_schedule':
-        if row is None:
-            conn.execute('DELETE FROM model_selection_schedule')
-        else:
-            conn.execute('INSERT INTO model_selection_schedule VALUES (1,?,?) '
-                         'ON CONFLICT(id) DO UPDATE SET next_at=excluded.next_at,updated_at=excluded.updated_at', row)
-    elif row is None:
-        conn.execute('DELETE FROM tv_preparation_state')
+        document = {'next_at': row[0], 'saved_at': row[1]} if row is not None else None
     else:
-        conn.execute('INSERT INTO tv_preparation_state VALUES (1,?,?,?) ON CONFLICT(id) DO UPDATE SET '
-                     'failed=excluded.failed,observed_at=excluded.observed_at,updated_at=excluded.updated_at', row)
+        document = {**value, 'saved_at': built_at} if row is not None else None
+    worker_settings.save(conn, surface, json.dumps(document) if document is not None else None)
+
+
+def present(conn, surface):
+    if surface not in SURFACES:
+        raise ValueError('Unknown recommendation work owner')
+    with setting_reads(conn, (surface,)):
+        return conn.execute('SELECT 1 FROM settings WHERE key=?', (surface,)).fetchone() is not None
 
 
 def read(conn, surface):
-    prefix = 'prepared_' if prepared_owner(conn) else ''
-    if surface == 'daily_model_schedule':
-        row = conn.execute('SELECT next_at FROM ' + prefix + 'model_selection_schedule WHERE id=1').fetchone()
-        return {'next_at': row[0]} if row else None
-    if surface == 'tv_preparation':
-        row = conn.execute('SELECT failed,observed_at FROM ' + prefix + 'tv_preparation_state WHERE id=1').fetchone()
-        return ({'failed': bool(row[0]), **({'at': row[1]} if row[1] is not None else {})} if row else None)
-    raise ValueError('Unknown recommendation work owner')
+    if surface not in SURFACES:
+        raise ValueError('Unknown recommendation work owner')
+    raw = worker_settings.read(conn, surface)
+    if raw is None:
+        return None
+    document = json.loads(raw)
+    document.pop('saved_at')
+    return document

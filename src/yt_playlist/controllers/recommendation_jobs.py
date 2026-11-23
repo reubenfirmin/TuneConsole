@@ -16,10 +16,10 @@ class PendingCommands:
         return getattr(self.store, '_recommendation_retirement_pending', False)
 
     def cleanup(self, batch):
-        from yt_playlist.rec import candidate_refresh, recommendation_retirement, recommendation_roots
+        from yt_playlist.rec import candidate_refresh, recommendation_retirement
         from yt_playlist.rec.worker_queue import Job
         pending = self.retirement_pending()
-        if Job.RETENTION in batch and recommendation_roots.enabled(self.store):
+        if Job.RETENTION in batch:
             pending |= self.store.recommendations.retirement_pending()
         if pending or (any(job in batch for job in (Job.FULL, Job.MODES, Job.BUNDLES))
                        and candidate_refresh.check_due(self.store, self.now())):
@@ -130,7 +130,7 @@ class GroupCommands:
         return True
 
     def prepare(self):
-        from yt_playlist.rec import group_preparation, group_serving
+        from yt_playlist.rec import group_preparation, group_serving, group_viz
         try:
             if self.store.settings.get_setting('rec_group_shadow') == '0':
                 self.store.maintenance_diagnostics.resolve_wait(group_serving.PHASE, 'disabled')
@@ -139,20 +139,23 @@ class GroupCommands:
             def calculate():
                 with cancellable_work(self.stopping):
                     self.preparation.step(self.now())
-                    if self.store.taste_groups.head() is None:
+                    if self.store.taste_groups.head_generation() is None:
                         self.store.maintenance_diagnostics.record(
                             'deferred', phase=group_serving.PHASE, reasons=('group-head',))
                         return None
+                    group_viz.prepared(self.store)
                     now = self.now()
                     return group_serving.prepare(self.store, now) if group_serving.due(self.store, now) else {}
 
             preview = self.stage('adaptive grouping shadow', calculate)
-            phase = group_preparation.status(self.store).get('phase')
+            progress = group_preparation.status(self.store)
+            phase = progress.get('phase')
             if preview is None:
                 if phase == 'ready':
                     group_preparation.report(self.store, 'deferred', self.now(), reason='preview-pending')
                 return GroupOutcome('deferred')
-            if phase in {'failed', 'preparing'}:
+            preview_wait = phase == 'deferred' and progress.get('reason') in {'preview-pending', 'serving-work'}
+            if phase in {'failed', 'preparing'} or (preview_wait and not self.preparation.due(self.now())):
                 group_preparation.report(self.store, 'ready', self.now())
             return GroupOutcome('ready', bool(preview and group_serving.enabled(self.store)))
         except WorkClosing:
@@ -195,7 +198,7 @@ class MaintenanceCommands:
         from yt_playlist.rec import candidate_refresh
         now = self.now()
         if candidate_refresh.check_due(self.store, now):
-            if (not self.store.rec_proposals.has_proposals('mode_bundles')
+            if (not self.store.recommendations.head('home')
                     or candidate_refresh.due(self.store, now)):
                 return True
             candidate_refresh.checked(self.store, now)

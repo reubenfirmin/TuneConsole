@@ -3,7 +3,7 @@ from contextlib import contextmanager
 
 from fastapi import HTTPException, Request
 
-from yt_playlist.rec import access, account_growth, mix_tuning
+from yt_playlist.rec import access, account_growth, growth_access, mix_tuning
 
 
 def state(ctx, request=None):
@@ -32,14 +32,18 @@ def guard(ctx, area, *, radio=None):
 
 
 @contextmanager
-def vibe_selection(ctx, request):
+def vibe_selection(ctx):
     now = ctx.now_fn()
-    mix_tuning.expire(ctx.store, now)
-    # Admission ends before accepting the mutation. Generation belongs to the
-    # independent worker and never inherits this request reader's deadline.
+    # Release the admission reader before applying tuning and assembling mixes.
     with ctx.store.read_view() as reader:
-        if not account_growth.vibe_access(reader, now, ctx.radio.bootstrap(reader=reader)):
-            raise HTTPException(409, 'This stop is still ahead on your journey. Open Your unlocks to see what is next.')
+        usage = account_growth.retained_usage(reader)
+    if not growth_access.retained_access(usage, 'vibes'):
+        # Readiness depends on current tuning. Earned access only needs to
+        # expire old controls when the new selection takes the writer.
+        mix_tuning.expire(ctx.store, now)
+        with ctx.store.read_view() as reader:
+            if not account_growth.vibe_access(reader, now, lambda: ctx.radio.bootstrap(reader=reader), usage=usage):
+                raise HTTPException(409, access.DENIED_MESSAGE)
     yield now
 
 

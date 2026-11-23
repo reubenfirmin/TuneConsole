@@ -20,12 +20,13 @@ def test_runtime_operations_do_not_import_historical_catalog_helpers(store, monk
     missing = store.tracks.upsert_track(None, 'Song', 'Artist', 'Album', 200)
     assert store.tracks.upsert_track(None, 'Song', 'Artist', 'Album', 200) == missing
     first = store.tracks.upsert_track('a', 'Song', 'Artist', 'Album', 200)
-    old = store.tracks.catalog_subject(first)['identity_key']
-    store.playlist_recipes.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
     second = store.tracks.upsert_track('b', 'Song', 'Artist', 'Other', 200)
+    old = store.tracks.catalog_subject(second)['identity_key']
+    store.playlist_recipes.set_cluster_canvas('saved',json.dumps({'nodes': [{'key': old}], 'label': old}))
     seed_audio(store, first, bpm=120)
     store.tracks.associate_youtube_item('b', store.tracks.catalog_subject(first)['recording_id'],
-                                source='verified', evidence={'review': 'same recording'}, now=2)
+                                source='verified', evidence={'review': 'same recording'}, now=2,
+                                same_recording=True)
     assert store.tracks.get_track_audio(second)[0] == 120
     saved = json.loads(store.playlist_recipes.get_cluster_canvas('saved'))
     assert saved['nodes'][0]['key'] == store.tracks.catalog_subject(first)['identity_key']

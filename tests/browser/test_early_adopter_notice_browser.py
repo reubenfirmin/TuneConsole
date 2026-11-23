@@ -13,7 +13,7 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def adopter_app(store):
-    identity = store.accounts.upsert_account('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     store.settings.set_setting('early_adopter_notice', 'reset-fixture')
     app = create_app(store, lambda: {identity: FakeClient()}, background_work=False)
     port = _free_port()

@@ -72,17 +72,17 @@ def main(argv=None):
     run = actions.add_parser('run', help='Run Python, or isolated focused pytest tests')
     run.add_argument('--source', type=Path)
     run.add_argument('--baseline')
-    run.add_argument('--schema', type=int)
+    run.add_argument('--schema', type=int, help='Select by installed regular schema version')
     run.add_argument('--report', type=Path)
     run.add_argument('--readonly', action='store_true')
     run.add_argument('arguments', nargs=argparse.REMAINDER)
     gc = actions.add_parser('gc', help='Preview abandoned work and old unpinned generations')
     gc.add_argument('--delete', action='store_true')
     gc.add_argument('--keep', type=int, default=2)
-    actions.add_parser('list', help='List prepared generations without scanning their contents')
+    actions.add_parser('list', help='List prepared generations and their installed schemas')
     verify = actions.add_parser('verify', help='Explicit local backend acceptance on the prepared actual library')
     verify.add_argument('--report', type=Path, default=ROOT / 'build/test-reports/library-image-acceptance')
-    verify.add_argument('--refresh', action='store_true', help='Also capture a new generation while two old runs stay pinned')
+    verify.add_argument('--refresh', action='store_true', help='Also replace the baseline after the checks')
     args = parser.parse_args(argv)
     if args.action == 'build-runtime':
         runtime()
@@ -100,7 +100,7 @@ def main(argv=None):
             parser.error('--keep must be at least one')
         print(json.dumps(dict(delete=args.delete, paths=manager.collect(keep=args.keep, delete=args.delete)), indent=2))
     elif args.action == 'list':
-        print(json.dumps([json.loads(path.read_text()) for path in (manager.volume / 'metadata').glob('*.json')], indent=2))
+        print(json.dumps(manager.generations(), indent=2))
     else:
         arguments = args.arguments[1:] if args.arguments[:1] == ['--'] else args.arguments
         if not arguments:
@@ -116,8 +116,7 @@ def main(argv=None):
         check_runtime(manager)
         report = (args.report or ROOT / 'build/test-reports/library-images' / ('run-' + uuid.uuid4().hex)).resolve()
         selection = dict(baseline=args.baseline, source=args.source, schema=args.schema)
-        # Pin the selected generation across collection and all per-test runs,
-        # including refresh by another agent between two selected test cases.
+        # Select one baseline for the run. An explicit refresh can replace it.
         with manager.pinned(**selection) as (metadata, _held):
             selection = dict(baseline=metadata['id'])
             if arguments[0] == 'pytest':

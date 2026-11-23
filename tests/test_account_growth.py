@@ -25,7 +25,7 @@ def nodes(state):
 
 def test_integration_recommendations_start_one_and_two_days_after_live_listening(store, monkeypatch):
     monkeypatch.setattr(account_growth.lastfm, 'api_key', lambda _store: None)
-    account = store.accounts.upsert_account('main', 'credential', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
     store.settings.set_setting('last_sync_at', '-1000000')
     store.history.import_play_events(account, [('song|artist', 'song', -100000)], source='spotify')
@@ -53,7 +53,7 @@ def test_integration_recommendations_start_one_and_two_days_after_live_listening
 def test_integrations_stop_recommending_after_connection_or_import(store, monkeypatch):
     monkeypatch.setattr(account_growth.lastfm, 'api_key',
                         lambda source: source.settings.get_setting('lastfm_api_key') or None)
-    account = store.accounts.upsert_account('main', 'credential', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
     store.history.record_play_event(account, 'song|artist', 'song', 120)
     now = 120 + 2 * 86400
@@ -87,7 +87,7 @@ def test_guidance_follows_artist_picks_then_owned_music_without_demanding_more_l
 
     assert 'Choose 3 artists' in guidance()['albums']['how_to']
     fake = Catalog()
-    account = store.accounts.upsert_account('main', 'credential', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     for page in fake._artists.values():
         for song in page['songs']['results']:
             fake._catalog[song['videoId']] = song
@@ -149,20 +149,25 @@ def test_home_inputs_reuse_journey_and_invalidate_on_supplied_or_committed_chang
     first = read()
     assert read() == first
     assert len(calls) == 1
+    deferred = read(defer_vibes=True)
+    assert deferred['vibes_ready'] is None
+    assert read(defer_vibes=True) == deferred
+    assert read() == first
+    assert len(calls) == 2
     assert not nodes(first)['listening']['usable']
     assert nodes(read(mixes_ready=True))['listening']['usable']
-    assert len(calls) == 2
+    assert len(calls) == 3
     discovered = {**collections, 'discovery_tracks': [{}] * 10}
     assert nodes(read(collections=discovered))['discover']['usable']
-    assert len(calls) == 3
-    assert nodes(read(radio={'state': {'active': True}}))['radio']['usable']
     assert len(calls) == 4
+    assert nodes(read(radio={'state': {'active': True}}))['radio']['usable']
+    assert len(calls) == 5
     # A committed library change must invalidate a result with identical supplied
     # inputs, and a caller cannot mutate the detached cached journey.
     first['health']['total'] = -1
     store.tracks.upsert_track('new-owned', 'New song', 'Artist', None, 200)
     assert read()['health']['total'] == 11
-    assert len(calls) == 5
+    assert len(calls) == 6
 
 
 def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additions(store):
@@ -182,8 +187,8 @@ def test_health_counts_distinct_scoped_recordings_from_empty_through_new_additio
     # Cached catalog entries outside both memberships must not enter the count.
     cached = store.tracks.observe_track_entry('cached', 'Cached', 'Artist', now=20)
     complete_entries(store, [cached], 21)
-    assert store.conn.execute('SELECT COUNT(*) FROM library_memberships').fetchone()[0] == 1
-    assert store.conn.execute('SELECT COUNT(*) FROM discovery_memberships').fetchone()[0] == 2
+    assert store.conn.execute('SELECT COUNT(*) FROM track_sources WHERE library_origin IS NOT NULL').fetchone()[0] == 1
+    assert store.conn.execute('SELECT COUNT(*) FROM recordings WHERE discovery_entry_id IS NOT NULL').fetchone()[0] == 2
     assert health() == (2, 1, 50, 'Getting to know your music')
 
     complete_discovered(store, [discovered_key], 30)
@@ -212,7 +217,7 @@ def test_health_excludes_available_provider_refresh_jobs_until_they_finish(store
     assert health() == (1, 0, 0)
     state.reconcile_provider_configuration({'deezer': {'fingerprint': 'new', 'status': 'disabled'}})
     assert store.conn.execute(
-        "SELECT 1 FROM enrichment_provider_jobs WHERE recording_id=? AND provider='deezer'",
+        "SELECT 1 FROM enrichment_provider_state WHERE recording_id=? AND provider='deezer' AND queued=1",
         (recording,)).fetchone()
     assert health() == (1, 1, 100)
 
@@ -234,7 +239,7 @@ def test_readiness_requires_usable_outputs_and_defers_home_choice(store):
     assert not state['home_choice_available']
     from tests.test_growth_journey import early_journey
     early_journey(store)
-    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)')], 1)
     complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], 1)
     state = account_growth.view(store, 1000, mixes_ready=True, albums_ready=True, radio=ready_radio())
@@ -256,7 +261,7 @@ def test_soundcheck_uses_arriving_catalog_and_actual_play_without_waiting_for_fu
     assert first()['state'] == 'untouched'
     seed_catalog_track(store, 'first|artist', 'First song', 'Artist', video_id='first')
     assert first()['state'] == 'ready'
-    identity = store.accounts.upsert_account('main', 'credential', None, True)
+    identity = store.accounts.upsert_account('main', None, True)
     store.history.import_play_events(identity, [('first|artist', 'first', 1)])
     assert first()['state'] == 'ready'
     store.history.record_play_event(identity, 'first|artist', 'first', 1)
@@ -269,12 +274,12 @@ def test_incidental_live_play_without_a_playable_first_set_does_not_light_soundc
     from types import SimpleNamespace
     from yt_playlist.library.live_plays import handle_play_event
 
-    store.accounts.upsert_account('main', 'credential', None, True)
+    store.accounts.upsert_account('main', None, True)
     assert handle_play_event(SimpleNamespace(store=store), {
         'type': 'play', 'title': 'Incidental', 'artist': 'Artist',
         'videoId': 'incidental', 'brandId': '', 'likeStatus': 'INDIFFERENT',
     }, 1.)
-    assert store.conn.execute('SELECT 1 FROM playable_library_tracks').fetchone() is None
+    assert not store.readiness.playable_owned()
     state = account_growth.view(store, 1000, mixes_ready=False, albums_ready=False, radio={})
     assert nodes(state)['first']['state'] == 'untouched'
 
@@ -346,7 +351,7 @@ def test_lastfm_bonus_requires_current_refresh_and_real_coverage(store, monkeypa
     monkeypatch.setattr(account_growth.enrichment, 'provider_configuration', lambda *_args:
                         {'lastfm': {'status': 'available', 'fingerprint': 'current'}})
     with store.conn:
-        store.conn.execute("INSERT INTO enrichment_provider_config VALUES ('lastfm','current','available')")
+        store.conn.execute("INSERT INTO enrichment_provider_config(provider,fingerprint,status) VALUES ('lastfm','current','available')")
     for index in range(9):
         store.enrichment_state.record_enrichment_attempt(f'song {index}|artist', 'lastfm', {}, now=1000)
     # Completing the enclosing pass advances its scheduling timestamp after
@@ -398,7 +403,7 @@ def test_vibe_use_requires_a_choice_and_confirmed_start_of_the_actual_vibe_offer
 
 def test_vibe_readiness_combines_current_sound_evidence_with_pool_readiness(store, monkeypatch):
     from yt_playlist.core import vibe_versions
-    from tests.musical_support import prepare_profiles
+    from tests.musical_support import publish_intensities
     from tests.test_tv_stream import video
     from yt_playlist.rec import tv
 
@@ -416,17 +421,27 @@ def test_vibe_readiness_combines_current_sound_evidence_with_pool_readiness(stor
     store.rec_proposals.put_proposals(tv.SURFACE, {'schema': tv.SCHEMA, 'key': 'ready',
         'at': 1000, 'attempted': [], 'items': [video(i) for i in range(tv.QUEUE_SIZE)]}, 1000)
 
-    def growth(now=1000, *, mixes=True):
-        return account_growth.view(store, now, mixes_ready=mixes, albums_ready=False, radio={})
+    def growth(now=1000, *, mixes=True, defer_vibes=False):
+        return account_growth.view(store, now, mixes_ready=mixes, albums_ready=False, radio={},
+                                   defer_vibes=defer_vibes)
 
     assert not growth()['vibes_ready']
     assert not requests
-    seed_catalog_track(store, 'measured|artist', 'Measured', 'Artist', video_id='measured',
-                       genre='Jazz', energy=.1, mood_relaxed=.9, mood_happy=.8)
-    prepare_profiles(store)
+    seed_catalog_track(store, 'measured|artist', 'Measured', 'Artist', video_id='measured', genre='Jazz')
+    publish_intensities(store, {'measured|artist': .1})
     assert not growth()['vibes_ready']
     assert requests == [1000]
     available = True
+    with monkeypatch.context() as patch:
+        def unexpected_evidence(*args, **kwargs):
+            raise AssertionError('Home loaded Vibe evidence before the controls opened')
+
+        patch.setattr(type(store.readiness), 'vibe_evidence', unexpected_evidence)
+        deferred = growth(1060, defer_vibes=True)
+        assert deferred['vibes_ready'] is None
+        assert deferred['health']['measured'] is None
+        assert not nodes(deferred)['vibes']['unlocked']
+        assert requests == [1000]
     state = growth(1060)
     assert requests == [1000, 1060]
     assert state['health']['measured'] > 0
@@ -441,4 +456,9 @@ def test_vibe_readiness_combines_current_sound_evidence_with_pool_readiness(stor
     assert state['health']['measured'] == 0
     assert not state['vibes_ready']
     assert nodes(state)['vibes']['state'] == 'preparing'
+    assert requests == [1000, 1060]
+    store.rec_proposals.put_proposals('listening_choices', {'home_format': {'vibe_episodes': 1}}, 1060)
+    deferred = growth(1060, defer_vibes=True)
+    assert deferred['vibes_ready'] is None
+    assert nodes(deferred)['vibes']['unlocked']
     assert requests == [1000, 1060]

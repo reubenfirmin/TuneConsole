@@ -28,17 +28,11 @@ class TasteGroups:
     def definition(self, version, *, generation=None):
         return self.repository.definition(version, generation=generation)
 
-    def lineage(self):
-        return self.repository.lineage()
-
-    def successors(self, version, *, limit=512):
-        return self.repository.successors(version, limit=limit)
-
     def head_generation(self):
         return self.repository.head_generation()
 
-    def leaf_members(self, generation):
-        return self.repository.leaf_members(generation)
+    def leaf_members(self, generation, *, keys=None):
+        return self.repository.leaf_members(generation, keys=keys)
 
     def legacy_versions(self):
         return self.repository.legacy_versions()

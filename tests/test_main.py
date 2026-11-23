@@ -105,7 +105,7 @@ def test_quit_stops_disconnected_sync_and_closes_its_live_stream(store, monkeypa
             assert release.wait(5)
             raise BridgeError("no extension connected")
 
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     tid = store.tracks.upsert_track("kept", "Cached song", "Artist", "", 180)
     cached = store.playlists.upsert_playlist(iid, "OLD", "Cached playlist", 1, "cached", 1)
     store.playlists.set_playlist_tracks(cached, [tid])

@@ -75,11 +75,11 @@ def worker(store, clock, providers):
 
 
 def tracks(store, count):
-    store.settings.set_setting("enrich_caught_up_at", "100")
+    store.enrichment_queue.save_caught_up_at(100)
     seed_publication_subjects(store, [dict(key=identity_key(f'Song {i}', 'Artist'),
         video_id=f'v{i}', title=f'Song {i}', artist='Artist', duration_s=200,
         created_at=10-i) for i in range(count)])
-    return [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+    return [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
 
 
 @pytest.mark.usefixtures('native_sql_calls', 'without_query_timing')
@@ -123,7 +123,7 @@ def test_more_failures_than_one_batch_do_not_starve_healthy_tracks_and_recovery_
             startup.setattr(migrations, 'migrate', admitted)
             startup.setattr(store_module, 'Revisions', lambda conn: None)
             store.init_schema()
-        admitted.assert_called_once_with(store.conn, defer_validation=False)
+        admitted.assert_called_once_with(store.conn)
         assert store._snapshot_revisions is None
         with mock_snapshot_coordinator(store, monkeypatch):
             monkeypatch.setattr(store.enrichment_queue, 'read_snapshot', store.read_snapshot)

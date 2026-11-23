@@ -12,6 +12,7 @@ from yt_playlist.core.features import audio_vibes_enabled
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core import audio_embedding
 from yt_playlist.rec import audio_vibe_feedback, audio_vibe_prediction, audio_vibe_session, home_vibe
+from .bridge import DEV_EXTENSION_ID, EXTENSION_ID
 
 logger = logging.getLogger(__name__)
 
@@ -114,20 +115,25 @@ class Sample(Metadata):
     audio_attributes: AudioAttributes | None = None
     embedding: Embedding | None = None
     tags: Annotated[dict[Tag, Score], Field(min_length=50, max_length=50)]
-    traits: Annotated[dict[Tag, Trait], Field(min_length=6, max_length=6)]
+    traits: Annotated[dict[Tag, Trait], Field(min_length=6, max_length=6)] | None = None
     model: Annotated[str, Field(min_length=1, max_length=128)]
     model_version: Annotated[str, Field(min_length=1, max_length=64)]
-    mood_versions: Annotated[dict[Tag, Annotated[str, Field(max_length=64)]], Field(max_length=5)]
+    mood_versions: Annotated[dict[Tag, Annotated[str, Field(max_length=64)]], Field(max_length=5)] | None = None
     artifact_hashes: Annotated[dict[Annotated[str, Field(max_length=160)],
                                    Annotated[str, Field(pattern=r'^[a-f0-9]{64}$')]], Field(max_length=50)]
 
     @model_validator(mode='after')
-    def check_traits_and_clock(self):
-        if set(self.traits) != {'relaxed', 'aggressive', 'happy', 'sad', 'arousal', 'valence'}:
-            raise ValueError('Expected the six native mood outputs')
-        for name in ('relaxed', 'aggressive', 'happy', 'sad'):
-            if any(not 0 <= number <= 1 for number in self.traits[name].per_patch):
-                raise ValueError('Invalid binary mood output')
+    def check_capture(self):
+        if self.traits is not None and self.mood_versions is not None:
+            if set(self.traits) != {'relaxed', 'aggressive', 'happy', 'sad', 'arousal', 'valence'}:
+                raise ValueError('Expected the six native mood outputs')
+            for name in ('relaxed', 'aggressive', 'happy', 'sad'):
+                if any(not 0 <= number <= 1 for number in self.traits[name].per_patch):
+                    raise ValueError('Invalid binary mood output')
+            if set(self.mood_versions) != {'relaxed', 'aggressive', 'happy', 'sad', 'deam'}:
+                raise ValueError('Expected provenance for all five mood models')
+        elif self.model_fields_set & {'traits', 'mood_versions'} or self.embedding is None:
+            raise ValueError('Expected a frozen embedding or the complete legacy mood outputs')
         if self.capture_reason == 'scheduled' and abs(self.position_seconds - self.target_seconds) > 5:
             raise ValueError('Excerpt missed its scheduled position')
         if self.capture_reason == 'catch_up' and self.position_seconds < self.target_seconds:
@@ -139,13 +145,11 @@ class Sample(Metadata):
             raise ValueError('Invalid scheduled sampling point')
         if self.duration_seconds is not None and self.position_seconds + 10 > self.duration_seconds + .5:
             raise ValueError('Excerpt does not fit within this song')
-        if set(self.mood_versions) != {'relaxed', 'aggressive', 'happy', 'sad', 'deam'}:
-            raise ValueError('Expected provenance for all five mood models')
         if self.embedding is not None:
             audio_embedding.signature(self.model_dump())
             seconds = ((self.embedding.patches * 187 - 1) * 256 + 512) / 16000
             if (not math.isclose(self.analysed_seconds, seconds, abs_tol=.0001)
-                    or any(len(trait.per_patch) != self.embedding.patches for trait in self.traits.values())):
+                    or any(len(trait.per_patch) != self.embedding.patches for trait in (self.traits or {}).values())):
                 raise ValueError('Embedding coverage must match the captured prediction patches')
         return self
 
@@ -219,10 +223,12 @@ async def parse(request, schema):
     try:
         # JSON mode accepts UUID strings while strict mode rejects coerced numbers.
         value = schema.model_validate_json(bytes(body)).model_dump(mode='json')
-        # An absent optional embedding must not change the content address of a
-        # legacy capture retried after this API upgrade.
-        if schema is Sample and value.get('embedding') is None:
-            value.pop('embedding', None)
+        # Preserve sample content addresses across retries by omitting fields
+        # outside the capture's format, including embeddings in older payloads.
+        if schema is Sample:
+            for field in ('embedding', 'traits', 'mood_versions'):
+                if value[field] is None:
+                    value.pop(field)
         return value
     except (ValidationError, ValueError):
         raise HTTPException(422, 'Invalid vibe metadata') from None
@@ -232,6 +238,7 @@ def build(ctx):
     from yt_playlist.web.context import Ctx
     router = APIRouter()
     ctx.templates.env.globals['audio_vibes_enabled'] = audio_vibes_enabled
+    ctx.templates.env.globals['audio_vibe_extension_ids'] = [DEV_EXTENSION_ID, EXTENSION_ID]
     choices = {
         key: {'label': audio_vibe_prediction.LABELS[key],
               'attribute_label': audio_vibe_prediction.ATTRIBUTE_LABELS[key],

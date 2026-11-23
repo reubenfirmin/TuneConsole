@@ -67,9 +67,9 @@ def build(ctx):
                              if created else "Review the playlist and Action Log before retrying.")}
 
     @router.get("/songs/metadata")
-    def metadata(video_id: str):
+    def metadata(video_id: str, proposed_genre: str | None = None):
         from yt_playlist.web.context import Ctx
-        return Ctx.playlist_queries(ctx).metadata(video_id)
+        return Ctx.playlist_queries(ctx).metadata(video_id, proposed_genre=proposed_genre)
 
     @router.post("/songs/metadata")
     def edit_metadata(body: EditMetadata):

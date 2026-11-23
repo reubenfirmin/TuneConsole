@@ -5,9 +5,6 @@ from yt_playlist.rec import group_discovery, group_names, group_similarity, grou
 from yt_playlist.repos import group_publication
 
 CHECKPOINT = 'rec_group_shadow_checkpoint'
-# The serial admits work and labels its capture; musical inputs retain their
-# own guards. Operational source timestamps must not discard staged progress.
-BOOKKEEPING = frozenset({'rec_group_clock'})
 PROGRESS = 'rec_group_shadow_progress'
 
 
@@ -53,7 +50,7 @@ class GroupPreparation:
             if self._pending is not None:
                 snapshot, prepared = self._pending
                 if (self.groups.head_generation() == prepared['generation']
-                        or snapshot.is_current(allow_stale_tables=self.groups.staged_tables | BOOKKEEPING)):
+                        or snapshot.is_current(allow_stale_tables=self.groups.staged_tables)):
                     return self._publish_pending(now)
                 self._pending = None
                 self.groups.abandon_staged(prepared)
@@ -98,8 +95,7 @@ class GroupPreparation:
                 musical_profiles.canonical(self.policy.manifest()), parent)
             if previous and previous['fingerprint'] == fingerprint and resumable is None:
                 # Operational stamps and unchanged legacy rewrites are not new musical input.
-                if snapshot.publish(lambda: self.groups.checkpoint_preparation(previous['generation'], serial, now),
-                                    allow_stale_tables=BOOKKEEPING):
+                if snapshot.publish(lambda: self.groups.checkpoint_preparation(previous['generation'], serial, now)):
                     self.report('ready', now)
                     # Expired unrelated builds and old graph caches do not get
                     # to consume every turn before a new plan can make progress.
@@ -143,7 +139,7 @@ class GroupPreparation:
                 self.groups.finish_preparation(prepared['generation'], owner,
                     prepared['serial'], now)
             published = snapshot.publish_ordered(publish,
-                allow_stale_tables=self.groups.staged_tables | BOOKKEEPING)
+                allow_stale_tables=self.groups.staged_tables)
         if published:
             self._pending = None
             self.report('ready', now)

@@ -1,4 +1,4 @@
-"""Listening trend reads and publication of disposable canonical subject summaries."""
+"""Listening trend reads from exact plays and dated observations."""
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read
 
 
@@ -41,9 +41,9 @@ class TrendsRepo(Repo):
         """
         rows = self.conn.execute(
             "SELECT DISTINCT '@artist:'||c.artist_id a FROM playlist_tracks pt "
-            "JOIN catalog_entries t ON t.id = pt.track_id "
+            "JOIN track_sources t ON t.id = pt.track_id "
             "JOIN recording_listening_artists c ON c.recording_id=t.recording_id "
-            "JOIN playlists p ON p.id = pt.playlist_id "
+            "JOIN active_playlists p ON p.id = pt.playlist_id "
             "WHERE p.playlist_scope_id NOT IN "
             "  (SELECT playlist_scope_id FROM quarantined_playlists)").fetchall()
         return {r["a"] for r in rows}
@@ -82,17 +82,6 @@ class TrendsRepo(Repo):
             [since, until, *args]).fetchall()
         return {r["k"]: r["c"] for r in rows}
 
-    @synchronized
-    def track_audio(self) -> dict:
-        """{identity_key: {energy, bpm, dance}} averaged per key over its track rows. Keys with no
-        acoustic data at all are omitted (each field can still be None). Feeds the recap personality's
-        energy axis; the caller falls back to genre priors where a played key is absent here."""
-        rows = self.conn.execute(
-            "SELECT identity_key k, AVG(energy) e, AVG(bpm) b, AVG(danceability) d FROM tracks "
-            "WHERE energy IS NOT NULL OR bpm IS NOT NULL OR danceability IS NOT NULL "
-            "GROUP BY identity_key").fetchall()
-        return {r["k"]: {"energy": r["e"], "bpm": r["b"], "dance": r["d"]} for r in rows}
-
     @snapshot_read
     def play_hour_rows(self, since, until, exclude_generated=True, *, calendar=False):
         """Return retained calendar instants or aggregated UTC hour counts."""
@@ -130,81 +119,8 @@ class TrendsRepo(Repo):
                     "c.day>=date(?,'unixepoch') AND c.day<date(?,'unixepoch')")
         return "", "pe.played_at>=? AND pe.played_at<?"
 
-    # -- the reconciled daily model ------------------------------------------------------------
-    def _replace_first_play(self):
-        from yt_playlist.core import first_play, listening_summaries
-        if not listening_summaries.available(self.conn):
-            return first_play.rebuild_predecessor(self.conn)
-        return listening_summaries.rebuild(self.conn)
-
-    @synchronized
-    def prepare_first_play(self):
-        """Build the index privately on a maintenance reader, without changing published data.
-
-        The temporary table shadows the serving index for this reader's subsequent rollup queries.
-        Its writes stay private even though the source connection is read-only.
-        """
-        from yt_playlist.core import first_play, listening_summaries
-        if not listening_summaries.available(self.conn):
-            return first_play.rebuild_predecessor(self.conn, private=True)
-        return listening_summaries.rebuild(self.conn,private=True)
-
-    def _first_play_settings(self, imported):
-        self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_source','canonical_listening') "
-                          "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
-        self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_watermark'")
-        if imported is None:
-            self.conn.execute("DELETE FROM settings WHERE key='trend_first_play_takeout_seen'")
-        else:
-            self.conn.execute("INSERT INTO settings(key,value) VALUES ('trend_first_play_takeout_seen',?) "
-                              "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (imported,))
-
-    @synchronized
-    def publish_first_play(self, rows, imported):
-        """Persist a prepared SQL projection and its source markers together."""
-        from yt_playlist.core import first_play, listening_summaries
-        with self.conn.atomic(join=True):
-            if listening_summaries.available(self.conn):
-                listening_summaries.publish(self.conn, rows)
-            else:
-                first_play.publish_predecessor(self.conn, rows)
-            self._first_play_settings(imported)
-
-    @synchronized
-    def clear_first_play(self) -> None:
-        from yt_playlist.core.first_play import invalidate
-
-        with self.conn:
-            invalidate(self.conn)
-
-    @synchronized
-    def refresh_first_play(self):
-        """Fold observations and publish track/artist indexes plus checkpoints in one transaction.
-
-        An exact ledger cannot erase older coarse evidence. Late evidence and
-        account-calendar changes require a full rescan, not a snapshot-id checkpoint.
-        """
-        self.conn.execute("SAVEPOINT first_play_refresh")
-        try:
-            imported = self.conn.execute(
-                "SELECT value FROM settings WHERE key='takeout_imported_at'").fetchone()
-            self._replace_first_play()
-            self._first_play_settings(imported[0] if imported else None)
-            self.conn.execute("RELEASE first_play_refresh")
-        except BaseException:
-            # SQLite may already have rolled back the transaction on interruption.
-            if self.conn.in_transaction:
-                self.conn.execute("ROLLBACK TO first_play_refresh")
-                self.conn.execute("RELEASE first_play_refresh")
-            raise
-
     @synchronized
     def first_play_map(self, kind) -> dict:
-        from yt_playlist.core import listening_summaries
-        if listening_summaries.available(self.conn):
-            state = self.conn.execute('SELECT input_revision,built_revision FROM listening_summary_state WHERE id=1').fetchone()
-            if not state or state[0]!=state[1]:
-                return {}
         rows = self.conn.execute(
             "SELECT id_key, first_day FROM trend_first_play WHERE kind = ?", (kind,)).fetchall()
         return {r["id_key"]: r["first_day"] for r in rows}

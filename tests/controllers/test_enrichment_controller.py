@@ -63,7 +63,7 @@ def test_refresh_uses_proven_retained_observations_without_recapturing_results(e
 @pytest.mark.parametrize(('field', 'value', 'column', 'prepared'), [
     ('year', '1995', 'mb_year', '1995'), ('genre', '', 'genre', ''),
     ('bpm', '120', 'bpm', 120.0), ('bpm', '', 'bpm', None),
-    ('popularity', '4', 'popularity', 4), ('energy', 'bad', 'energy', 'bad'),
+    ('popularity', '4', 'popularity', 4), ('danceability', 'bad', 'danceability', 'bad'),
 ])
 def test_resolution_prepares_the_metadata_choice_before_marking_conflict(enrichment, field, value, column, prepared):
     events = []
@@ -71,16 +71,17 @@ def test_resolution_prepares_the_metadata_choice_before_marking_conflict(enrichm
     enrichment.repository.mark_resolved.side_effect = lambda *args: events.append('conflict')
     enrichment.resolve_conflict(7, field, value, now=10)
     enrichment.choices.choose.assert_called_once_with(7, column, prepared, source='conflict_resolution', now=10)
-    enrichment.repository.mark_resolved.assert_called_once_with(7, field, value, 14, 10)
+    enrichment.repository.mark_resolved.assert_called_once_with(7, field, 14, 10)
     assert events == ['choice', 'conflict']
 
 
-def test_invalid_field_does_not_write_a_choice_or_conflict(enrichment):
+@pytest.mark.parametrize('field', ['unknown', 'energy'])
+def test_invalid_field_does_not_write_a_choice_or_conflict(enrichment, field):
     with pytest.raises(ValueError, match='not a writable enrichment field'):
-        enrichment.resolve_conflict(7, 'unknown', 'value', now=10)
+        enrichment.resolve_conflict(7, field, 'value', now=10)
     assert not enrichment.choices.mock_calls
     assert not enrichment.repository.mock_calls
-    assert not enrichment.resolve_enrichment_candidate(7, 'unknown', 'value', now=10)
+    assert not enrichment.resolve_enrichment_candidate(7, field, 'value', now=10)
 
 
 @pytest.mark.parametrize(('current', 'offered', 'value', 'accepted'), [
@@ -291,10 +292,11 @@ def test_failed_evidence_capture_does_not_select_provider_fields(enrichment):
     enrichment.repository.retire_entry_hints.assert_not_called()
 
 
-def test_legacy_evidence_is_saved_even_when_a_higher_priority_provider_wins(enrichment):
-    enrichment.repository.provider_inputs.return_value.update(layout='legacy', sources={'genre': 'first'})
+def test_evidence_is_saved_even_when_a_higher_priority_provider_wins(enrichment):
+    enrichment.repository.provider_inputs.return_value.update(layout='evidence', sources={'genre': 'first'})
+    enrichment.choices.capture_fields.return_value = (12, {'genre': 21})
     enrichment.apply_provider_fields(7, 'second', {'genre': 'Jazz'}, providers=('first', 'second'), now=10)
-    enrichment.repository.store_finding.assert_called_once_with(7, 2, 'genre', 'second', 'Jazz', 10)
+    enrichment.choices.capture_fields.assert_called_once()
     enrichment.choices.select.assert_not_called()
 
 
@@ -385,7 +387,6 @@ def test_cached_answer_must_match_its_retained_observation(enrichment):
     ('runtime', 'a', 'Rock', None, False),
     ('evidence', 'a', 'Rock', 'Rock', True),
     ('evidence', 'a', 'Jazz', 'Rock', False),
-    ('legacy', 'a', 'Jazz', 'Rock', False),
 ])
 def test_direct_findings_replace_only_current_import_hints(enrichment, layout, source, current, hint, selected):
     hints = [{'entry_id': 8, 'source': 'import', 'value': Value('value', text=hint)}] if hint else []
@@ -393,7 +394,7 @@ def test_direct_findings_replace_only_current_import_hints(enrichment, layout, s
         'fields': {'genre': {'source': source, 'current': current, 'hints': hints}}}
     enrichment.replace_catalog_hints(99, {'genre': 'Blues'})
     assert enrichment.choices.select.called is selected
-    assert enrichment.repository.retire_hints.called is selected
+    assert enrichment.repository.retire_hints.called is (selected and hint is not None)
 
 
 def test_failed_hint_selection_leaves_the_hint_active(enrichment):

@@ -1,6 +1,6 @@
 """Tests for #88: the SESSION term in _apply_mood (src/yt_playlist/rec/scoring.py).
 
-`layers.session_tilt` is monkeypatched at the scoring module's import site (`scoring.layers`),
+`layers.track_tilts` is monkeypatched at the scoring module's import site (`scoring.layers`),
 since scoring imports the `layers` module (not the bare function), and the term must apply
 ALONGSIDE the existing transient collaborative tilt and audio terms, not replace them.
 """
@@ -35,13 +35,13 @@ def test_session_tilt_raises_targeted_candidate_by_alpha_times_cosine(monkeypatc
     idx = {"x": 0, "y": 1}
     tilt = np.array([1.0, 0.0], dtype=np.float64)   # already a unit vector, as session_tilt returns
 
-    monkeypatch.setattr(scoring.layers, "session_tilt", lambda s, now, V, idx: tilt)
+    monkeypatch.setattr(scoring.layers, "track_tilts", lambda s, now, V, idx: (None, tilt))
     session_alpha = rec_params.get_param(store, "session_alpha")
 
     base = np.zeros(2)
     with_tilt = scoring._apply_mood(base.copy(), store, 0.0, V, idx)
 
-    monkeypatch.setattr(scoring.layers, "session_tilt", lambda s, now, V, idx: None)
+    monkeypatch.setattr(scoring.layers, "track_tilts", lambda s, now, V, idx: (None, None))
     without_tilt = scoring._apply_mood(base.copy(), store, 0.0, V, idx)
 
     delta = with_tilt - without_tilt
@@ -59,7 +59,7 @@ def test_session_tilt_raises_targeted_candidate_by_alpha_times_cosine(monkeypatc
 def test_none_session_tilt_is_a_no_op(monkeypatch, store):
     """When session_tilt is None (quiet/gated), _apply_mood's output must equal the pre-#88
     function exactly: only the (still-present) mood and audio terms move the score."""
-    monkeypatch.setattr(scoring.layers, "session_tilt", lambda s, now, V, idx: None)
+    monkeypatch.setattr(scoring.layers, "track_tilts", lambda s, now, V, idx: (None, None))
 
     mood_tilt = np.array([0.0, 1.0], dtype=np.float64)
     monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: mood_tilt)
@@ -89,7 +89,7 @@ def test_session_term_composes_with_mood_tilt(monkeypatch, store):
     mood_tilt = np.array([0.0, 1.0], dtype=np.float64)
     session_tilt = np.array([1.0, 0.0], dtype=np.float64)
     monkeypatch.setattr(scoring.transient, "centroid_tilt", lambda s, now, V, idx: mood_tilt)
-    monkeypatch.setattr(scoring.layers, "session_tilt", lambda s, now, V, idx: session_tilt)
+    monkeypatch.setattr(scoring.layers, "track_tilts", lambda s, now, V, idx: (None, session_tilt))
 
     V = np.array([[3.0, 4.0], [1.0, 0.0]], dtype=np.float64)
     idx = {"x": 0, "y": 1}

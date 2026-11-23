@@ -1,6 +1,5 @@
 <section class="taste-settings-section" id="taste-genre-settings">
-  <p class="section-note">Ask for more or less of your {{ [genres|length, 20]|min }} most-played genres on <strong>Home and Discover</strong>. <strong>1 follows your usual taste</strong>; above 1 favors a genre, and below 1 reduces it. <strong>0 excludes that genre</strong>, so you may miss music you would otherwise enjoy. Use <strong>Reset</strong> to return it to 1 and allow it again. Doubling a value does not guarantee twice as many tracks.</p>
-  <p class="section-note">These values can come from your listening and feedback as well as your own adjustments. Learning can change them again, and they gradually fade toward 1. A genre set to 0 stays excluded between updates. Adjust learning and fade time in <strong>Recent &amp; learning</strong>.</p>
+  <p class="section-note">Steer your most-played genres for this listening session. Above ×1 favors a genre, below ×1 reduces it, and 0 leaves it out for the session. Your learned balance returns when the session ends.</p>
   <div class="card taste-genre-controls">
     {% for g in genres[:20] %}
     <div class="knob">

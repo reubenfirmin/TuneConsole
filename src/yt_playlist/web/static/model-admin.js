@@ -22,14 +22,19 @@
     // Two linear walks trace actual ancestors and descendants, without lighting
     // sibling branches merely because they share a dependency.
     function flow(id) {
-      const related = new Set(id ? [id] : []), edges = new Set();
+      const related = new Set(id ? [id] : []), edges = new Map();
       if (!id) return {related, edges};
       for (const [adjacency, next] of [[incoming, 'source'], [outgoing, 'target']]) {
-        const queue = [id], visited = new Set(queue);
+        const queue = [id], distance = new Map([[id, 0]]);
         for (let cursor = 0; cursor < queue.length; cursor++) for (const index of adjacency.get(queue[cursor])) {
-          edges.add(index);
-          const neighbor = data.edges[index][next]; related.add(neighbor);
-          if (!visited.has(neighbor)) { visited.add(neighbor); queue.push(neighbor); }
+          const edge = data.edges[index];
+          const hop = distance.get(queue[cursor]) + 1;
+          // Show feedback at either endpoint without looping over successive offers.
+          if (edge.feedback && hop !== 1) continue;
+          edges.set(index, Math.min(edges.get(index) ?? Infinity, hop));
+          const neighbor = edge[next]; related.add(neighbor);
+          if (edge.feedback && next === 'source') continue;
+          if (!distance.has(neighbor)) { distance.set(neighbor, hop); queue.push(neighbor); }
         }
       }
       return {related, edges};
@@ -65,7 +70,8 @@
       const term = query.value.trim().toLocaleLowerCase();
       return data.nodes.filter(node => (!area.value || node.group === area.value)
         && (!layer.value || node.layers.includes(layer.value))
-        && (!term || [node.title, node.summary, node.kind, node.group, node.app_area].some(value => value.toLocaleLowerCase().includes(term))));
+        && (!term || [node.title, node.summary, node.ui_location, node.kind, node.group, node.app_area]
+          .some(value => value.toLocaleLowerCase().includes(term))));
     }
     function showResults(force = false) {
       if (!query.value.trim() && !force) { hideResults(); return; }

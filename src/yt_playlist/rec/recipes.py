@@ -6,7 +6,7 @@ from collections import Counter
 from copy import deepcopy
 from yt_playlist.core.version_policy import VersionPolicy
 
-from yt_playlist.rec import arc_energy, journeys, musical_character, rec_params, transient
+from yt_playlist.rec import arc_energy, journeys, musical_character, rec_params, scoring, transient
 from yt_playlist.rec.ordering import _field
 from yt_playlist.rec.taste_analysis import era_distribution, taste_breadth
 
@@ -200,23 +200,27 @@ def roll_recipe(store, model, seed=None, now=None, avoid=None, dists=None, leans
     - the weighting that makes trance likely for one card makes it likely for all of them - and it
     wastes the row: which card you reach for is only signal if the cards differ. Avoidance is a
     preference, not a rule: if it would leave nothing to roll, the facet rolls unrestricted."""
-    rng = random.Random(seed)
+    if dists == ({}, {}) and leans == {}:
+        # An explicit Vibe already picked the tracks. Reuse the weights for
+        # the journey and recipe without reading genre and era steering.
+        weights = store.memoized_read(('vibe-journey-weights', now),
+            lambda: store.rec_model.get_weights(now=now,
+                revert_halflife_d=rec_params.get_param(store, 'weight_revert_halflife_d')))
+        return recipe_values(model, seed, avoid, dists, weights, {}, 0., 1., 1., ordering_only=ordering_only)
     avoid = avoid or {}
-    weights = store.rec_model.get_weights(now=now, revert_halflife_d=rec_params.get_param(store, "weight_revert_halflife_d"))
-    fgain = rec_params.get_param(store, "facet_gain")
-    fmin = rec_params.get_param(store, "facet_mult_min")
-    fmax = rec_params.get_param(store, "facet_mult_max")
-    if leans is None:
-        # Transient facets contain genre/era/artist axes. With a positive lower
-        # bound they cannot change whether a theme consumes its random draw.
-        # Completed Vibe cards retain only journey/DJ, not the discarded theme.
-        leans = (transient.facet_leans(store, now)
-                 if now is not None and (not ordering_only or fmin <= 0) else {})
+    # With a positive lower bound, recent facets cannot change whether a theme
+    # consumes its random draw. Completed Vibe cards retain only journey and DJ.
+    if leans is None and ordering_only and rec_params.get_param(store, "facet_mult_min") > 0:
+        leans = {}
+    preferences = scoring.facet_preferences(store, now, recent=leans)
 
-    if dists is None and ordering_only:
-        dists = store.memoized_read('recipe-facet-keys', store.rec_query.recipe_facet_keys)
-    dists = dists if dists is not None else (taste_breadth(store)['families'], dict(era_distribution(store)))
-    return recipe_values(model, seed, avoid, dists, weights, leans, fgain, fmin, fmax,
+    if dists is None:
+        if ordering_only:
+            dists = store.memoized_read('recipe-facet-keys', store.rec_query.recipe_facet_keys)
+        else:
+            dists = store.memoized_read('recipe-play-distributions',
+                lambda: (taste_breadth(store)['families'], dict(era_distribution(store))))
+    return recipe_values(model, seed, avoid, dists, preferences.weights, preferences.recent, *preferences.parameters,
                          ordering_only=ordering_only)
 
 
@@ -278,10 +282,12 @@ def cluster_recipe(store, keep_keys, seed_labels=(), allow_families=(), journey=
     journey = journey if journey in journeys.JOURNEYS else "energy_arc"
     keys = [k for k in dict.fromkeys(keep_keys) if k]
     dao = store.rec_query
-    genres, decades = dao.track_genres(keys), dao.track_decades(keys)
+    genres, decades = dao.track_genres_and_decades(keys)
     genre_axes = store.genres.feature_axes(genres.values())
-    lastp, plays = dao.track_last_played(keys), store.rec_query.play_counts()
-    meta = store.rec_query.tracks_by_keys(keys)
+    lastp, plays = dao.track_last_played(keys), dao.play_counts()
+    credits = dao.artist_memberships(keys)
+    labels = dao.track_artists(key for key in keys if not credits.get(key))
+    meta = {key: {'artist': labels.get(key, ''), 'artist_ids': credits.get(key)} for key in keys}
     arc = arc_energy.arc_energies(keys, musical_character.load(store, keys))
     return cluster_values(keys, seed_labels, allow_families, journey, genres, decades, genre_axes,
                           lastp, plays, meta, arc)

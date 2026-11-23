@@ -8,29 +8,44 @@
     window.listeningAnalytics = (mode, initialWindow = '90d') => ({
         mode, window: initialWindow, period: 'auto', artist: [], genre: [], format: [], overlay: 'artist', historyMetric: '',
         start: '', end: '', track: [], measure: 'counts', compare: false, sort: 'plays', descending: true,
-        brushStart: null, onPop: null, onVisibility: null,
+        brushStart: null, onPop: null, onVisibility: null, onLeave: null,
         detailPage: 0, periodPage: 0,
         timezoneChoice: '', pendingTimezone: '', timezones: ['UTC',...(Intl.supportedValuesOf?.('timeZone') || [])],
         status: 'loading', busy: false, result: null, discovery: [], marks: [],
         histories: [], formatHistories: [], feedbackBars: [], feedbackHistories: [], active: null, axis: [], scale: 1,
         timeScale: 1, totalMarkup: '', feedbackMarkup: '',
         detail: '', error: '', request: 0, worker: null, timer: null, controller: null, alive: true,
+        retryDelay: 1000,
         init() {
             this.readURL();
             this.onPop = () => { this.readURL(); if(this.visible()) this.update(false); };
             this.onVisibility = () => this.visible() ? this.load(true) : this.suspend();
+            this.onLeave = () => this.suspend();
             window.addEventListener('popstate',this.onPop);
+            window.addEventListener('app-page-leaving',this.onLeave);
             document.addEventListener('visibilitychange',this.onVisibility);
             this.$watch('view', value => value === 'analytics' ? this.load() : this.suspend());
             if (this.visible()) this.load();
         },
         destroy() {
-            this.alive = false; this.controller?.abort(); this.worker?.terminate(); clearTimeout(this.timer);
+            this.alive = false;
+            this.suspend();
             window.removeEventListener('popstate',this.onPop);
+            window.removeEventListener('app-page-leaving',this.onLeave);
             document.removeEventListener('visibilitychange',this.onVisibility);
         },
         visible() { return this.alive && !document.hidden && this.view === 'analytics'; },
-        suspend() { clearTimeout(this.timer); this.controller?.abort(); this.worker?.terminate(); this.worker=null; this.busy=false; ++this.request; },
+        suspend() {
+            clearTimeout(this.timer);
+            this.timer = null;
+            this.controller?.abort();
+            this.controller = null;
+            this.worker?.terminate();
+            this.worker = null;
+            this.busy = false;
+            this.retryDelay = 1000;
+            ++this.request;
+        },
         readURL() {
             const params=new URLSearchParams(location.search);
             for(const key of ['artist','genre','format','track']) this[key]=params.getAll(key).filter(Boolean);
@@ -50,46 +65,76 @@
             }
             return '/charts?'+params;
         },
+        scheduleLoad(delay) {
+            clearTimeout(this.timer);
+            this.timer = setTimeout(() => {
+                this.timer = null;
+                this.load(true);
+            }, delay);
+        },
+        deferRead(transient = true) {
+            if (this.status !== 'error') this.status = this.result ? 'ready' : 'waiting';
+            this.scheduleLoad(transient ? this.retryDelay : 120000);
+            if (transient) this.retryDelay = Math.min(this.retryDelay * 2, 30000);
+        },
         async load(refresh = false) {
-            if (!this.visible() || this.busy || (this.worker && !refresh)) return;
-            clearTimeout(this.timer); this.busy = true; this.error = '';
-            this.controller = new AbortController();
+            if (!this.visible() || this.controller || (this.worker && !refresh)) return;
+            clearTimeout(this.timer);
+            this.timer = null;
+            const controller = this.controller = new AbortController();
             try {
-                const response = await fetch('/charts/listening-data', { signal: this.controller.signal });
+                const response = await fetch('/charts/listening-data', { signal: controller.signal });
+                if (!this.visible() || controller.signal.aborted) return;
                 if (response.status === 202) {
-                    this.status = 'preparing'; this.timer = setTimeout(() => this.load(true), 5000); return;
+                    this.retryDelay = 1000;
+                    this.status = 'preparing';
+                    this.scheduleLoad(5000);
+                    return;
                 }
-                if (!response.ok) throw new Error();
+                if (!response.ok) throw Object.assign(new Error('Listening data read failed'), {status: response.status});
                 const encoded = await response.text();
-                if (!this.alive) return;
+                if (!this.visible() || controller.signal.aborted) return;
                 if (!this.worker) {
-                    this.worker = new Worker(workerURL);
-                    this.worker.onmessage = event => {
-                        if (!this.alive || event.data.id !== this.request) return;
+                    const worker = this.worker = new Worker(workerURL);
+                    worker.onmessage = event => {
+                        if (!this.visible() || event.data.id !== this.request) return;
                         this.busy = false;
+                        if (event.data.unavailable) { this.deferRead(); return; }
                         if (event.data.error) { this.status = 'error'; this.error = event.data.error; return; }
+                        this.retryDelay = 1000;
                         this.result = event.data.result; this.status = 'ready'; this.draw();
                         if(this.pendingTimezone && this.result.timezone !== this.pendingTimezone) {
-                            this.status='preparing'; clearTimeout(this.timer); this.timer=setTimeout(()=>this.load(true),5000);
+                            this.status='preparing'; this.scheduleLoad(5000);
                         } else { this.pendingTimezone=''; this.timezoneChoice=this.result.timezone; }
                     };
-                    this.worker.onerror = () => { this.worker?.terminate(); this.worker = null; this.busy = false; this.status = 'error'; this.error = 'Could not prepare these charts.'; };
+                    worker.onerror = error => {
+                        if (this.worker !== worker || !this.visible()) return;
+                        console.debug('[Listening analytics] chart worker unavailable', error);
+                        worker.terminate(); this.worker = null; this.busy = false;
+                        this.deferRead();
+                    };
                 }
                 this.worker.postMessage({ id: ++this.request, encoded, filters: this.filters() });
-                this.timer = setTimeout(() => this.load(true), 120000);
+                this.busy = true;
+                this.scheduleLoad(120000);
             } catch (error) {
-                if (error.name !== 'AbortError') { this.status = 'error'; this.error = 'Listening data is unavailable. Try again.'; }
-            } finally { this.busy = false; }
+                if (!this.visible() || controller.signal.aborted || error.name === 'AbortError') return;
+                console.debug('[Listening analytics] data read unavailable', error);
+                this.deferRead(!error.status || error.status >= 500 || error.status === 429);
+            } finally {
+                if (this.controller === controller) this.controller = null;
+            }
         },
         update(push = true) {
             this.detail = '';
             this.detailPage=0; this.periodPage=0;
             if (this.window === 'custom' && (!this.start || !this.end || this.end <= this.start)) {
+                ++this.request; this.busy=false;
                 this.error='Choose an end date after the start date. The end date itself is not included.'; this.status='error'; return;
             }
             this.status=this.result ? 'ready' : 'loading'; this.error='';
             if (this.worker) { this.busy = true; this.worker.postMessage({ id: ++this.request, filters: this.filters() }); }
-            else if(this.visible()) this.load();
+            else if(!this.timer) this.load();
             if (push) history.pushState(null,'',this.queryURL(this.filters()));
         },
         clear() { this.artist=[]; this.genre=[]; this.format=[]; this.track=[]; this.update(); },

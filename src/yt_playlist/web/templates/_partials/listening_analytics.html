@@ -1,5 +1,5 @@
 <div class="listening-portrait" x-data="listeningAnalytics('{{ analytics_mode }}', '{{ window if analytics_mode == 'charts' else '90d' }}')"
-     :aria-busy="busy" data-listening-analytics>
+     :aria-busy="busy || !!controller" data-listening-analytics>
   <header class="lp-heading">
     <div><h2 class="section section-flush">Listening analytics</h2>
       <p class="section-note">Choose dates and filters to compare your listening.</p></div>
@@ -32,7 +32,7 @@
     <button class="btn-ghost" type="button" x-show="artist.length || genre.length || format.length || track.length" @click="clear()">Clear filters</button>
     {% endif %}
   </div>
-  <div class="lp-state" role="status" x-show="status !== 'ready'" x-cloak>
+  <div class="lp-state" role="status" x-show="['loading','preparing','error'].includes(status)" x-cloak>
     <p x-text="status === 'error' ? error : status === 'preparing' ? 'Preparing listening charts…' : 'Loading listening history…'"></p>
     <button type="button" class="btn-ghost" x-show="status === 'error'" @click="load(true)">Try again</button>
   </div>

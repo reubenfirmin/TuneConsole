@@ -1,4 +1,6 @@
 """Shared song actions persist to the right account and mirror successful writes locally."""
+import sqlite3
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -27,9 +29,9 @@ SONG = {"video_id": "new-song", "title": "A song's <title>", "artist": "Artist &
 
 
 def seed_song_actions(store):
-    main_id = store.accounts.upsert_account("Main", "main-cred", None, True)
-    other_id = store.accounts.upsert_account("Other account", "other-cred", None, False)
-    offline_id = store.accounts.upsert_account("Offline", "offline-cred", None, False)
+    main_id = store.accounts.upsert_account("Main", None, True)
+    other_id = store.accounts.upsert_account("Other account", None, False)
+    offline_id = store.accounts.upsert_account("Offline", None, False)
     source = store.playlists.upsert_playlist(main_id, "SOURCE", "Source mix", 1, "h", 1)
     destination = store.playlists.upsert_playlist(other_id, "DEST", "Evening mix", 0, "", 1)
     system = store.playlists.upsert_playlist(main_id, "LM", "Liked Music", 0, "", 1)
@@ -303,7 +305,17 @@ def test_metadata_saves_all_fields_and_restores_originals(songs, monkeypatch):
             'Fixed title', 'Fixed artist', 'Art Pop', '1998')
     update.assert_called_once_with(video_ids=['owned-song'])
     body.update(title='Owned Song', artist='Artist & Friends', genre='', year='')
-    assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+
+    def authorizer(action, name, *_):
+        if action == sqlite3.SQLITE_READ and name in {'sqlite_schema', 'sqlite_master'}:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
+    store.conn.set_authorizer(authorizer)
+    try:
+        assert songs['http'].post('/songs/metadata', json=body).status_code == 200
+    finally:
+        store.conn.set_authorizer(None)
     track = store.charts.playlist_tracks_detail(songs['source'])[0]
     assert track['title'] == 'Owned Song' and track['artist'] == 'Artist & Friends'
     assert not track['genre'] and not track['year']
@@ -334,14 +346,15 @@ def test_metadata_partial_save_preserves_background_enrichment(songs):
 
 def test_editing_uncached_song_does_not_acquire_library_membership(songs):
     http, store = songs['http'], songs['store']
-    before = store.conn.execute('SELECT * FROM library_memberships').fetchall()
+    memberships = 'SELECT id,library_origin,library_added_at FROM track_sources WHERE library_origin IS NOT NULL'
+    before = store.conn.execute(memberships).fetchall()
     assert http.get('/songs/metadata', params={'video_id': SONG['video_id']}).json()['metadata'] is None
     body = {'song': SONG, 'title': 'Corrected title', 'artist': SONG['artist'], 'genre': 'Jazz', 'year': '2020'}
     assert http.post('/songs/metadata', json=body).status_code == 200
     track = store.tracks.metadata_for_video(SONG['video_id'])
     assert track['title'] == 'Corrected title' and track['orig_title'] == SONG['title']
     assert track['genre'] == 'Jazz' and track['year'] == '2020'
-    assert store.conn.execute('SELECT * FROM library_memberships').fetchall() == before
+    assert store.conn.execute(memberships).fetchall() == before
     assert not songs['main'].added and not songs['other'].added
 
 
@@ -382,7 +395,7 @@ def test_metadata_write_failure_rolls_back_fields_and_retry_completes(songs, mon
         # metadata repository's write unit or acquire library membership.
         assert failed['title'] == 'Original' and failed['artist'] == 'Original artist'
         assert not failed['genre'] and not failed['year']
-        assert not songs['store'].conn.execute('SELECT 1 FROM library_memberships WHERE entry_id=?',
+        assert not songs['store'].conn.execute('SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL AND id=?',
                                                (failed['track_id'],)).fetchone()
     monkeypatch.setattr(repository, 'store', store_choice)
     assert songs['http'].post('/songs/metadata', json=body).status_code == 200

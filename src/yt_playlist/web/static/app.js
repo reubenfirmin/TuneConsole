@@ -2,12 +2,13 @@
 function syncTopbarH() {
   const tb = document.querySelector('.topbar');
   if (tb) {
-    const rail = getComputedStyle(tb).position === 'fixed' && tb.offsetHeight >= window.innerHeight;
+    const rail = getComputedStyle(tb).position === 'fixed';
     document.documentElement.style.setProperty('--topbar-h', (rail ? 0 : tb.offsetHeight) + 'px');
   }
 }
 window.addEventListener('DOMContentLoaded', syncTopbarH);
 window.addEventListener('resize', syncTopbarH);
+window.addEventListener('app-page-changed', syncTopbarH);
 
 // Process explicit validation outcomes while retaining the failed request status
 // so optimistic controls roll back. HX-Reswap: none preserves the primary target

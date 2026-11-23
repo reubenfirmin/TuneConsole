@@ -10,7 +10,7 @@ import time
 from yt_playlist.core import group_evidence
 from yt_playlist.core.prepared_references import FIELDS, PREPARED, context
 from yt_playlist.core.activity import WorkBudgetExceeded
-from yt_playlist.core.group_admission import source, enabled, admission, writer
+from yt_playlist.core.group_admission import source, admission, writer
 from yt_playlist.rec import recommendation_roots
 from yt_playlist.controllers.pending_roots import PendingRoots
 from yt_playlist.core import group_documents
@@ -29,11 +29,9 @@ def retain(store, kind, identity, captured, at, *, strict=None, ledger=None):
         # Listening evidence owns displayed descriptors or its own frozen Album
         # and Radio inputs. It cannot extend the life of musical group history.
         return False
-    if not enabled(store):
-        return False
     value = context(store, captured, ledger=ledger)
     generation, versions = group_evidence.references(value)
-    recommendations = recommendation_roots.references(value) if recommendation_roots.enabled(store) else []
+    recommendations = recommendation_roots.references(value)
     if generation is None and not versions and not recommendations:
         return False
     return source(store).group_evidence.retain(kind, identity, value, at,
@@ -41,8 +39,7 @@ def retain(store, kind, identity, captured, at, *, strict=None, ledger=None):
 
 
 def release(store, kind, identity):
-    if enabled(store):
-        source(store).group_evidence.release(kind, identity)
+    source(store).group_evidence.release(kind, identity)
 
 
 def pending(store, captured, at):
@@ -73,9 +70,6 @@ def pending_head(store, surfaces, at):
                 return row['id'], None
         return None, None
     store = source(store)
-    if not recommendation_roots.enabled(store):
-        return None, None
-
     def resolve():
         for surface in surfaces:
             row = store.recommendations.head(surface)
@@ -99,8 +93,6 @@ def pending_head(store, surfaces, at):
 
 
 def _pending(store, resolve, at, *, sql_only=False):
-    if not enabled(store):
-        return {}, None
     store = source(store)
     return pending_roots(store).capture(resolve, at, sql_only=sql_only)
 
@@ -118,8 +110,6 @@ def reap_pending(store):
 
 def retired(store, offers, checkpoints):
     """The ledger calls this only after its protected records were removed."""
-    if not enabled(store):
-        return
     from yt_playlist.repos.group_publication import BATCH_ROWS
     for kind, identities in (('offer', offers), ('checkpoint', checkpoints)):
         for offset in range(0, len(identities), BATCH_ROWS):
@@ -131,14 +121,12 @@ def maintain_retention(store):
     """Give each retirement domain its own bounded, resumable turn.
 
     This work does not pause activity recording or hold recovery intent open.
-    A busy group traversal cannot consume the recommendation/file collectors'
-    budgets. SQL retirement fences and completed unlinks survive restarts.
+    Each collector has its own budget. Retirement and completed unlinks survive
+    restarts.
     """
     store = source(store)
     result = dict(pending=False, recommendation_rows=0, generations=0, pools=0,
                   output_files=0, output_bytes=0, checked_files=0, group_steps=0)
-    if not enabled(store):
-        return result
     deadline = 0
 
     def exhausted():
@@ -172,9 +160,10 @@ def maintain_retention(store):
             if exhausted():
                 return
 
-    def group_walk():
+    def group_history():
         while store.taste_groups.retire_history():
             result['group_steps'] += 1
+            result['pending'] = True
             if exhausted():
                 return
 
@@ -199,12 +188,9 @@ def maintain_retention(store):
             if exhausted():
                 return
 
-    # Opening a private reader includes schema/repository admission. Leave time
-    # for that fixed cost as well as one bounded durable traversal prefix.
-    turns = [(group_cleanup, .25), (group_walk, .25), (lambda: files(groups=True), .1)]
-    if recommendation_roots.enabled(store):
-        turns = [(lambda: sql_turn(store.recommendations.cleanup_generations), .1),
-                 (lambda: sql_turn(store.recommendations.cleanup_pools), .1), (files, .25), *turns]
+    turns = [(lambda: sql_turn(store.recommendations.cleanup_generations), .1),
+             (lambda: sql_turn(store.recommendations.cleanup_pools), .1), (files, .25),
+             (group_cleanup, .25), (group_history, .25), (lambda: files(groups=True), .1)]
     with store._lock:
         if not hasattr(store, '_retention_lock'):
             store._retention_lock = threading.Lock()

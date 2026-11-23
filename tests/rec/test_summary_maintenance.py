@@ -64,7 +64,7 @@ def tick(worker):
 
 
 def seed(store):
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', None, True)
     seed_catalog_track(store, 'song', 'Song', 'Artist', video_id='video', genre='Techno')
     for month in ('2026-08', '2026-09', '2026-10'):
         store.history.record_history_plays(iid, timestamp(month), ['song'], source_timezone='UTC')
@@ -94,10 +94,11 @@ def test_cold_jobs_coalesce_with_learning_and_publish_recap_route_and_cleanup(
     worker.trigger()
     worker.projections.poll()
     worker.projections.poll()
-    assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
+    assert worker.jobs.has('trends') and worker.jobs.has('cleanup') and worker.jobs.has('library_taste')
     worker._run_pending()
     assert rebuilds == [True]
     assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-09'
+    assert store.rec_proposals.library_taste_summary()['genre_plays'] == {'Techno': 4}
     card = next(c for c in actions.take_action(store, now[0], {}) if c.kind == 'cleanup')
     assert card.badge == '1'
     # Exercise the published output through its actual route and template.
@@ -129,13 +130,15 @@ def test_source_changes_refresh_only_relevant_jobs_and_month_rollover(store, mon
     assert not worker.busy  # enrichment scheduling consumes no summary input
     store.player_events.record_player_event(iid, 'progress', 'video', 30, 200, None, '{}', now[0])
     worker.projections.poll()
-    assert not worker.busy  # telemetry must not launch library-wide scans
+    assert not worker.busy  # playback progress must not launch library-wide scans
     store.history.record_history_plays(iid, now[0] + 86400, ['song'], source_timezone='UTC')
     worker.projections.poll()
     assert worker.jobs.has('trends') and not worker.jobs.has('cleanup')
+    assert worker.jobs.has('library_taste')
     worker._run_pending()
     assert worker.projections.completed['trends'] != before['trends']
     assert worker.projections.completed['cleanup'] == before['cleanup']
+    assert store.rec_proposals.library_taste_summary()['genre_plays'] == {'Techno': 5}
     worker.projections.retry_at.clear()
     store.playlists.upsert_playlist(iid, 'new-empty', 'Synced empty playlist', 0, '', now[0])
     tick(worker)
@@ -146,6 +149,45 @@ def test_source_changes_refresh_only_relevant_jobs_and_month_rollover(store, mon
     assert worker.jobs.has('trends') and not worker.jobs.has('cleanup')
     worker._run_pending()
     assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-10'
+
+
+def test_recap_skips_unchanged_playlist_sync_and_refreshes_for_changed_membership(summary_store, monkeypatch):
+    store = summary_store
+    account = seed(store)
+    first = store.tracks.track_ids_for_videos(['video'])['video']
+    second = seed_catalog_track(store, 'other', 'Other song', 'Other artist', video_id='other', genre='Techno')
+    now = timestamp('2026-10')
+    playlist = store.playlists.upsert_playlist(account, 'playlist', 'Playlist', 1, 'original', now - 1)
+    store.playlists.set_playlist_tracks(playlist, [first])
+    worker = worker_for(store, monkeypatch, [now])
+    worker.projections.poll(kinds=('trends',))
+    worker._run_pending()
+    before = store.rec_proposals.get_proposals('trend_rollups')
+    assert before['story']['month'] == '2026-09'
+
+    def refresh_tracks(tracks, at):
+        revision = store.playlists.playlist_revision(account, 'playlist')
+        assert store.playlists.publish_playlist_snapshot(
+            account, 'playlist', 'Playlist', tracks, at, expected_revision=revision) == playlist
+        assert store.playlists.playlist_revision(account, 'playlist') > revision
+
+    worker.projections.retry_at.clear()
+    store.playlists.upsert_playlist(account, 'playlist', 'Playlist', 1, 'original', now + 1)
+    worker.projections.poll(kinds=('trends',))
+    assert not worker.jobs.has('trends')
+    refresh_tracks([first], now + 2)
+    worker.projections.poll(kinds=('trends',))
+    assert not worker.jobs.has('trends')
+    assert store.rec_proposals.get_proposals('trend_rollups') == before
+    assert store.playlists.get_playlist_track_ids(playlist) == [first]
+
+    refresh_tracks([second], now + 3)
+    worker.projections.poll(kinds=('trends',))
+    assert worker.jobs.has('trends')
+    worker._run_pending()
+    assert store.playlists.get_playlist_track_ids(playlist) == [second]
+    assert worker.projections.failures['trends'] == 0
+    assert store.rec_proposals.get_proposals('trend_rollups')['story']['month'] == '2026-09'
 
 
 @pytest.mark.parametrize('kind', ['trends', 'cleanup'])
@@ -195,7 +237,8 @@ def test_restart_and_external_import_are_not_lost_and_shutdown_stops_admission(s
         worker = worker_for(store, monkeypatch, now)
         tick(worker)
         with sqlite3.connect(path) as writer:
-            writer.execute("INSERT INTO settings VALUES ('takeout_imported_at','123')")
+            writer.execute("INSERT INTO settings(key,value) VALUES ('takeout_imported_at','123') "
+                           "ON CONFLICT(key) DO UPDATE SET value=excluded.value")
         worker.projections.retry_at.clear()
         worker.projections.poll()
         assert worker.jobs.has('trends') and worker.jobs.has('cleanup')
@@ -265,14 +308,16 @@ def test_poll_shares_one_scoped_capture_despite_unrelated_key_churn(store, monke
     assert len(original()) > len(baseline)
     worker.projections.poll()  # Coalesced jobs are still active on this idle tick.
     assert captures == [baseline]
-    expected = {'trends', 'cleanup'} | ({'analytics'} if analytics_enabled else set())
+    expected = {'trends', 'cleanup', 'library_taste'} | ({'analytics'} if analytics_enabled else set())
     assert worker.projections.active == expected
 
 
-def test_local_import_setting_invalidates_only_trends_inputs(store):
+def test_local_import_receipt_invalidates_only_trends_inputs(store):
     now = timestamp('2026-10')
     before = {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES}
     store.settings.set_setting('unrelated', 'new')
+    store.sync.begin_attempt(now - 1)
+    store.settings.set_setting('last_plays_sync_at', '123')
     assert {kind: maintenance.inputs(store, kind, now) for kind in maintenance.SURFACES} == before
     store.settings.set_setting('takeout_imported_at', '123')
     assert maintenance.inputs(store, 'trends', now) != before['trends']

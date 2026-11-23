@@ -90,21 +90,19 @@ def test_removing_genre_does_not_fall_back_to_old_broad_alias():
     assert genres.build_canon(["Garage", "Garage Rock"]) == genres.build_canon(["Garage Rock", "Garage"])
 
 
-def test_full_musicbrainz_snapshot_and_sourced_database_joins(store):
+def test_full_musicbrainz_snapshot_and_sourced_aliases(store):
     genres.configure(store)
     raw = json.loads((catalog._DATA / "musicbrainz_genres.json").read_text())
     assert len(raw["genres"]) == raw["genre_count"] == 2216
     for row in raw["genres"]:
         assert genres.match_tag(row["name"]), row["name"]
     rows = store.conn.execute(
-        "SELECT c.name,e.external_id,c.family_key,a.source FROM genre_catalog c "
-        "JOIN genre_external_id e ON e.genre_key=c.key "
+        "SELECT c.name,c.family_key,a.source FROM genre_catalog c "
         "JOIN genre_alias a ON a.genre_key=c.key WHERE a.label_key='drum and bass'").fetchall()
     assert len(rows) == 1
     assert rows[0]["name"] == "Drum & Bass"
     assert rows[0]["family_key"] == "dnb"
     assert rows[0]["source"] == "musicbrainz"
-    assert store.conn.execute("SELECT count(*) FROM genre_external_id").fetchone()[0] == 2216
 
 
 def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases(store):
@@ -119,7 +117,7 @@ def test_legacy_upgrade_preserves_additions_removals_and_splits_disabled_aliases
     assert "Electro" not in names and "Electronica" not in names
     assert "Phonk" in names and "Whack-a-doodle" in names
     assert names.count("Hip Hop") == 1 and "hip-hop" not in names
-    assert store.conn.execute("SELECT genre FROM tracks WHERE id=?", (track,)).fetchone()[0] == "Hip Hop"
+    assert store.conn.execute("SELECT genre FROM catalog_tracks WHERE id=?", (track,)).fetchone()[0] == "Hip Hop"
     captured = store.conn.execute("SELECT text_value FROM metadata_observations WHERE entry_id=? "
                                   "AND field='genre' AND origin='user'", (track,)).fetchone()
     assert captured[0] == 'hip-hop'

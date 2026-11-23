@@ -27,7 +27,7 @@ def _pristine_current_schema():
 
 @pytest.mark.parametrize('source', ['wheelhouse', 'catalog', 'comfort', 'library_pool', 'road_trip'])
 def test_generated_membership_preserves_candidates_and_user_feedback(store, source):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     keys = [identity_key(f'Song {i}', f'Artist {i}') for i in range(12)]
     # Eligibility consumes completed catalog subjects, independently of metadata
     # ingestion. Keep all twelve recordings and the original four listening days.

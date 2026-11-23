@@ -32,12 +32,12 @@ def similar_catalog_template(_pristine_current_schema):
 @pytest.fixture
 def similar_app(request, store, similar_catalog_template, monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import album, app_update, audio_preview, home, playlists, songs, suggest
+    from yt_playlist.web.routes import album, app_update, audio_vibes, home, playlists, songs, suggest
 
     # Keep the real pages, menus and similarity endpoint; unrelated application
     # routers have full-app owners such as the TV navigation journey.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (album, app_update, audio_preview, home, playlists, songs, suggest)])
+        for module in (album, app_update, audio_vibes, home, playlists, songs, suggest)])
     similar_catalog_template.restore(store)
     return request.getfixturevalue('live_app')
 
@@ -52,7 +52,7 @@ def similar_dialog(similar_app, store, page, request, similar_catalog_template):
     store.playlists.set_playlist_tracks(playlist.id, similar_catalog_template.result)
     if not artwork:
         with store.conn:
-            store.conn.execute('UPDATE youtube_items SET thumbnail=NULL')
+            store.conn.execute('UPDATE track_sources SET thumbnail=NULL')
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     page.set_viewport_size({"width": width, "height": 600})

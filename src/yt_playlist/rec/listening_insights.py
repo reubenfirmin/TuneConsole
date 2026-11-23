@@ -84,8 +84,8 @@ def candidates(data):
             'url': '/charts?' + urlencode(query, doseq=True), 'timezone': data['timezone'],
             'period_label': f'{date.fromisoformat(since):%b %d} – {date.fromisoformat(shifted(until, -1)):%b %d, %Y}'})
 
-    # One artist can anchor a small library. Listening days, never repeated
-    # telemetry samples, establish independent occasions.
+    # One artist can anchor a small library. Distinct listening days establish
+    # independent occasions even when a day has several playback events.
     for artist_id, history in artists.items():
         recent = [r for r in history if r['day'] >= shifted(today, -13) and r['plays']]
         if not recent:

@@ -1,8 +1,18 @@
 """Pure descriptive episode outcomes over immutable choice evidence."""
 import math
 
+from yt_playlist.rec import choice_attribution
 
-def album_track_days(offers, responses, attribution_seconds, *, album_ids=None):
+
+def album_track_days(offers, responses, attribution_seconds, *, album_ids=None, timezone=None, calendars=None):
+    decisions = choice_attribution.actions(offers, responses, attribution_seconds)
+    calendars = calendars or {}
+    choice_days = {d['choice']['id']: choice_attribution.calendar_day(
+        d['choice']['at'], choice_attribution.provenance(d), timezone, calendars) for d in decisions}
+    return attributed_album_track_days(decisions, choice_days, album_ids=album_ids)
+
+
+def attributed_album_track_days(decisions, choice_days, *, album_ids=None):
     """Confirmed tracks on distinct deliberate album-choice days.
 
     Later tracks in the chosen queue share its choice day. Continuation cannot
@@ -11,38 +21,34 @@ def album_track_days(offers, responses, attribution_seconds, *, album_ids=None):
     Optional verified identities combine dates before counting, without changing
     the original option IDs used to match each choice and its confirmed start.
     """
-    selected, days = {}, {}
-    for event in sorted(responses, key=lambda row: (row['at'], row['kind'] != 'choice', row['id'])):
-        offer = offers.get(event['opportunity_id'])
-        if not offer or offer['format'] != 'albums':
+    days, episodes = {}, set()
+    for decision in decisions:
+        if decision['offer']['format'] != 'albums':
             continue
-        pair = (offer['id'], event['option_id'])
-        if event['kind'] == 'choice':
-            selected[pair] = event
-        elif event['kind'] == 'start':
-            choice = selected.get(pair)
-            if not choice or not 0 <= event['at'] - choice['at'] <= attribution_seconds:
+        choice, option = decision['choice'], decision['option']
+        tracks = (choice.get('details') or {}).get('tracks')
+        tracks = tracks if tracks is not None else option.get('tracks', [])
+        for event in decision['outcomes']:
+            if event['kind'] != 'start':
                 continue
-            option = next((row for row in offer['options'] if str(row['id']) == event['option_id']), None)
-            if not option:
-                continue
-            tracks = (choice.get('details') or {}).get('tracks')
-            tracks = tracks if tracks is not None else option.get('tracks', [])
             video = (event.get('details') or {}).get('video_id')
             keys = {track['key'] for track in tracks
                     if video and track.get('video_id') == video and track.get('key')}
             if len(keys) == 1:
                 key = keys.pop()
                 browse = (album_ids or {}).get(event['option_id'], event['option_id'])
-                days.setdefault(browse, {}).setdefault(key, set()).add(int(choice['at'] // 86400))
+                episode = browse, key, decision['offer'].get('episode_id', decision['offer']['id'])
+                if episode not in episodes:
+                    episodes.add(episode)
+                    days.setdefault(browse, {}).setdefault(key, set()).add(choice_days[choice['id']])
     return {browse: {key: len(values) for key, values in tracks.items()} for browse, tracks in days.items()}
 
 
-def summarize(offers, responses, formats):
+def summarize(decisions, formats, choice_days):
     """Episode/day counts and finite-record coverage, never one trial per generated track.
 
     A return requires a fresh deliberate choice after a previously confirmed start on an earlier
-    UTC day. Continued autoplay alone cannot produce a return. Completion describes the observed
+    local listening day. Continued autoplay alone cannot produce a return. Completion describes the observed
     playhead under the existing exit rule; it does not claim attentive listening or enjoyment.
     """
     from yt_playlist.library.listen_derive import classify_exit
@@ -50,44 +56,34 @@ def summarize(offers, responses, formats):
                      'early_exit_episodes': 0, 'unknown_ending_episodes': 0,
                      'known_coverage_episodes': 0, 'mean_track_coverage': None, 'return_days': 0}
             for format in formats}
-    choices, started, previous, returns, episodes = {}, set(), {}, set(), {}
-    for event in responses:
-        offer = offers.get(event['opportunity_id'])
-        if not offer:
+    previous, visited, returns, episodes = {}, set(), set(), {}
+    for decision in decisions:
+        offer, option, choice = (decision[key] for key in ('offer', 'option', 'choice'))
+        playback = [row for row in decision['outcomes'] if row['kind'] in {'start', 'experience'}]
+        if not playback:
             continue
-        pair = (offer['id'], event['option_id'])
-        option = next((row for row in offer['options'] if str(row['id']) == event['option_id']), None)
-        if not option:
-            continue
-        if event['kind'] == 'choice':
-            choices[pair] = event
-        if event['kind'] not in {'start', 'experience'}:
-            continue
-        unit = (offer['format'], offer['episode_id'], int(event['at'] // 86400))
+        day = choice_days[choice['id']]
+        unit = offer['format'], offer['episode_id']
         state = episodes.setdefault(unit, {'started': False, 'videos': set(), 'expected': set(),
                                           'exits': set(), 'completion': False, 'early': False})
-        details = event.get('details') or {}
-        if event['kind'] == 'start':
+        if any(row['kind'] == 'start' for row in playback):
             state['started'] = True
-            deliberate = choices.get(pair)
-            if deliberate and deliberate['id'] not in started:
-                started.add(deliberate['id'])
-                identity = (offer['format'], str(option['id']))
-                day = int(deliberate['at'] // 86400)
-                if identity in previous and previous[identity] < day:
-                    returns.add((*identity, day))
-                previous[identity] = day
-        video = details.get('video_id')
-        if video and (event['kind'] == 'start' or details.get('kind') is None):
-            state['videos'].add(video)
-        selected = choices.get(pair)
-        tracks = ((selected.get('details') or {}).get('tracks') if selected else None)
-        tracks = tracks if tracks is not None else option.get('tracks', [])
-        if offer['format'] == 'mixes':
-            # The menu describes genres, not the playback owner's track list.
-            tracks = []
-        state['expected'].update(track['video_id'] for track in tracks if track.get('video_id'))
-        if event['kind'] == 'experience' and details.get('kind') in {'track_exit', 'ended', 'bye'}:
+            identity = (offer['format'], str(option['id']))
+            visit = (*identity, offer['episode_id'])
+            if visit not in visited and previous.get(identity, day) < day:
+                returns.add((*identity, day))
+            previous.setdefault(identity, day)
+            visited.add(visit)
+        if offer['format'] != 'mixes':
+            tracks = (choice.get('details') or {}).get('tracks', option.get('tracks', []))
+            state['expected'].update(track['video_id'] for track in tracks if track.get('video_id'))
+        for event in playback:
+            details = event.get('details') or {}
+            video = details.get('video_id')
+            if video and (event['kind'] == 'start' or details.get('kind') is None):
+                state['videos'].add(video)
+            if event['kind'] != 'experience' or details.get('kind') not in {'track_exit', 'ended', 'bye'}:
+                continue
             position, duration = details.get('position'), details.get('duration')
             if not all(isinstance(value, (int, float)) and math.isfinite(value)
                        for value in (position, duration)) or position < 0:
@@ -100,7 +96,7 @@ def summarize(offers, responses, formats):
             # Closing a tab is not an observed rejection or abandonment.
             state['early'] |= details['kind'] == 'track_exit' and classification == 'skip'
     coverage = {format: [] for format in rows}
-    for (format, episode, day), state in episodes.items():
+    for (format, _episode), state in episodes.items():
         row = rows[format]
         row['observed_exit_episodes'] += bool(state['exits'])
         row['completion_episodes'] += state['completion']

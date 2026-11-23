@@ -1,6 +1,7 @@
 """Format-four masked-metadata mixed model and source/support prediction.
 
 The metadata covariate is an input, never a response or a second recording.
+Partial audio increases residual variance in inverse proportion to coverage.
 Provider support predicts residual variance with a learned slope of either
 sign. Equal-tail intervals integrate the empirical source/support population;
 variance-component uncertainty and unidentified classifier bias remain explicit.
@@ -10,6 +11,7 @@ import json
 import math
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_stopping
+from yt_playlist.core.audio_vibe_contract import EXCERPT_SUPPORT_POLICY
 from yt_playlist.core.numerics import single_threaded
 from . import vibe_joint_common as joint
 
@@ -79,14 +81,16 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=joint.MEMORY_BYTES):
         kind_ids = np.asarray([-1 if kind == 'baseline' else groups.index(kind) for kind in kinds])
         response = np.asarray([row['score'] - .5 for row in rows])
         provider = families == offset
-        support = np.asarray([math.log(row['support']) for row in rows])
-        center = float(support[provider].mean()) if np.any(provider) else 0.
-        support = np.where(provider, support - center, 0.)
+        support = np.asarray([row['support'] for row in rows])
+        audio_weight = np.where(provider, 1., support)
+        log_support = np.log(support)
+        center = float(log_support[provider].mean()) if np.any(provider) else 0.
+        provider_support = np.where(provider, log_support - center, 0.)
         noise = np.asarray([row.get('noise', 0.) for row in rows])
 
         def residuals(variances, slope):
             probability = np.clip((variances[families] - 1e-5) / (.25 - 1e-5), 1e-9, 1 - 1e-9)
-            return 1e-5 + (.25 - 1e-5) * expit(logit(probability) + slope * support)
+            return (1e-5 + (.25 - 1e-5) * expit(logit(probability) + slope * provider_support)) / audio_weight
 
         def posterior(variances, slope):
             check_stopping()
@@ -141,6 +145,7 @@ def fit(rows, vibe, *, fixed=None, memory_bytes=joint.MEMORY_BYTES):
             'accounted_memory_bytes': accounted, 'effects': len(features), 'factor_nonzeros': fill,
             'residual_by_family': dict(zip(names[offset:], map(float, variances[offset:]))),
             'support_slope': slope, 'provider_log_support_center': center,
+            'audio_support_weighting': EXCERPT_SUPPORT_POLICY,
             'uncertainty': 'conditional-on-fitted-variance-components', 'noise_identified': False,
             'residual': 'between-track-plus-unidentified-measurement-noise',
             'bias': 'shared-classifier-bias-not-identified-by-measurement-holdout'}}
@@ -193,6 +198,8 @@ def predict(posterior, artists, genre, *, album, metadata_prior):
             probability = np.clip((residual - 1e-5) / (.25 - 1e-5), 1e-9, 1 - 1e-9)
             centered = math.log(support) - diagnostics['provider_log_support_center'] if family == 'residual_provider' else 0.
             residual = 1e-5 + (.25 - 1e-5) * expit(logit(probability) + diagnostics['support_slope'] * centered)
+            if family == 'residual_audio' and diagnostics.get('audio_support_weighting') == EXCERPT_SUPPORT_POLICY:
+                residual /= support
             means.append(float(.5 + conditional @ posterior.mean))
             variances.append(max(0., float(absent + conditional @ posterior.factor.solve(conditional))) + residual + noise)
             weight = count / len(posterior.rows)

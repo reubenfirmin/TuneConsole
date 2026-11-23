@@ -1,7 +1,11 @@
-import numpy as np
+from dataclasses import replace
+
 import pytest
 from tests.derived_rating_support import seed_dislike
-from yt_playlist.rec import embedding_vectors as embed, home_vibe, surfaces, mode_surfaces as ms
+from tests.group_support import publish, publish_keyed, recordings
+from yt_playlist.rec import group_discovery, home_vibe, surfaces, mode_surfaces as ms
+from yt_playlist.rec.radio_candidates import RadioCandidates
+from yt_playlist.rec.radio_tuning import DEFAULTS
 from yt_playlist.rec.vibe_pool_contract import GENRE_RESERVE, POOL_LIMIT
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
@@ -25,9 +29,9 @@ def _pristine_current_schema():
         yield schema
 
 
-def seed_items(store, keys):
+def seed_items(store, keys, genre='House'):
     seed_publication_subjects(store, [dict(key=key, title='T' + key, artist='A',
-        video_id='v' + key, genre='House', year='2000') for key in keys])
+        video_id='v' + key, genre=genre, year='2000') for key in keys])
 
 
 class _Item:
@@ -37,33 +41,23 @@ class _Item:
         self.genre = "house"; self._score = score
 
 
-def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
-        {"mode_id": 2, "label": "b", "families": [["techno", 1]],
-         "centroid": np.array([0.0, 1.0], dtype=np.float32), "size": 50, "rep_keys": []},
-    ], retired_ids=[], now=1.0)
-    keys = ["k1", "k2"]
-    seed_items(store, keys)
-    V = np.array([[1.0, 0.05], [0.05, 1.0]], dtype=np.float32)
-    V = V / np.linalg.norm(V, axis=1, keepdims=True)
-    idx = {"k1": 0, "k2": 1}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
+def test_prepare_buckets_by_published_membership(monkeypatch, store):
+    seed_items(store, ['k1'])
+    seed_items(store, ['k2'], 'Techno')
+    membership = publish_keyed(store, [('House', ['k1'], .1), ('Techno', ['k2'], .9)])
     pool = [_Item("k1", 0.9), _Item("k2", 0.8)]
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0, _p=pool: list(_p))
+        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0, _p=pool, **kw: list(_p))
     fresh = surfaces.ForYouItem("New song", "New artist", "", "new", None, 0, "", key="new|artist",
                                 genre="house", year=2026)
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [fresh])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None, **kw: [fresh])
     store.discovery.upsert_discovered_track(fresh.key, fresh.video_id, fresh.title, fresh.artist,
                                             '', None, 'House', '2026', None, 1)
     publish_bundles(store, {}, 1, fresh=[{'key': 'stale|artist', 'genre': 'Techno'}])
 
     payload = ms.prepare_bundles(store, now=10.0)
-    assert [d["key"] for d in payload["1"]["wheelhouse"]] == ["k1"]
-    assert [d["key"] for d in payload["2"]["wheelhouse"]] == ["k2"]
+    assert [d["key"] for d in payload[membership['k1']]["wheelhouse"]] == ["k1"]
+    assert [d["key"] for d in payload[membership['k2']]["wheelhouse"]] == ["k2"]
     assert payload["all"]["fresh"][0]["year"] == 2026
     assert store.recommendations.head('home') is not None
     refreshed = store.recommendations.candidate_page('fresh', 'all', 'fresh')['tracks']
@@ -73,28 +67,95 @@ def test_prepare_buckets_by_nearest_mode(monkeypatch, store):
     assert store.rec_ledger.policy_configuration(refreshed[0]['pool_policy']) is not None
 
 
+def test_worker_publication_keeps_discoveries_in_grouped_on_air_rotation(store, monkeypatch):
+    from tests.radio_session_support import play, radio_controller
+    from yt_playlist.library import generated_acquisition
+    from yt_playlist.web import radio_session
+
+    now = 1_700_000_000
+    tracks = [dict(key=key, title=key, artist=f'Artist {key}', video_id=f'v-{key}',
+                   genre=genre, year='2024', duration_s=200) for key, genre in (
+                       ('seed', 'House'), ('owned', 'House'), ('owned-techno', 'Techno'),
+                       ('blocked', 'House'), ('new-one', 'House'), ('new-two', 'House'),
+                       ('new-techno', 'Techno'))]
+    seed_publication_subjects(store, tracks, discoveries={'blocked', 'new-one', 'new-two', 'new-techno'}, now=now)
+    membership = publish_keyed(store, [('House', ['seed', 'owned'], .1), ('Techno', ['owned-techno'], .9)])
+    payload = ms.prepare_bundles(store, now)
+    assert payload[membership['seed']]['fresh'] == []
+    assert {t['key'] for t in store.recommendations.candidate_page('fresh', 'all', 'fresh')['tracks']} == {
+        'blocked', 'new-one', 'new-two', 'new-techno'}
+
+    # Apply a current dislike after publication. Also exclude one exact
+    # upload and keep both the genre pin and the Discovery allocation.
+    seed_dislike(store, 'blocked', until=None, now=now + 1)
+    for energy in (.5, .6):
+        candidates = RadioCandidates(store, now + 2, {**DEFAULTS, 'comfort': 0., 'theme': 1., 'energy': energy})
+        try:
+            seed = {**tracks[0], '_radio_rotation_slot': 'unplayed'}
+            next_track = candidates.next_track([seed], excluded={'v-new-one'})
+            assert (next_track['key'], next_track['_radio_rotation']) == ('new-two', 'new')
+        finally:
+            candidates.close()
+
+    create = generated_acquisition.create_generated_playlist
+    with radio_controller(monkeypatch, store, tracks) as (controller, remote, _, _, _):
+        monkeypatch.setattr(radio_session, 'RadioCandidates', RadioCandidates)
+        monkeypatch.setattr(generated_acquisition, 'create_generated_playlist', create)
+        remote.get_song = lambda _: {'videoDetails': {'lengthSeconds': '200'}}
+        controller.ctx.now_fn = lambda: now + 2
+        started = controller.start(seed_video_id='v-seed')
+        assert started['ok'], started
+        assert len(remote.creations) == 1
+        assert remote.ids == ['v-seed']
+        assert not remote.adds
+
+        play(controller, 'v-seed')
+        assert any(track['_radio_rotation_slot'] == 'new' for track in controller.session.tracks)
+        for video in remote.ids[1:]:
+            play(controller, video)
+        assert len(remote.ids) > 3
+        assert 'v-blocked' not in remote.ids
+
+
+def test_worker_publication_continues_themed_from_singleton_into_same_genre(store):
+    now = 1_700_000_000
+    tracks = [dict(key=key, title=key, artist=f'Artist {key}', video_id=f'v-{key}',
+                   genre=genre, year='2024', duration_s=200) for key, genre in (
+                       ('singleton', 'House'), ('other-one', 'House'), ('other-two', 'House'), ('techno', 'Techno'))]
+    seed_publication_subjects(store, tracks)
+    music = recordings([('House', 1, 0.), ('House', 2, 1.), ('Techno', 1, 0.)])
+    head = publish(store, [replace(track, key=row['key'], year=2024) for track, row in zip(music, tracks, strict=True)],
+                   policy=group_discovery.Policy(style_weight=.35, broad_edge=.86, fine_edge=.9, detail_edge=.95))
+    members = store.taste_groups.leaf_members(head['generation'])
+    assert members['other-one'] == members['other-two'] != members['singleton']
+    ms.prepare_bundles(store, now)
+
+    candidates = RadioCandidates(store, now + 1, {**DEFAULTS, 'theme': 1.})
+    try:
+        seed = tracks[0]
+        anchor = candidates.direction_anchor([seed], [])
+        chosen = candidates.next_track([seed], excluded={anchor['video_id']})
+        assert {anchor['key'], chosen['key']} == {'other-one', 'other-two'}
+        assert candidates.fits(chosen, seed)
+        assert candidates.next_track([seed, anchor, chosen]) is None
+    finally:
+        candidates.close()
+
+
 def test_temporal_excludes_disliked_library_tracks(monkeypatch, store):
     """The temporal surface is built straight from library content-vector membership, so it must still
     honour YouTube dislikes (suppressed_keys) the way the scorer pools do, or a thumbs-down track leaks
     into the Throwback card and into the generated playlist."""
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 50, "rep_keys": []},
-    ], retired_ids=[], now=1.0)
     keys = ["keep", "hated"]
     seed_items(store, keys)
-    V = np.array([[1.0, 0.0], [0.95, 0.05]], dtype=np.float32)
-    V = V / np.linalg.norm(V, axis=1, keepdims=True)
-    idx = {"keep": 0, "hated": 1}
-    monkeypatch.setattr(embed, "load_content_vectors", lambda s, **kw: (keys, V, idx))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
+    membership = publish_keyed(store, [('House', keys, .1)])
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0: [])
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
+        monkeypatch.setattr(surfaces, fn, lambda s, n, limit=0, **kw: [])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None, **kw: [])
     seed_dislike(store, "hated", until=None, now=10.0)
 
     payload = ms.prepare_bundles(store, now=10.0)
-    temporal_keys = {d["key"] for d in payload["1"]["temporal"]}
+    temporal_keys = {d["key"] for d in payload[membership['keep']]["temporal"]}
     all_temporal_keys = {d["key"] for d in payload["all"]["temporal"]}
     assert "keep" in temporal_keys
     assert "hated" not in temporal_keys
@@ -129,21 +190,17 @@ def test_fresh_refresh_discards_pools_without_live_models_or_candidates(store):
 
 @pytest.fixture
 def large_ranked_catalog(monkeypatch, store):
-    store.modes.replace_modes([
-        {"mode_id": m, "label": f"m{m}", "families": [["house", 1]],
-         "centroid": np.eye(2, dtype=np.float32)[m - 1], "size": 50, "rep_keys": []}
-        for m in (1, 2)], retired_ids=[], now=1.0)
     keys = [f"k{i}" for i in range(500)]
-    seed_items(store, keys)
-    vectors = np.array([[1., 0.]] * 450 + [[0., 1.]] * 50, dtype=np.float32)
-    monkeypatch.setattr(embed, "load_content_vectors",
-                        lambda s, **kw: (keys, vectors, {key: i for i, key in enumerate(keys)}))
-    monkeypatch.setattr(embed, "load_discovered_content_vectors", lambda s, **kw: ([], None, {}))
+    seed_items(store, keys[:450])
+    seed_items(store, keys[450:], 'Techno')
+    membership = publish_keyed(store, [('House', keys[:450], .1), ('Techno', keys[450:], .9)])
     pool = [_Item(key, 1.0) for key in keys]
+    for track in pool[450:]:
+        track.genre = 'techno'
     for fn in ("for_you", "explore_for_you", "comfort_listening"):
-        monkeypatch.setattr(surfaces, fn, lambda s, n, limit: pool[:limit])
-    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None: [])
-    return pool
+        monkeypatch.setattr(surfaces, fn, lambda s, n, limit, **kw: pool[:limit])
+    monkeypatch.setattr(surfaces, "cold_candidates", lambda s, n, limit=None, **kw: [])
+    return membership[keys[-1]]
 
 
 def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(
@@ -154,11 +211,11 @@ def test_prepare_reaches_genres_below_the_old_global_pool_cutoff(
 
     payload = ms.prepare_bundles(store, now=10.0)
 
-    assert len(payload["2"]["wheelhouse"]) >= ms.PROTO_SIZE
+    assert len(payload[large_ranked_catalog]["wheelhouse"]) >= ms.PROTO_SIZE
     assert len(payload["all"]["wheelhouse"]) == 500
     assert len(payload["all"]["temporal"]) == 500
-    assert {item['genre'] for item in payload['all']['wheelhouse']} == {'house'}
-    assert {item['genre'] for item in payload['all']['temporal']} == {'House'}
+    assert {item['genre'] for item in payload['all']['wheelhouse']} == {'house', 'techno'}
+    assert {item['genre'] for item in payload['all']['temporal']} == {'House', 'Techno'}
 
 
     for preset in home_vibe.PRESETS:

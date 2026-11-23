@@ -7,6 +7,8 @@ from tests.derived_rating_support import seed_dislike, seed_like
 from tests.retained_rating_support import observe_rating
 import pytest
 
+from tests.conftest import seed_catalog_track
+from tests.group_support import publish_keyed
 from tests.repository_mock_support import no_database, repository_store, transient_repository_store
 from yt_playlist.library import listening_composition as layers
 from yt_playlist.rec import embedding_vectors as embed, graduation, rec_params, scoring, taste_viz, transient
@@ -28,6 +30,7 @@ def transparency_store(no_database):
         rec_model={'weight_records': {}, 'get_rec_vectors': []},
         rec_query={'genre_play_distribution': {}, 'era_play_distribution': {}},
         rec_proposals={'group_checkpoint': None},
+        taste_groups={'head_generation': None},
         charts={'top_artists': []},
         modes={'list_modes': []},
     )
@@ -50,12 +53,23 @@ def _install_now_content_vectors(store, monkeypatch, keys, V):
     return V, idx
 
 
+def _install_listening_groups(store, techno=(), folk=()):
+    groups = [(genre, [*keys, *(f'{genre}-{i}' for i in range(size - len(keys)))], character)
+              for genre, keys, size, character in [('Techno', techno, 60, .9), ('Folk', folk, 20, .1)]]
+    for genre, keys, _character in groups:
+        for key in keys:
+            seed_catalog_track(store, key, key, key, video_id=f'v-{key}', genre=genre)
+    publish_keyed(store, groups)
+    definitions = store.taste_groups.definitions(store.taste_groups.head_generation())
+    return {group['name']: group['group_id'] for group in definitions if group['leaf']}
+
+
 def _jazz_inputs(store):
     store.rec_query.genre_play_distribution.return_value = {'Jazz': 2}
     store.rec_query.track_genres.return_value = {'song|band': 'Jazz'}
     store.rec_query.track_artists.return_value = {'song|band': 'Band'}
     store.genres.feature_axes.return_value = {'Jazz': ('jazz', None)}
-    store.history.recent_plays_with_ts.return_value = [('song|band', 1.)]
+    store.history.play_events_since.return_value = [{'identity_key': 'song|band', 'played_at': 1.}]
 
 
 def test_learning_progress_groups_all_evidence_without_reinterpreting_genres(learning_store):
@@ -110,7 +124,7 @@ def test_learning_source_curves_follow_configured_half_lives(learning_store):
     store.settings.get_setting.side_effect = {
         rec_params.SETTING_PREFIX + 'play_halflife_d': '7'}.get
     data = taste_viz.learning_progress(store, 1.0)
-    assert [row["title"] for row in data["activity"]] == ["Plays", "Likes", "Mood choices", "Dislikes", "Skips"]
+    assert [row["title"] for row in data["activity"]] == ["Plays", "Likes", "Mood choices", "Skips"]
     play = data["activity"][0]
     assert play["half_days"] == 7
     assert "50.00 34.00" in play["curve"]  # day 7 of 28: half of the 60px influence remains
@@ -140,16 +154,14 @@ def test_other_learning_shows_choices_faded_sources_and_completed_steps(store):
     assert data["changes"][0]["new_weight"] == rec_params.get_param(store, "graduate_up")
 
 
-def test_overview_reports_recent_shifts_against_library_not_a_second_library_portrait(store, monkeypatch):
-    _install_now_modes(store)
+def test_overview_reports_recent_shifts_against_library_not_a_second_library_portrait(store):
     keys = ["techno|artist", "folk1|artist", "folk2|artist"]
-    _install_now_content_vectors(store, monkeypatch, keys,
-                                 np.array([[1., 0.], [0., 1.], [0., 1.]], dtype=np.float32))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.history.import_play_events(iid, [(key, f"v{i}", 1000.0) for i, key in enumerate(keys)])
+    _install_listening_groups(store, keys[:1], keys[1:])
+    iid = store.accounts.upsert_account("main", None, True)
+    store.history.import_play_events(iid, [(key, f"v-{key}", 1000.0) for key in keys])
     recent = taste_viz.overview(store, 1000.0)["recent"]
     by_label = {row["label"]: row for row in recent["shifts"]}
-    acoustic, techno = by_label["Chill acoustic"], by_label["Warehouse techno"]
+    acoustic, techno = by_label["Folk"], by_label["Techno"]
     assert acoustic["library"] == pytest.approx(.25)
     assert acoustic["recent"] == pytest.approx(2 / 3)
     assert acoustic["delta"] == pytest.approx(2 / 3 - .25)
@@ -159,11 +171,11 @@ def test_overview_reports_recent_shifts_against_library_not_a_second_library_por
 
 
 def test_overview_includes_week_old_feedback_without_turning_radio_plays_into_learning(store, monkeypatch):
-    now = 20 * 86400.0
+    now = 20 * 86400.0 + 3600
     _install_now_modes(store)
     keys = ["radio1|artist", "radio2|artist", "radio3|artist"]
     _install_now_content_vectors(store, monkeypatch, keys, np.ones((3, 2), dtype=np.float32))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     from yt_playlist.core import radio_provenance
     with store._lock, store.conn:
         radio_provenance.remember(store.conn, 'radio', iid)
@@ -207,7 +219,7 @@ def test_recent_rating_inputs_preserve_provenance_bounds_and_sync_idempotence(st
 
 
 def test_listening_comparison_counts_observed_tracks_independently_of_mapping(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for key, video, at, playlist in (("shared|artist", "v1", 10, "radio"),
                                     ("other|artist", "v2", 11, "radio"),
                                     ("shared|artist", "v1", 14, "chosen"),
@@ -246,7 +258,7 @@ def test_viz_reflects_param_overrides(transparency_store):
 def test_chain_multiplies_permanent_by_standing_by_transient(transparency_store):
     store = transparency_store
     _jazz_inputs(store)
-    store.rec_model.get_weights.return_value = {'genre:jazz': 1.5}
+    store.rec_model.baseline_weights.return_value = {'genre:jazz': 1.5}
     store.rec_model.get_leans.return_value = {'genre:jazz': 1.2}
     payload = taste_viz.model_transparency(store, now=1000.0)
     jazz = next(r for r in payload["genres"] if r["name"] == "jazz")
@@ -263,6 +275,7 @@ def test_effective_equals_the_multiplier_scoring_actually_applies(transparency_s
     store = transparency_store
     _jazz_inputs(store)
     store.rec_model.get_weights.return_value = {'genre:jazz': 1.9}
+    store.rec_model.baseline_weights.return_value = {'genre:jazz': 1.9}
     store.rec_model.get_leans.return_value = {'genre:jazz': 1.4}
     now = 1000.0
 
@@ -343,7 +356,7 @@ def test_funnel_reports_threshold(transparency_store):
 
 def test_artists_populate_from_play_history(store):
     # Regression: _artist_shares read the wrong dict key, so the Artists panel was always empty.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("va", "ASong", "Alice", None, None)
     store.tracks.upsert_track("vb", "BSong", "Bob", None, None)
     day = 86400.0
@@ -370,21 +383,21 @@ def test_artist_shares_normalize_over_all_artists(no_database):
 
 # ── The modes axis: NOW / SESSION / PERMANENT ───────────────────────────────
 
-def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeypatch):
+def test_group_layers_three_ribbons_share_colors_for_the_same_group(store):
     # NOW, SESSION and PERMANENT all read shares over the SAME active-mode list, so a given mode_id
     # must carry the SAME color_idx in all three ribbons - that is what makes them stack visually.
-    _install_now_modes(store)
     keys = ["a1", "a2", "b1"]
-    V = np.array([[1.0, 0.02], [1.0, 0.03], [0.02, 1.0]], dtype=np.float32)
-    _install_now_content_vectors(store, monkeypatch, keys, V)
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    groups = _install_listening_groups(store, keys[:2], keys[2:])
+    techno, folk = groups['Techno'], groups['Folk']
+    iid = store.accounts.upsert_account("main", None, True)
     now = 100_000.0
     # All three plays at age 0 -> decay_weight(0, ...) == 1.0 exactly, so SESSION's decay-weighted
     # shares land on the exact same 2/3, 1/3 split as NOW's plain-count posterior.
-    store.history.import_play_events(iid, [(k, "v" + k, now) for k in keys])
+    for k in keys:
+        store.history.record_play_event(iid, k, f'v-{k}', now)
 
     ml = taste_viz.model_transparency(store, now=now)["modes"]
-    assert [m["mode_id"] for m in ml["modes"]] == [1, 2]
+    assert {m["mode_id"] for m in ml["modes"]} == {techno, folk}
 
     by_layer = {}
     for layer in ("now", "session", "permanent"):
@@ -392,20 +405,19 @@ def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeyp
 
     assert ml["now"]["n"] == 3 and ml["session"]["n"] == 3
     for layer in ("now", "session"):
-        assert by_layer[layer][1]["share"] == pytest.approx(2 / 3, abs=1e-6)
-        assert by_layer[layer][2]["share"] == pytest.approx(1 / 3, abs=1e-6)
-    assert by_layer["now"][1]["label"] == "Warehouse techno"
+        assert by_layer[layer][techno]["share"] == pytest.approx(2 / 3, abs=1e-6)
+        assert by_layer[layer][folk]["share"] == pytest.approx(1 / 3, abs=1e-6)
+    assert by_layer["now"][techno]["label"] == "Techno"
 
     # PERMANENT is each mode's share of the clustered library, by size (60 and 20 -> 0.75 / 0.25).
-    assert by_layer["permanent"][1]["share"] == pytest.approx(0.75)
-    assert by_layer["permanent"][2]["share"] == pytest.approx(0.25)
+    assert by_layer["permanent"][techno]["share"] == pytest.approx(0.75)
+    assert by_layer["permanent"][folk]["share"] == pytest.approx(0.25)
     assert ml["permanent"]["n"] == 80
 
     # The color-consistency guarantee: same mode_id -> same color_idx in every ribbon.
-    for mode_id, idx in ((1, 0), (2, 1)):
-        assert {by_layer[l][mode_id]["color_idx"] for l in by_layer} == {idx}
+    for identity in (techno, folk):
+        assert len({by_layer[layer][identity]["color_idx"] for layer in by_layer}) == 1
 
-    assert ml["now"]["window_h"] == rec_params.get_param(store, "now_window_h")
     assert ml["session"]["halflife_h"] == rec_params.get_param(store, "session_halflife_h")
     assert ml["min_events"] == int(rec_params.get_param(store, "now_min_events"))
     assert ml["evidence"]["now"]["total"] == 3
@@ -413,49 +425,45 @@ def test_mode_layers_three_ribbons_share_colors_for_the_same_mode(store, monkeyp
     assert ml["evidence"]["now"]["coverage"] == pytest.approx(1.0)
 
 
-def test_mode_evidence_reports_unmapped_realtime_plays(store, monkeypatch):
-    _install_now_modes(store)
-    _install_now_content_vectors(store, monkeypatch, ["mapped"], np.array([[1.0, 0.0]]))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.history.import_play_events(iid, [("mapped", "v1", 1000.0), ("unmapped", "v2", 1000.0)])
+def test_group_evidence_reports_unmapped_realtime_plays(store):
+    _install_listening_groups(store, ['mapped'])
+    iid = store.accounts.upsert_account("main", None, True)
+    store.history.record_play_event(iid, 'mapped', 'v-mapped', 1000.)
+    store.history.record_play_event(iid, 'unmapped', 'v2', 1000.)
 
     evidence = taste_viz.model_transparency(store, now=1000.0)["modes"]["evidence"]
 
-    assert evidence["now"] == {"total": 2, "mapped": 1, "coverage": 0.5, "window_h": 6}
+    assert evidence["now"] == {"total": 2, "mapped": 1, "coverage": 0.5}
     assert evidence["session"]["mapped"] == 1
 
 
-def test_mode_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(transparency_store):
-    # Modes exist, but no recent plays -> NOW and SESSION are below the confidence gate and report
+def test_group_layers_permanent_stands_alone_when_the_fast_layers_are_quiet(store):
+    # Groups exist, but no recent plays means NOW and TODAY are below the confidence gate and report
     # nothing, while PERMANENT still describes the durable shape. Quiet is not the same as absent.
-    store = transparency_store
-    store.modes.list_modes.return_value = [
-        {'mode_id': 1, 'label': 'Warehouse techno', 'size': 60,
-         'centroid': np.array([1., 0.], dtype=np.float32)},
-        {'mode_id': 2, 'label': 'Chill acoustic', 'size': 20,
-         'centroid': np.array([0., 1.], dtype=np.float32)},
-    ]
+    identities = set(_install_listening_groups(store).values())
     ml = taste_viz.model_transparency(store, now=1_000_000.0)["modes"]
     assert ml["now"]["segments"] == [] and ml["session"]["segments"] == []
-    assert {s["mode_id"] for s in ml["permanent"]["segments"]} == {1, 2}
-    assert [m["mode_id"] for m in ml["modes"]] == [1, 2]
+    assert {s["mode_id"] for s in ml["permanent"]["segments"]} == identities
+    assert {m["mode_id"] for m in ml["modes"]} == identities
 
 
-def test_saved_style_portrait_survives_a_content_space_change(store, monkeypatch):
-    _install_now_modes(store)
+def test_published_groups_keep_listening_readings_across_content_space_changes(store, monkeypatch):
     keys = ["a", "b", "c"]
-    _install_now_content_vectors(store, monkeypatch, keys, np.array([[1.0, 0.0]] * 3))
+    groups = _install_listening_groups(store, keys)
     monkeypatch.setattr(embed, "content_space_id", lambda s, **kw: "new-content-space")
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.history.import_play_events(iid, [(k, "v" + k, 1000.0) for k in keys])
+    iid = store.accounts.upsert_account("main", None, True)
+    for key in keys:
+        store.history.record_play_event(iid, key, f"v-{key}", 1000.0)
 
     ml = taste_viz.mode_layers(store, now=1000.0)
 
-    assert not ml["styles_current"]
+    assert ml["styles_current"]
     assert ml["permanent"]["n"] == 80
     assert len(ml["permanent"]["segments"]) == 2
     assert ml["evidence"]["session"]["mapped"] == 3
-    assert ml["now"]["segments"] == ml["session"]["segments"] == []
+    for layer in ('now', 'session'):
+        active, = ml[layer]['segments']
+        assert active['mode_id'] == groups['Techno'] and active['share'] == 1
 
 
 def test_generation_examples_read_prepared_pools_and_filter_hidden_tracks(store):
@@ -552,7 +560,7 @@ def test_now_layer_has_no_embedding_direction(transparency_store, monkeypatch):
 # ── Misc ───────────────────────────────────────────────────────────────────
 
 def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     vectors, pids = [], []
     for i, (genre, plays) in enumerate((("Techno", 6), ("Jazz", 3), ("Folk", 1), ("Rock", 0))):
         tid = store.tracks.upsert_track(f"blend-{i}", f"Track {i}", "Artist", None, None)
@@ -583,7 +591,7 @@ def test_playlist_influence_preserves_whole_blend_and_listening_evidence(store):
 
 
 def test_playlist_influence_explains_equal_weights_before_listening(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     vectors = []
     for i in range(2):
         tid = store.tracks.upsert_track(f"equal-{i}", f"Track {i}", "Artist", None, None)
@@ -602,7 +610,7 @@ def test_playlist_influence_explains_equal_weights_before_listening(store):
 
 
 def test_playlist_influence_identifies_behavior_fallback_as_listening(store):
-    account = store.accounts.upsert_account("main", "cred", None, True)
+    account = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("fallback", "Song", "Band", None, None)
     store.history.record_history_plays(account, 1., ["song|band"], source_timezone="UTC")
     store.rec_model.replace_rec_vectors([("song|band", np.array([1, 0], dtype=np.float32).tobytes())])

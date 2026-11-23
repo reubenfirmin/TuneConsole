@@ -12,14 +12,13 @@ from yt_playlist.core import metadata_runtime, metadata_runtime_files
 def metadata_provenance(store, entry):
     with store._lock:
         conn = store.conn
-        entry = catalog.resolve_entry(conn, entry)
         track = conn.execute('SELECT * FROM catalog_tracks WHERE id=?', (entry,)).fetchone()
         assert track is not None
         if metadata_evidence.available(conn):
             return _evidence_provenance(conn, entry, track)
         if metadata_runtime.active(conn):
             choices = {metadata_runtime.FIELDS[row['field']-1]: row for row in conn.execute(
-                'SELECT * FROM metadata_runtime_choices WHERE entry_id=?', (entry,))}
+                'SELECT * FROM current_runtime_choices WHERE entry_id=?', (entry,))}
             decisions = []
             for field, choice in choices.items():
                 for revision in range(1, choice['revision']+1):
@@ -33,7 +32,7 @@ def metadata_provenance(store, entry):
                 override = bool(choice and choice['kind'] != 0)
                 source = None
                 if override:
-                    source = conn.execute('SELECT name FROM metadata_runtime_providers WHERE id=?',
+                    source = conn.execute('SELECT provider FROM enrichment_provider_config WHERE metadata_provider_id=?',
                                           (choice['provider_id'],)).fetchone()[0]
                 fields[field] = {'value': track[field], 'override': override,
                     'source': source or metadata.selected_source(conn, entry, field)
@@ -72,11 +71,11 @@ def _evidence_provenance(conn, entry, track):
         return observations[identity]
 
     selections = {row['field']: dict(row) for row in conn.execute(
-        'SELECT * FROM recording_metadata_selections WHERE recording_id=?', (track['recording_id'],))}
+        'SELECT * FROM current_metadata_selections WHERE recording_id=?', (track['recording_id'],))}
     selections.update({row['field']: dict(row) for row in conn.execute(
-        'SELECT * FROM entry_metadata_selections WHERE entry_id=?', (entry,))})
-    choices = {row['field']: explain(row['observation_id']) for row in conn.execute(
-        'SELECT field,observation_id FROM metadata_choice_heads WHERE entry_id=?', (entry,))}
+        'SELECT * FROM current_metadata_selections WHERE entry_id=?', (entry,))})
+    choices = {field: explain(observation) for field, observation in conn.execute(
+        'SELECT h.key,h.atom FROM track_sources s,json_each(s.choice_observations) h WHERE s.id=?', (entry,))}
     fields, lineage = {}, {}
     for field in (*catalog.ITEM_FIELDS, *catalog.RECORDING_FIELDS):
         selection, choice = selections.get(field), choices.get(field)

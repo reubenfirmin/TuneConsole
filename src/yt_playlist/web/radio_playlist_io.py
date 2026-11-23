@@ -99,6 +99,9 @@ class RadioPlaylistIO:
         self._unpublished = set()
 
     def read(self, client, playlist: str, *, expected: list[str] | None = None) -> list[dict]:
+        return self.read_snapshot(client, playlist, expected=expected)['tracks']
+
+    def read_snapshot(self, client, playlist: str, *, expected: list[str] | None = None) -> dict:
         try:
             detail = client.get_playlist(playlist, limit=None)
         except LibrarySnapshotError as exc:
@@ -110,13 +113,15 @@ class RadioPlaylistIO:
         if (expected is not None and isinstance(detail, dict) and isinstance(detail.get("tracks"), list)
                 and all(isinstance(t, dict) for t in detail["tracks"])
                 and [t.get("videoId") for t in detail["tracks"]] == expected):
-            detail = {**detail, "trackCount": len(expected)}
+            count = detail.get('trackCount')
+            if count is not None and (type(count) is not int or count != len(expected)):
+                detail = {**detail, 'trackCount': len(expected), '_radio_count_adjusted': True}
         elif expected is not None and (not isinstance(detail, dict) or type(detail.get("trackCount")) is not int):
             # Fewer rows without a total cannot distinguish an omitted song
             # from a page that has not finished propagating.
             raise PlaylistPending()
         try:
-            return validate_playlist(detail)["tracks"]
+            return validate_playlist(detail)
         except ValueError as exc:
             raise PlaylistPending() from exc
 

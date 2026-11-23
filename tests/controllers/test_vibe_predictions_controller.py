@@ -1,7 +1,7 @@
 """Prediction policy and ordered persistence with explicit mocked owners."""
 from contextlib import nullcontext
 import hashlib
-from unittest.mock import Mock, create_autospec
+from unittest.mock import Mock, call, create_autospec
 
 import pytest
 
@@ -11,12 +11,11 @@ from yt_playlist.controllers.prepared_content import PreparedContent
 from yt_playlist.controllers.recommendation_refresh import RecommendationRefresh
 from yt_playlist.controllers.vibe_predictions import VibePredictions
 from yt_playlist.controllers.vibe_models import VibeModels
-from yt_playlist.core import vibe_model_files, vibe_publication
+from yt_playlist.core import vibe_publication
 from yt_playlist.core.audio_metadata_files import AudioMetadataFiles
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.sample_files import SampleFiles
 from yt_playlist.core.vibe_provenance import ProvenanceFiles
-from yt_playlist.controllers.settings import Settings
 from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -30,7 +29,6 @@ def predictions():
         create_autospec(SampleFiles, instance=True, spec_set=True),
         create_autospec(AudioMetadataFiles, instance=True, spec_set=True),
         create_autospec(VibeModels, instance=True, spec_set=True),
-        create_autospec(Settings, instance=True, spec_set=True),
         create_autospec(RecommendationRefresh, instance=True, spec_set=True),
         create_autospec(PreparedContent, instance=True, spec_set=True),
         create_autospec(Genres, instance=True, spec_set=True))
@@ -67,7 +65,7 @@ def test_prediction_admission_and_file_preparation_use_detached_sql_facts(predic
     plan = predictions.prepare_publication({'song': track()}, {'song': {'relax': fit()}}, {'cohort'}, 20)
     assert plan.predictions == [(10, 3, 'relax', .8, .6, None, 'artist', 'v', 20)]
     assert plan.provenance == [(10, {1, 2}, [4])]
-    predictions.repository.publication_facts.assert_called_once_with(['song'], {'v'}, [], {1, 2}, {4})
+    predictions.repository.publication_facts.assert_called_once_with(['song'], [], {1, 2}, {4})
     predictions.provenance.describe.assert_called_once_with(plan.provenance)
 
 
@@ -93,22 +91,19 @@ def test_incomplete_reservation_does_not_touch_files(predictions):
     predictions.provenance.stage_reserved.assert_not_called()
 
 
-@pytest.mark.parametrize('available', [False, True])
-def test_expiry_and_history_commit_before_provenance_and_model_collection(predictions, available):
+def test_expiry_and_history_commit_before_provenance_and_model_collection(predictions):
     events = []
-    predictions.repository.provenance_available.return_value = available
     predictions.repository.expire_provenance.side_effect = lambda now: events.append('expiry committed') or 2
     predictions.provenance.history.side_effect = lambda: nullcontext(5)
     predictions.repository.retire_history.side_effect = lambda *args: events.append('history committed') or (3, 9)
     predictions.provenance.save_history.side_effect = lambda after: events.append('cursor saved')
     predictions.provenance.garbage.side_effect = lambda **kw: events.append('files') or nullcontext(iter(()))
     predictions.models.collect.side_effect = lambda now: events.append('models')
-    assert predictions.maintain(20) == (5 if available else 0)
-    assert events == (['expiry committed', 'history committed', 'cursor saved', 'files', 'models'] if available else [])
+    assert predictions.maintain(20) == 5
+    assert events == ['expiry committed', 'history committed', 'cursor saved', 'files', 'models']
 
 
 def test_failed_history_commit_preserves_cursor_and_skips_file_collection(predictions):
-    predictions.repository.provenance_available.return_value = True
     predictions.provenance.history.side_effect = lambda: nullcontext(7)
     predictions.repository.retire_history.side_effect = OSError('interrupted')
     with pytest.raises(OSError, match='interrupted'):
@@ -150,7 +145,7 @@ def test_unknown_conditioning_fails_before_file_preparation(predictions, change)
 def test_identical_prediction_reuses_calculation_without_reading_provenance_files(predictions):
     saved = predictions.repository.publication_facts.return_value
     saved['previous'] = {3: {'relax': previous()}}
-    saved['provenance'] = {9: (hashlib.sha256(canonical([1, 2])).digest(), 'ready', None, [])}
+    saved['provenance'] = {9: (hashlib.sha256(canonical([1, 2])).digest(), 'ready', None)}
     plan = predictions.prepare_publication({'song': track()}, {'song': {'relax': fit()}}, [], 20)
     assert not plan.predictions and not plan.publications and not plan.provenance
     predictions.provenance.describe.assert_called_once_with([])
@@ -159,11 +154,13 @@ def test_identical_prediction_reuses_calculation_without_reading_provenance_file
 
 
 def test_changed_joint_conditioning_allocates_a_new_receipt(predictions):
+    from yt_playlist.core import vibe_model_files
+
     generation = 'a' * 64
     receipt = vibe_model_files.receipt(generation, [4], .01, .1, conditioning={'genre': 'techno', 'album': 'old'})
     saved = predictions.repository.publication_facts.return_value
     saved['previous'] = {3: {'relax': previous(version='v/model')}}
-    saved['provenance'] = {9: (hashlib.sha256(canonical(receipt)).digest(), 'ready', generation, [])}
+    saved['provenance'] = {9: (hashlib.sha256(canonical(receipt)).digest(), 'ready', generation)}
     resolved = fit(generation=generation, model_version='model', mean_variance=.01, new_track_variance=.1,
                    conditioning={'genre': 'techno', 'album': 'new'})
     plan = predictions.prepare_publication({'song': track()}, {'song': {'relax': resolved}}, [], 20)
@@ -184,18 +181,18 @@ def test_original_measurement_identity_cannot_change_its_score(predictions, stor
     predictions.provenance.describe.assert_not_called()
 
 
-def test_file_publication_precedes_sql_and_separate_settings_and_notification(predictions):
+def test_file_publication_precedes_sql_and_notification(predictions):
     events = []
     file = Mock()
     file.publish.side_effect = lambda: events.append('file')
     plan = vibe_publication.PreparedVibes([], [], [], [('score',)], [], {'ordinary', '!joint:relax'}, staged=[file])
     predictions.repository.publish_prepared.side_effect = lambda *args, **kwargs: events.append('sql')
-    predictions.settings.publish_values.side_effect = lambda values: events.append('settings')
+    predictions.repository.clear_joint_outcomes.side_effect = lambda channels: events.append('clear')
     predictions.refresh.publish_notification.side_effect = lambda: events.append('notify')
     predictions.publish_prepared(plan)
-    assert events == ['file', 'sql', 'settings', 'notify']
+    assert events == ['file', 'sql', 'clear', 'notify']
     predictions.repository.publish_prepared.assert_called_once_with(plan, cohorts=['ordinary'])
-    predictions.settings.publish_values.assert_called_once_with({vibe_model_files.STATE_PREFIX + 'relax': ''})
+    predictions.repository.clear_joint_outcomes.assert_called_once_with({'relax'})
 
 
 def test_failed_file_does_not_write_sql_or_acknowledge_predictions(predictions):
@@ -205,32 +202,30 @@ def test_failed_file_does_not_write_sql_or_acknowledge_predictions(predictions):
     with pytest.raises(OSError, match='full'):
         predictions.publish_prepared(plan)
     predictions.repository.publish_prepared.assert_not_called()
-    predictions.settings.publish_values.assert_not_called()
+    predictions.repository.clear_joint_outcomes.assert_not_called()
     predictions.refresh.publish_notification.assert_not_called()
 
 
-def test_version_notification_is_queued_before_the_settings_marker(predictions):
-    events = []
-    predictions.settings.get_setting.return_value = 'old'
-    predictions.repository.queue.side_effect = lambda keys: events.append('queue')
-    predictions.settings.publish_values.side_effect = lambda values: events.append('settings')
+def test_policy_rebuild_is_owned_by_the_rebuild_repository(predictions):
+    predictions.repository.ensure_version.side_effect = [True, False]
     assert predictions.ensure_version('new')
-    assert events == ['queue', 'settings']
-    predictions.settings.get_setting.return_value = 'new'
     assert not predictions.ensure_version('new')
-    assert events == ['queue', 'settings']
+    assert predictions.repository.ensure_version.call_args_list == [call('new'), call('new')]
 
 
 def test_broken_sample_run_falls_back_to_the_next_complete_playback(predictions):
     source = {'metadata': {'genre': 'Techno'}, 'choices': {}, 'sources': []}
     predictions.repository.input_facts.return_value = {'song': {
-        'old': ([], []), 'artists': [4], 'recording': 3,
-        'runs': [([{'id': 'bad'}], source), ([{'id': str(i)} for i in range(3)], source)]}}
-    predictions.samples.read.side_effect = [OSError('missing'), {'id': '0'}, {'id': '1'}, {'id': '2'}]
-    value = predictions.inputs(['song'])['song']
+        'artists': [4], 'recording': 3, 'sources': {'video': source}, 'next_run_offset': None,
+        'runs': {(2, 'video', 'broken'): [{'id': f'broken-{i}'} for i in range(3)],
+                 (1, 'video', 'complete'): [{'id': str(i)} for i in range(3)]}}}
+    predictions.samples.read.side_effect = [OSError('missing'), {'id': 'broken-1'}, {'id': 'broken-2'},
+                                           {'id': '0'}, {'id': '1'}, {'id': '2'}]
+    value = predictions.inputs(['song'], usable_samples=lambda rows: rows)['song']
     assert value['samples'] == [{'id': '0'}, {'id': '1'}, {'id': '2'}]
     assert value['metadata']['genre'] == 'Techno'
     assert value['artist'] == '[4]'
+    assert not value['needs_fresh_audio']
 
 
 def test_joint_profile_capture_is_explicitly_coordinated_with_content_service(predictions):
@@ -249,11 +244,13 @@ def test_joint_model_uses_the_validated_model_service(predictions):
 def test_joint_head_is_published_after_model_file_and_measurement_roots(predictions):
     events, staged = [], Mock()
     predictions.models.publish.side_effect = lambda value: events.append('file')
-    predictions.repository.root_joint_model.side_effect = lambda *args: events.append('roots')
-    predictions.settings.publish_values.side_effect = lambda values: events.append('head')
-    predictions.publish_joint_model('relax', 'generation', {'outcome': 'ready'}, [7], staged, True)
-    assert events == ['file', 'roots', 'head']
+    predictions.repository.install_joint_model.side_effect = lambda *args, **kwargs: events.append('model')
+    outcome = {'outcome': 'ready'}
+    predictions.publish_joint_model('relax', 'generation', outcome, [7], staged, True, artists=[8])
+    assert events == ['file', 'model']
     predictions.models.publish.assert_called_once_with(staged)
+    predictions.repository.install_joint_model.assert_called_once_with('relax', 'generation', outcome, [7], True,
+                                                                      artists=[8])
 
 
 def test_cohort_statistics_accumulate_weighted_originals_across_pages(predictions):

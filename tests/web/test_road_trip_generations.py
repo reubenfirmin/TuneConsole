@@ -24,12 +24,12 @@ pytestmark = pytest.mark.usefixtures('without_query_timing')
 def generation_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview
+    from yt_playlist.web.routes import app_update, audio_vibes
 
     # These requests own recipe generation/revision handling and the actual
     # Road Trip HTML. Other pages and provider configuration are lower inputs.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, routes)])
+        module.build(ctx) for module in (app_update, audio_vibes, routes)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
@@ -170,7 +170,7 @@ def test_overlapping_edits_invalidate_queued_workers_and_current_failure_settles
 
 
 def test_repository_rejects_old_revision_and_deleted_draft(native_sql_calls, store):
-    store.accounts.upsert_account('main', 'cred', None, True)
+    store.accounts.upsert_account('main', None, True)
     rid = _recipe(store)
     store.road_trip.save_road_trip_draft(rid, {'revision': 'new', 'value': 'new'}, 100)
     assert not store.road_trip.replace_road_trip_draft(
@@ -188,7 +188,7 @@ def test_remote_save_completion_does_not_replace_newer_or_deleted_draft(native_s
     from yt_playlist.core.activity import Activity
     from yt_playlist.library.road_trip_composition import drafts
 
-    store.accounts.upsert_account('main', 'cred', None, True)
+    store.accounts.upsert_account('main', None, True)
     _stub_pools(monkeypatch, store)
     rid = _recipe(store)
     workers = []

@@ -1,9 +1,6 @@
-"""Taste modes across the Home surfaces (issue #60, Part B).
+"""Worker publication of shared ranked pools and their musical-group selections.
 
-The worker buckets every surface's candidate pool by nearest taste mode (prepare_bundles); the Home
-request cheaply selects 4 distinct modes by acceptance-weighted Thompson sampling and live mood
-(#87), assigns one per card, and tilts/orders/caps within the prepared bucket (assemble_cards). No
-pool ranking happens on the request once full-depth bundles have been prepared."""
+The detached fixed-mode math also supports historical comparisons."""
 import hashlib
 import json
 import logging
@@ -17,11 +14,9 @@ from yt_playlist.core.activity import WorkClosing, check_stopping
 from yt_playlist.core.policy_config import BASE_FIELD
 from yt_playlist.core.work_diagnostics import work_span
 from yt_playlist.core.policy_config import PolicyCapacityFull
-from yt_playlist.library import listening_composition as layers
-from yt_playlist.rec import (embedding_vectors as vectors, experiments, home_themes, home_vibe, mode_eval, rec_params, surfaces,
-                             taste_modes, transient, negative, vibe_pools)
+from yt_playlist.rec import (embedding_vectors as vectors, experiments, group_viz, home_themes, home_vibe, mode_eval,
+                             ppr, rec_params, scoring, surfaces, vibe_pools)
 from yt_playlist.util import genre_map
-from yt_playlist.rec.eligibility import home_exclusions
 from yt_playlist.rec.mode_selection import (select_modes, thompson_mode_scores,
     _mode_mood_weight, ranker_for as _ranker_for, PROTO_SIZE,
     CARD_LABELS as _CARD_LABELS, BAND_LABELS as _BAND_LABELS)
@@ -33,9 +28,9 @@ _MIN_CARD = 4          # below this many tracks (even after backfill) a card is 
 # ongoing import, enrichment and playback. Full pool rounds publish captured
 # inputs and do not use this dependency filter.
 RANKING_CHURN_TABLES = frozenset({
-    "recordings", "youtube_items", "catalog_entries", "library_memberships",
+    "recordings", "youtube_items", "track_sources", "library_memberships",
     "artists", "artist_aliases", "metadata_observations",
-    "discovery_memberships", "entry_artists", "track_artists", "playlists", "playlist_items", "playlist_provenance",
+    "entry_artists", "track_artists", "playlists", "playlist_items", "playlist_provenance",
     "play_events", "player_events", "listening_observations",
     "play_event_calendar", "play_event_sources",
 })
@@ -46,17 +41,12 @@ _PPR_TAIL = 1 << 30    # sort sentinel: a candidate absent from the PPR ranking 
 from yt_playlist.rec.mode_rules import bundle_metadata, _item_dict, _temporal_item, _diversify, _in_band
 
 
-def _order_key(ranker, ppr_pos, leans, penalties=None):
+def _order_key(ranker, ppr_pos, leans):
     """Sort key for a card's candidates: ascending PPR position for the 'ppr' arm (unknown keys last),
     else the existing descending mood-tilt for the 'cosine' arm. Both return ascending-sortable values."""
-    penalties = penalties or {}
     if ranker == "ppr":
-        # Put positions on a unit scale so the bounded dislike delta has the same strength
-        # whatever depth the cached PPR ranking contains. Missing candidates still follow it.
-        scale = max(1, len(ppr_pos)) if any(penalties.values()) else 1
-        return lambda d: (ppr_pos.get(d.get("key"), _PPR_TAIL) / scale
-                          - penalties.get(d.get("key"), 0.0))
-    return lambda d: -_tilt_key(d, leans) - penalties.get(d.get("key"), 0.0)
+        return lambda d: ppr_pos.get(d.get("key"), _PPR_TAIL)
+    return lambda d: -_tilt_key(d, leans)
 
 
 def _nearest_mode(key, mode_ids, C, lidx, LV, didx, DV):
@@ -146,57 +136,97 @@ class _DeferredBundles:
 
 
 def _calculate_bundles(store, now, policies):
-    """Bucket each surface's pool by nearest mode; cache under rec_proposals['mode_bundles']. Payload
-    {str(mode_id): {surface: [item_dict, ...]}} plus full pools, usable before modes exist."""
+    """Publish ranked pools with exact group-version slots and a shared startup pool."""
+    from yt_playlist.library import mix_listening
+
     snapshot = store.rec_model.content_generation()
-    modes = taste_modes.live_modes(store, snapshot=snapshot)
-    if not modes:
-        # Imported tracks are playable before tags/vectors can form taste modes.
-        # Use the existing surface rankers without inventing mode attribution.
-        limit = max(len(store.rec_query.library_keys()),
-                    int(rec_params.get_param(store, "modes_pool_limit")))
-        pools = _rank_pools(store, now, limit)
-        payload = unmodeled_bundles(pools)
-        if not payload:
-            return {}, []
-        for name, items in payload['all'].items():
-            payload['all'][name] = policies.stamp(items, name)
-        vibe_pools.prepare(store, payload, now, policies)
-        return payload, payload['all']['fresh']
-    lkeys, LV, lidx = vectors.load_content_vectors(store, snapshot=snapshot)
-    dkeys, DV, didx = vectors.load_discovered_content_vectors(store, snapshot=snapshot)
-    cap = int(rec_params.get_param(store, "modes_cand_per_mode"))
-    lim = max(len(lkeys), int(rec_params.get_param(store, "modes_pool_limit")))
-    pools = _rank_pools(store, now, lim)
-    years = store.modes.years_for(lkeys) if lkeys else {}
-    meta = store.rec_query.tracks_by_keys(lkeys) if LV is not None and lkeys else {}
-    genres = store.modes.genres_for(lkeys) if LV is not None and lkeys else {}
-    suppressed = store.rec_model.suppressed_keys('for_you', now)
-    payload = modeled_bundles(modes, (lkeys, LV, lidx), (dkeys, DV, didx), pools,
-        generation=snapshot['generation'], space=vectors.content_space_id(store, snapshot=snapshot),
-        cap=cap, years=years, metadata=meta, genres=genres, suppressed=suppressed)
-    mode_ids = [mode['mode_id'] for mode in modes]
-    for surf, items in payload['all'].items():
-        stamped = policies.stamp(items, surf)
-        versions = {item['key']: item.get('pool_policy') for item in stamped}
-        payload['all'][surf] = stamped
-        for mid in mode_ids:
-            for item in payload[str(mid)].get(surf, []):
-                item['pool_policy'] = versions.get(item.get('key'))
+    head = group_viz.prepared(store)
+    library = store.rec_query.library_keys()
+    listening = mix_listening.read(store, now)
+    policies.mix_listening = listening
+    pools = _rank_pools(store, now, max(len(library), int(rec_params.get_param(store, 'modes_pool_limit'))),
+                        listening=listening)
+    payload = unmodeled_bundles(pools)
+    if not payload and not library:
+        return {}, []
+    if not payload:
+        payload = {'all': {lane: [] for lane in pools}, '_meta': {
+            'full_pools': True, 'unmodeled': True, 'comfort_pool': 0}}
+    for lane, items in payload['all'].items():
+        payload['all'][lane] = policies.stamp(items, lane)
+    _shared_temporal(store, now, library, payload, policies)
+    if head:
+        _group_bundles(store, now, snapshot, head, payload)
+    if not any(payload['all'].values()) and '_radio' not in payload:
+        return {}, []
+    vibe_pools.prepare(store, payload, now, policies)
+    return payload, payload['all']['fresh']
+
+
+def _shared_temporal(store, now, library, payload, policies):
+    years = store.modes.years_for(library)
+    dated = sorted(year for year in years.values() if year)
+    cuts = [int(value) for value in np.percentile(dated, [33, 66])] if len(dated) >= 30 else None
+    payload['_meta']['year_cuts'] = cuts
+    library_rows = store.rec_query.tracks_by_keys(library)
+    genres = store.modes.genres_for(library)
+    blocked = store.rec_model.suppressed_keys('for_you', now)
+    ranked = dict.fromkeys(item['key'] for item in payload['all']['wheelhouse'])
+    ranked.update(dict.fromkeys(sorted(library)))
+    temporal = []
+    for key in ranked:
+        check_stopping()
+        if key in library_rows and key not in blocked:
+            temporal.append(_temporal_item(key, library_rows, genres, years))
+    payload['all']['temporal'] = policies.stamp(temporal, 'temporal')
+
+
+def _group_bundles(store, now, snapshot, head, payload):
+    members = {group['version']: [] for group in head['groups'] if group.get('leaf')}
+    partition = store.taste_groups.leaf_members(head['generation'])
+    for key, version in partition.items():
+        check_stopping()
+        if version in members:
+            members[version].append(key)
+    if not any(members.values()):
+        return
+    payload['_radio'] = {'generation': snapshot['generation'],
+                         'space': vectors.content_space_id(store, snapshot=snapshot), 'members': members}
+    payload['_meta'].update(unmodeled=False, group_generation=head['generation'])
+    cap = int(rec_params.get_param(store, 'modes_cand_per_mode'))
+    cuts = payload['_meta']['year_cuts']
+    for version in members:
+        payload[version] = {lane: [] for lane in payload['all']}
+    for lane, items in payload['all'].items():
+        band_counts = Counter()
+        for item in items:
+            check_stopping()
+            version = partition.get(item['key'])
+            if version not in members:
+                continue
+            bucket = payload[version][lane]
+            if lane == 'temporal' and cuts:
+                band = next((index for index in range(3) if _in_band(item['year'], index, *cuts)), None)
+                if band is None or band_counts[version, band] >= cap:
+                    continue
+                band_counts[version, band] += 1
+                bucket.append(item)
+            elif len(bucket) < cap:
+                bucket.append(item)
     # PPR is optional; acquisition failure retains cosine serving and cancellation propagates.
+    params = {name: rec_params.get_param(store, name) for name in
+              ('ppr_alpha', 'ppr_iters', 'ppr_tol', 'ppr_rank_depth')}
     try:
-        from yt_playlist.rec import ppr
         with work_span('rec: pool PPR', level=logging.DEBUG):
-            rankings = ppr.mode_rankings(store, snapshot=snapshot)
-        params = {name: rec_params.get_param(store, name) for name in
-                  ('ppr_alpha', 'ppr_iters', 'ppr_tol', 'ppr_rank_depth')}
-        payload['_ppr'], payload['_meta']['ppr_policy'] = ppr_report(mode_ids, rankings, params, now)
+            rankings = ppr.rankings_from_members(members, ppr.build_transition(store),
+                alpha=params['ppr_alpha'], iters=int(params['ppr_iters']), tol=params['ppr_tol'],
+                depth=int(params['ppr_rank_depth']))
+        payload['_ppr'], payload['_meta']['ppr_policy'] = ppr_report(members, rankings, params, now)
     except WorkClosing:
         raise
     except Exception:
+        logging.getLogger(__name__).debug('Group PageRank unavailable', exc_info=True)
         payload['_ppr'] = {}
-    vibe_pools.prepare(store, payload, now, policies)
-    return payload, payload.get('all', {}).get('fresh', [])
 
 
 def unmodeled_bundles(pools):
@@ -258,7 +288,10 @@ def ppr_report(mode_ids, rankings, params, now):
         'ranking_fingerprint': hashlib.sha256(json.dumps(values, sort_keys=True).encode()).hexdigest()}
 
 
-def _rank_pools(store, now, limit):
+def _rank_pools(store, now, limit, *, listening=None):
+    if listening is None:
+        from yt_playlist.library import mix_listening
+        listening = mix_listening.read(store, now)
     pools = {}
     for name, prepare, depth in (
             ("wheelhouse", surfaces.for_you, limit),
@@ -266,7 +299,8 @@ def _rank_pools(store, now, limit):
             ("comfort", surfaces.comfort_listening, limit),
             ("fresh", surfaces.cold_candidates, None)):
         with work_span("rec: pool " + name, level=logging.DEBUG):
-            pools[name] = prepare(store, now, limit=depth)
+            options = {} if name == 'comfort' else {'mix_listening': listening}
+            pools[name] = prepare(store, now, limit=depth, **options)
     return pools
 
 
@@ -309,142 +343,17 @@ def _tilt_key(d, leans):
     return 1.0 + leans.get(f"genre:{fam}", 0.0)
 
 
-def _assembly_inputs(store, now, preparation):
-    """Reuse eligibility and resolved pools only inside one private preparation snapshot."""
-    if preparation is not None and 'assembly' in preparation:
-        return preparation['assembly']
-    bundles = (preparation['bundles'] if preparation is not None and 'bundles' in preparation
-               else store.rec_proposals.get_proposals('mode_bundles') or {})
-    keys = {d['key'] for bucket in bundles.values() if isinstance(bucket, dict)
-            for items in bucket.values() if isinstance(items, list)
-            for d in items if isinstance(d, dict) and d.get('key')}
-    identities = store.artists.track_keys(keys=keys)
-    bundles = {mid: {lane: [{**row, 'artist_ids': sorted(identities.get(row.get('key'), ()))} for row in items]
-                     for lane, items in bucket.items()} if not mid.startswith('_') else bucket
-               for mid, bucket in bundles.items()}
-    modes = ([] if bundles.get('_meta', {}).get('unmodeled')
-             else store.modes.list_modes(active_only=True))
-    data = {'bundles': bundles, 'modes': modes,
-            'blocked': home_exclusions(store, keys, now),
-            'checked_keys': keys, 'muted': store.rec_model.muted_artists(), 'filtered': {},
-            'full_pools': {}, 'dislike_deltas': {}}
-    if preparation is not None:
-        preparation['assembly'] = data
-    return data
-
-
 def assemble_cards(store, now, epoch, *, avoid_genres=(), include_genres=(), mode_order=None,
                    preparation=None) -> list[dict]:
-    """Build the mode-focused Home cards from the prepared bundles. Three always-on surfaces
-    (wheelhouse, explore, fresh) plus a resolved 4th slot: COMFORT if its pool is credible
-    (>= comfort_min_pool), else the TEMPORAL card whose band rotates per epoch (Throwback / Time Flies /
-    Recent Picks) over the user's own release-year terciles. Modes are selected by Thompson-sampled
-    pick-through x library share x live mood (#87), NOW-boosted (#88, see `select_modes`), and
-    assigned by lane coverage, usable card depth, then selection priority. Extra tracks beyond a full card do not
-    pin a theme to a framing (temporal depth is measured within the epoch's band).
-    Each card is diversity-capped (artist + album) and, EXCEPT
-    Comfort, backfilled from its general pool when thin; Comfort shows only real comfort tracks. If a
-    Comfort slot comes up thinner than _MIN_CARD after capping (its global pool can be credible while
-    the assigned mode's bucket is not), TEMPORAL rotates into the 4th slot so the row stays at four,
-    rather than dropping to three. Returns [] when there are no bundles/modes (caller falls back to
-    legacy cards)."""
+    """Select Home cards from the current recommendation publication."""
     preset = preparation['vibe_rank'].preset if preparation is not None else home_vibe.current(store, now)
     if preset:
         from yt_playlist.rec import vibe_serving
         return vibe_serving.assemble(store, now, preset, epoch,
                                    include_genres=include_genres, avoid_genres=avoid_genres)
-    if getattr(store, '_recommendation_files', False):
-        from yt_playlist.rec import stored_home
-        return stored_home.assemble(store, now, epoch, avoid_genres=avoid_genres,
-            include_genres=include_genres, mode_order=mode_order, preparation=preparation)
-    inputs = _assembly_inputs(store, now, preparation)
-    bundles, modes = inputs['bundles'], inputs['modes']
-    if not bundles or not modes:
-        return []
-    original_bundles = bundles
-    if avoid_genres or include_genres:
-        # Start each card in the requested families. Backfill searches the complete pool below,
-        # widening to close neighbors only after exhausting its own family. Keep caches untouched.
-        filters = (tuple(sorted(include_genres)), tuple(sorted(avoid_genres)))
-        if filters not in inputs['filtered']:
-            bundles = {mid: ({surf: home_themes.matching_genres(store, items, avoid=avoid_genres,
-                                                              include=include_genres)
-                              for surf, items in bucket.items()}
-                            if mid != "all" and not mid.startswith("_") else bucket)
-                       for mid, bucket in bundles.items()}
-            # Keep the feedback attribution honest: stripping jazz from a jazz-led mode must not
-            # turn its few remaining rock tracks into a card whose pick still trains the jazz mode.
-            modes = [m for m in modes
-                     if (not m.get("families") or max(m["families"], key=lambda f: f[1])[0] not in avoid_genres)
-                     and (not include_genres or not m.get("families")
-                          or max(m["families"], key=lambda f: f[1])[0] in include_genres)
-                     and any(len(items) >= _MIN_CARD
-                             for items in bundles.get(str(m["mode_id"]), {}).values())]
-            inputs['filtered'][filters] = (bundles, modes)
-        bundles, modes = inputs['filtered'][filters]
-        if not modes:
-            return []
-    leans = preparation['leans'] if preparation is not None else transient.facet_leans(store, now)
-    vibe_rank = preparation['vibe_rank'] if preparation is not None else home_vibe.ranker(store, now)
-    n = int(rec_params.get_param(store, "modes_menu_size"))
-    if mode_order is not None:
-        available = {m["mode_id"] for m in modes}
-        chosen = [mid for mid in mode_order if mid in available][:max(n, 4)]
-    else:
-        now_posterior = layers.now_mode_posterior(store, now)
-        evidence_before = store.modes.epoch_started_at(epoch)
-        chosen = select_modes(modes, leans, epoch, n=len(modes) if vibe_rank.preset else max(n, 4),
-                              stats=mode_eval.mode_bandit_stats(store, before=evidence_before, now=now),
-                              now_posterior=now_posterior,
-                              now_gain=rec_params.get_param(store, 'now_gain') if now_posterior else None)
-    if not chosen:
-        return []
-    cap_a = int(rec_params.get_param(store, "modes_artist_cap"))
-    cap_al = int(rec_params.get_param(store, "modes_album_cap"))
-    calculation = assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank,
-        cap_a=cap_a, cap_al=cap_al, ab_share=float(rec_params.get_param(store, 'ppr_ab_share')),
-        comfort_minimum=int(rec_params.get_param(store, 'comfort_min_pool')),
-        include_genres=include_genres, avoid_genres=avoid_genres)
-    response = None
-    while True:
-        try:
-            request, value = calculation.send(response)
-        except StopIteration as completed:
-            return completed.value
-        if request == 'negative':
-            response = negative.for_keys(store, value)
-        elif request == 'decision':
-            response = experiments.last_decision(store)
-        elif request == 'pool':
-            response = _assembly_pool(store, inputs, original_bundles, value, now, preparation)
-        elif request == 'axes':
-            response = store.genres.feature_axes(value)
-        else:
-            raise ValueError(f'Unknown assembly input: {request}')
-
-
-def _assembly_pool(store, inputs, original_bundles, surf, now, preparation):
-    if surf not in inputs['full_pools']:
-        pool = list(original_bundles.get('all', {}).get(surf, []))
-        if not original_bundles.get('_meta', {}).get('full_pools'):
-            for mid, bucket in original_bundles.items():
-                if mid != 'all' and not mid.startswith('_'):
-                    pool.extend(bucket.get(surf, []))
-            if preparation is None and surf in ('wheelhouse', 'explore'):
-                keys, _, _ = vectors.load_content_vectors(store)
-                limit = max(len(keys), int(rec_params.get_param(store, 'modes_pool_limit')))
-                scorer = surfaces.for_you if surf == 'wheelhouse' else surfaces.explore_for_you
-                pool.extend(_item_dict(it) for it in scorer(store, now, limit=limit))
-        unique = {}
-        for item in pool:
-            if item.get('key'):
-                unique.setdefault(item['key'], item)
-        unchecked = unique.keys() - inputs['checked_keys']
-        if unchecked:
-            inputs['blocked'].update(home_exclusions(store, unchecked, now))
-            inputs['checked_keys'].update(unchecked)
-        inputs['full_pools'][surf] = home_themes.resolved_genres(store, list(unique.values()))
-    return inputs['full_pools'][surf]
+    from yt_playlist.rec import stored_home
+    return stored_home.assemble(store, now, epoch, avoid_genres=avoid_genres,
+        include_genres=include_genres, mode_order=mode_order, preparation=preparation)
 
 
 def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *, cap_a, cap_al,
@@ -511,15 +420,6 @@ def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *
     # per-render machinery that already blocks a track across cards.
     cards, seen = [], set(blocked)
     full_pools = {}
-    dislike_deltas = inputs['dislike_deltas']
-
-    def ordering(ranker, positions, items):
-        missing = {d["key"] for d in items if d.get("key") and d["key"] not in dislike_deltas}
-        if missing:
-            deltas = yield 'negative', missing
-            dislike_deltas.update({key: deltas.get(key, 0.0) for key in missing})
-        return _order_key(ranker, positions, leans, dislike_deltas)
-
     mode_families = {m["mode_id"]: max(m["families"], key=lambda f: f[1])[0]
                      for m in modes if m.get("families")}
 
@@ -538,7 +438,8 @@ def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *
         items = [d for d in bucket if d.get("key") and d["key"] not in seen
                  and d.get("artist") not in muted]
         candidate_keys = {d["key"] for d in items}
-        items.sort(key=(yield from ordering(ranker, ppr_pos, items)))
+        order = _order_key(ranker, ppr_pos, leans)
+        items.sort(key=order)
         items = vibe_rank(items)
         items = _diversify(items, cap_a, cap_al)
         if surf != "comfort" and len(items) < PROTO_SIZE:   # Comfort is NEVER backfilled (#63 credibility)
@@ -549,7 +450,6 @@ def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *
                 pool = [d for d in pool if _in_band(d.get("year"), band, year_cuts[0], year_cuts[1])]
             extra = [d for d in pool if d.get("key") and d["key"] not in seen and d["key"] not in taken]
             family = mode_families.get(mid)
-            order = yield from ordering(ranker, ppr_pos, extra)
             if family:
                 axes = yield 'axes', {d.get('genre') for d in extra}
                 distance = lambda d: genre_map.family_distance(family, axes.get(d.get('genre'), ('', None))[0])
@@ -575,7 +475,6 @@ def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *
                   "score_kind": "candidate_fit", "source_ranker": surf,
                   "ordering_ranker": ranker, "ppr_position": ppr_pos.get(item["key"]) if ranker == "ppr" else None,
                   "facet_tilt": _tilt_key(item, leans), "vibe": vibe_rank.preset,
-                  "negative_delta": dislike_deltas.get(item["key"], 0.0),
                   "vibe_affinity": vibe_rank.affinity(item)}} for item in items]
         return {"lane": surf, "label": label, "mode_id": mid, "ranker": ranker,
                 "tracks": items, "_candidate_keys": candidate_keys}, bucket
@@ -595,8 +494,7 @@ def assembly_steps(inputs, bundles, modes, chosen, epoch, n, leans, vibe_rank, *
                 cohort_policy = {k: v for k, v in policy.items() if k != "built_at"}
                 cohort = hashlib.sha256(json.dumps({"policy": cohort_policy, "share": ab_share,
                     "caps": [cap_a, cap_al], "vibe": vibe_rank.preset,
-                    "leans": leans, "negative": {k: dislike_deltas[k] for k in candidates
-                                                 if dislike_deltas.get(k)}},
+                    "leans": leans},
                     sort_keys=True).encode()).hexdigest()[:16]
                 card["experiment"] = {
                     "schema": 1, "name": "ppr-cosine-v1", "cohort": cohort,

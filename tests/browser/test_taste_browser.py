@@ -1,6 +1,7 @@
 """Taste overview, playlist influence, recommendation comparison and feedback."""
-import json
+from tests.conftest import seed_catalog_track
 from tests.derived_rating_support import seed_dislike, seed_like
+from tests.group_support import publish_keyed
 from tests.retained_rating_support import observe_rating
 from urllib.parse import urlsplit
 
@@ -116,29 +117,22 @@ def test_preview_and_compare_show_artwork_play_tracks_and_keep_baseline(live_app
 
 
 def test_overview_updates_itself_when_background_genre_repair_finishes(store, page, monkeypatch, request):
-    from yt_playlist.rec import embedding_vectors as embed
     from yt_playlist.rec.rec_worker import RecWorker
     repairing = {"busy": True}
     monkeypatch.setattr(RecWorker, "trigger_mode_refresh", lambda self, **kw: None)
     monkeypatch.setattr(RecWorker, "busy", property(lambda self: repairing["busy"]))
     live_app = request.getfixturevalue("live_app")
     iid = store.accounts.get_accounts()[0].id
-    store.settings.set_setting("rec_content_model", json.dumps({"cat": {"fam:techno": 0}, "ncat": 1, "cont": []}))
     keys = []
     for i in range(3):
         tid = store.tracks.upsert_track(f"repair-{i}", f"Repair {i}", "Artist", None, None)
         store.tracks.set_track_genre(tid, "Techno")
         keys.append(f"repair {i}|artist")
-    store.rec_model.replace_rec_content_vectors([(key, np.ones(1, dtype=np.float32).tobytes()) for key in keys])
     store.history.import_play_events(iid, [(key, f"repair-{i}", 1.0) for i, key in enumerate(keys)])
-    mode = {"mode_id": 1, "label": "Techno", "families": [["techno", 3]],
-            "centroid": np.ones(1, dtype=np.float32), "size": 3, "rep_keys": keys, "space": "old"}
-    store.modes.replace_modes([mode], retired_ids=[], now=1.0)
     page.goto(live_app + "/taste")
     overview = page.locator("#taste-overview-panel")
     expect(overview.get_by_role("status")).to_contain_text("Updating your music groups automatically")
-    mode["space"] = embed.content_space_id(store)
-    store.modes.replace_modes([mode], retired_ids=[], now=2.0)
+    publish_keyed(store, [('Techno', keys, .9)], now=2.)
     repairing["busy"] = False
     expect(overview.locator(".taste-shift-row")).to_have_count(1, timeout=7000)
     expect(overview.locator('[hx-trigger="every 3s"]')).to_have_count(0)
@@ -154,10 +148,10 @@ def test_populated_overview_leads_with_changes_and_keeps_feedback_compact(store,
     monkeypatch.setattr(RecWorker, 'trigger_mode_refresh', lambda self, **kw: None)
     live_app = request.getfixturevalue('live_app')
     iid = store.accounts.get_accounts()[0].id
-    store.modes.replace_modes([{
-        'mode_id': 1, 'label': 'Latin', 'families': [['latin', 1]],
-        'centroid': np.ones(1, dtype=np.float32), 'size': 3, 'rep_keys': [],
-    }], retired_ids=[], now=1.0)
+    keys = [f'latin {i}|artist' for i in range(4)]
+    for key in keys:
+        seed_catalog_track(store, key, key, 'Latin Artist', genre='Latin')
+    publish_keyed(store, [('Latin', keys, .4)])
     store.history.record_history_plays(iid, 1.0, ['song|artist'], source_timezone='UTC')
     for i in range(47):
         seed_like(store, f'action-{i}|artist', 1.0, provenance='action')

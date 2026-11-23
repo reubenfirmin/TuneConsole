@@ -12,7 +12,7 @@ from yt_playlist.library.sync import sync_identity
 
 @pytest.mark.parametrize('width', [1440])
 def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichment(live_app, store, page, width):
-    from tests.onboarding_support import finish_partial_import, publish_personal_mix
+    from tests.onboarding_support import finish_partial_import, publish_live_mix_inputs
 
     finish_partial_import(store, now=1)
     page.route('**/bridge/status', lambda route: route.fulfill(json={
@@ -28,8 +28,8 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     page.evaluate('window.arrivalDocument = document; window.arrivalPlayer = document.querySelector(".global-now-playing")')
     from tests.test_growth_journey import early_journey
-    early_journey(store)
-    publish_personal_mix(store, now=1)
+    reserve = early_journey(store)
+    publish_live_mix_inputs(store, now=1, fresh_reserve=reserve)
     expect(page.locator('#onboarding-feed')).to_have_count(0, timeout=12000)
     expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
     expect(page.locator('#home-mode-cards .gen-card')).to_have_count(4)
@@ -51,8 +51,7 @@ def test_partial_sync_opens_ready_mixes_without_reloading_or_waiting_for_enrichm
 
 def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, store, page, tmp_path):
     from tests.conftest import seed_catalog_track
-    from tests.onboarding_support import publish_personal_mix
-    from yt_playlist.rec import home_cards, home_prepared
+    from tests.onboarding_support import publish_live_mix_inputs
     from tests.home_fixture_support import returning_listener
 
     store.settings.set_setting('last_sync_at', '1')
@@ -69,6 +68,7 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     page.clock.install()
     page.goto(f'{live_app}/?prepare_attempt=10#directions')
     board = page.locator('#home-mode-cards')
+    ready_cards = board.locator('.gen-card:has(.gen-row)')
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.setup-banner')).to_be_hidden()
@@ -85,10 +85,10 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     # them before the next poll so its replacement element owns the timer.
     page.clock.run_for(2000)
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
-    comfort_tracks = publish_personal_mix(store, now=1, count=1)
+    publish_live_mix_inputs(store, now=1, count=1)
     with page.expect_response('**/home/cards?prepare_attempt=10'):
         page.clock.fast_forward(30_000)
-    expect(board.locator('.gen-card')).to_have_count(1)
+    expect(ready_cards).to_have_count(1)
     expect(board.locator('.gen-row')).to_have_count(4)
     expect(page.get_by_role('tab', name='Mix tapes', exact=True)).to_be_visible()
     expect(page.locator('.mix-preparation-note')).to_be_hidden()
@@ -98,40 +98,20 @@ def test_returning_home_recovers_a_late_mix_without_restarting_setup(live_app, s
     expect(board).to_have_attribute('hx-trigger', 'every 30s')
     page.clock.run_for(2000)
 
-    # Publish a complete worker-style board through the real cache boundary.
-    # Fresh candidates remain outside the library; the other lanes are owned.
-    protos = []
-    for lane in ('wheelhouse', 'explore', 'fresh', 'comfort'):
-        tracks = comfort_tracks if lane == 'comfort' else []
-        if lane != 'comfort':
-            for i in range(4):
-                title, video_id = f'Recovery {lane} {i}', f'recovery-{lane}-{i}'
-                key = f'{title.lower()}|artist'
-                if lane == 'fresh':
-                    key = store.discovery.upsert_discovered_track(
-                        key, video_id, title, 'Artist', '', None, 'house', None, None, 1)
-                else:
-                    seed_catalog_track(store, key, title, 'Artist', video_id=video_id, genre='house')
-                tracks.append({'key': key, 'title': title, 'artist': 'Artist',
-                               'video_id': video_id, 'album': '', 'thumbnail': None, 'genre': 'house'})
-        proto = home_cards._proto(store, lane, f'Recovered {lane}', tracks, 1)
-        proto['recipe'] = {'lane': lane}
-        protos.append(proto)
-    result = home_cards.CardsResult(
-        protos, [{'proto': proto, 'pool': None} for proto in protos],
-        None, None, [], [], home_cards._epoch(store, 'cards'), None)
-    home_prepared.remember(store, store.rec_proposals.get_proposals('home_prepared'), result, 1)
+    # Publish the remaining ranks so the next ordinary request can assemble all four cards.
+    publish_live_mix_inputs(store, now=2)
     with page.expect_response('**/home/cards?prepare_attempt=10'):
         page.clock.fast_forward(30_000)
-    expect(board.locator('.gen-card')).to_have_count(4)
+    expect(ready_cards).to_have_count(4)
     expect(board.locator('.gen-row')).to_have_count(16)
     expect(page.locator('#home-mode-cards[hx-get]')).to_have_count(0)
     expect(page.locator('#home-mode-cards[hx-trigger]')).to_have_count(0)
     expect(page.locator('#onboarding-feed')).to_have_count(0)
     expect(page.locator('.global-now-playing')).to_contain_text('Still playing')
     assert page.evaluate('startupDocument === document && startupPlayer === document.querySelector(".global-now-playing")')
-    with page.expect_response('**/home/growth'):
+    with page.expect_response('**/home/growth?navigation=true') as growth:
         page.clock.fast_forward(15_000)
+    assert growth.value.ok
     page.get_by_role('tab', name='Mix tapes', exact=True).click()
     # Settle HTMX's JavaScript timers, then await the actual CSS timeline. The
     # simulated clock does not establish that browser animations have finished.
@@ -172,8 +152,7 @@ def live_initial_sync(monkeypatch, request):
 
 
 
-@pytest.mark.parametrize(('width', 'height'), [(1280, 1000), (960, 540)])
-def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, width, height, tmp_path):
+def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, store, page, tmp_path):
     from urllib.parse import parse_qs
     from tests.browser.test_album_listening_browser import _COVER
 
@@ -182,7 +161,8 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
                                       'artist': 'An artist', 'year': '2001'})
     status = {'connected': True, 'now_playing': {'video_id': 'other', 'title': 'Other song',
         'artist': 'Another artist', 'paused': False, 'playlist_ytm_id': 'OTHER'}}
-    page.set_viewport_size({'width': width, 'height': height})
+    viewports = [(1280, 1000), (960, 540)]
+    page.set_viewport_size({'width': 1280, 'height': 1000})
     page.route('**/bridge/status', lambda route: route.fulfill(json=status))
     page.route('**/onboarding-album-cover.svg', lambda route: route.fulfill(body=_COVER, content_type='image/svg+xml'))
     page.route('**/album/play', lambda route: route.fulfill(status=204, headers={'HX-Trigger': json.dumps({
@@ -192,8 +172,10 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     page.on('pageerror', lambda error: errors.append(str(error)))
     page.goto(live_app)
     welcome = page.get_by_role('dialog', name='A better way to listen to music.')
-    expect(welcome).to_be_visible()
-    page.screenshot(path='/tmp/tuneconsole-1259-welcome.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(welcome).to_be_visible()
+        page.screenshot(path=str(tmp_path / f'onboarding-welcome-{width}.png'))
     page.get_by_role('button', name='Explore my festival', exact=True).click()
     expect(welcome).to_be_hidden()
     card = page.locator('.starter-album')
@@ -206,11 +188,13 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(page.locator('.starter-mix')).to_have_count(0)
     expect(page.locator('.arrival-progress')).to_be_hidden()
     play = card.get_by_role('button', name='Play The first record', exact=True)
-    assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == 'onboarding-orbit, onboarding-breathe'
-    assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
     card.evaluate('''el => Promise.all(el.getAnimations({subtree:true})
         .filter(a => a.effect.getComputedTiming().iterations !== Infinity).map(a => a.finished))''')
-    page.screenshot(path=str(tmp_path / f'onboarding-first-album-{width}.png'), full_page=True)
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
+        assert play.evaluate("el => getComputedStyle(el, '::after').animationName") == 'onboarding-orbit, onboarding-breathe'
+        page.screenshot(path=str(tmp_path / f'onboarding-first-album-{width}.png'), full_page=True)
     player = page.locator('.global-now-playing')
     with page.expect_request('**/album/play') as request:
         play.click()
@@ -239,7 +223,10 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     expect(tour).to_be_visible()
     assert tour.evaluate('el => !!el.closest("dialog.album-listening[open]")')
     expect(dialog.locator('.album-listening-cover')).to_have_js_property('naturalWidth', 900)
-    page.screenshot(path=f'/tmp/tuneconsole-1259-album-tour-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        expect(tour).to_be_in_viewport()
+        page.screenshot(path=f'/tmp/tuneconsole-1259-album-tour-{width}.png')
     # Exercise the actual first-play screen before closing its artwork.
     tour.get_by_role('button', name='Next', exact=True).click()
     expect(page.get_by_role('region', name='Keep listening', exact=True)).to_be_visible()
@@ -254,9 +241,13 @@ def test_first_album_is_playable_before_sync_and_cues_only_its_player(live_app, 
     page.get_by_role('region', name='Keep listening', exact=True).get_by_role('button', name='Next').click()
     ratings_tour = page.get_by_role('region', name='Make it yours', exact=True)
     expect(ratings_tour).to_contain_text('Dislike skips a song')
-    page.screenshot(path=f'/tmp/tuneconsole-1259-album-ratings-tour-{width}.png')
+    for width, height in viewports:
+        page.set_viewport_size({'width': width, 'height': height})
+        dismiss = ratings_tour.get_by_role('button', name='Dismiss tour' if width == 960 else 'Got it', exact=True)
+        expect(dismiss).to_be_in_viewport()
+        page.screenshot(path=f'/tmp/tuneconsole-1259-album-ratings-tour-{width}.png')
     with page.expect_response('**/onboard/player-tour/dismiss'):
-        ratings_tour.get_by_role('button', name='Dismiss tour' if width == 960 else 'Got it', exact=True).click()
+        dismiss.click()
     expect(page.locator('.onboarding-player-tour')).to_have_count(0)
     page.keyboard.press('Escape')
     page.locator('.topbar nav').get_by_role('link', name='Home', exact=True).click()

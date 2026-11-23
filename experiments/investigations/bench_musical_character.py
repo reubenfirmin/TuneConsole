@@ -34,12 +34,12 @@ from yt_playlist.rec.radio_directions import RadioDirections
 
 def _catalog(store):
     artists, albums = defaultdict(set), defaultdict(set)
-    for key, artist in store.conn.execute('SELECT r.identity_key,COALESCE(a.artist_id,t.artist_id) '
-            'FROM entry_artists t JOIN catalog_entries e ON e.id=t.entry_id '
-            'JOIN recordings r ON r.id=e.recording_id LEFT JOIN artist_redirects a ON a.retired_id=t.artist_id'):
+    for key, artist in store.conn.execute('SELECT r.identity_key,COALESCE(a.redirect_artist_id,a.id) '
+            'FROM entry_artists t JOIN track_sources e ON e.id=t.entry_id '
+            'JOIN recordings r ON r.id=e.recording_id JOIN artists a ON a.id=t.artist_id'):
         artists[key].add(artist)
     for key, album in store.conn.execute('SELECT r.identity_key,t.album_id FROM album_tracks t '
-            'LEFT JOIN catalog_entries e ON e.id=t.entry_id '
+            'LEFT JOIN track_sources e ON e.id=t.entry_id '
             'JOIN recordings r ON r.id=COALESCE(e.recording_id,t.recording_id)'):
         albums[key].add(album)
     rows = {}

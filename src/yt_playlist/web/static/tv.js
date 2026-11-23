@@ -16,7 +16,8 @@ function loadTvApi() {
 }
 
 function tvHome(maximum = 15) {
-  let player = null, timer = null, artTimer = null, progressTimer = null, serial = 0, playerSerial = 0, selectionSerial = 0, controller = null;
+  let player = null, launchTimer = null, artTimer = null, progressTimer = null, playerSerial = 0, selectionSerial = 0;
+  let readinessTimer = null, readinessRequest = null, readinessFailures = 0;
   let reports = Promise.resolve(), reportedPlay = false, lastTick = 0;
   let refillTimer = null, refillSerial = 0, refillRequest = null, entry = 0;
   let ownsPlayback = false, playbackSerial = 0, loadedVideoId = null, releasePending = false, lastPlayerState = null;
@@ -32,7 +33,7 @@ function tvHome(maximum = 15) {
   const lengths = [1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20, 25, 30, 45, 60, 90, 120, 180, 240, 360, 480, 720, null];
   return {
     items: [], selected: -1, maxMinutes: maximum, lengths, draft: lengths.indexOf(maximum), visible: false,
-    ready: false, loading: false, starting: false, connecting: false, playing: false, playerMounted: false,
+    ready: false, preparing: false, loading: false, starting: false, connecting: false, playing: false, playerMounted: false,
     playlistId: null, playlistTitle: '', error: '', playerError: '', finished: false,
     savingParams: false, paramsError: '', resetting: false,
     launchPending: !!launchId,
@@ -40,7 +41,7 @@ function tvHome(maximum = 15) {
     failedVideos: [],
     destroyed: false, failed: [], revealedCount: 0, sessionStarted: false, savedPlaylistOpened: null,
     failedArt: [],
-    get generating() { return this.starting || this.connecting || (!this.ready && !this.playerMounted && !this.error && !this.playerError); },
+    get generating() { return this.starting || this.connecting || (this.preparing && !this.ready && !this.playerMounted && !this.error && !this.playerError); },
     get current() { return this.items[this.selected]; },
     get lengthLabel() {
       const minutes = this.lengths[this.draft];
@@ -130,6 +131,7 @@ function tvHome(maximum = 15) {
       updateView = () => this.$nextTick(syncView);
       window.addEventListener('app-page-changed', updateView);
       window.addEventListener('hashchange', updateView);
+      window.addEventListener('home-area-loaded', updateView);
       window.addEventListener('resize', layoutView);
       window.addEventListener('animationend', layoutView);
       this.$nextTick(syncView);
@@ -145,10 +147,11 @@ function tvHome(maximum = 15) {
       if (value === this.visible) return;
       this.visible = value;
       if (value) {
-        if (!this.playerMounted && !this.starting && !this.loading) this.readiness();
+        this.readiness();
         if (this.current?.artist_art_pending) this.refreshArtwork();
         this.revealCurrent();
       } else {
+        this.cancelReadiness();
         clearTimeout(artTimer);
       }
       this.publish();
@@ -182,37 +185,54 @@ function tvHome(maximum = 15) {
         reportedPlay = true; this.report('play');
       }
     },
+    cancelReadiness() {
+      clearTimeout(readinessTimer);
+      if (readinessRequest) {
+        readinessRequest.abort();
+        readinessRequest = null;
+        this.loading = false;
+      }
+      readinessFailures = 0;
+    },
     async readiness() {
-      const request = ++serial;
-      controller?.abort(); controller = new AbortController(); clearTimeout(timer);
+      if (!this.visible || this.destroyed || this.playerMounted || this.starting || this.connecting || this.loading) return;
+      clearTimeout(readinessTimer);
+      const request = readinessRequest = new AbortController();
       this.loading = true;
       try {
-        const response = await fetch('/home/tv', {signal: AbortSignal.any([controller.signal, AbortSignal.timeout(20000)])});
+        const response = await fetch('/home/tv', {signal: AbortSignal.any([request.signal, AbortSignal.timeout(8000)])});
         if (!response.ok) {
-          console.debug('[TV] readiness response unavailable', response.status, await response.text());
-          throw new Error('TV readiness failed');
+          response.body?.cancel().catch(() => {});
+          throw new Error('TV readiness response ' + response.status);
         }
         const data = await response.json();
-        if (request !== serial || this.destroyed) return;
-        this.ready = data.ready; this.maxMinutes = data.max_minutes;
+        if (request !== readinessRequest) return;
+        readinessFailures = 0;
+        this.ready = data.ready; this.preparing = !data.ready; this.maxMinutes = data.max_minutes;
         if (!launchId && data.pending_launch) {
           launchId = data.pending_launch;
           try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
           this.launchPending = true;
         }
         this.error = this.launchPending ? 'This TV session is still unconfirmed.' : data.message || '';
-        if (!this.ready && this.visible) timer = setTimeout(() => this.readiness(), 5000);
+        if (!this.ready) readinessTimer = setTimeout(() => this.readiness(), 5000);
       } catch (error) {
+        if (request !== readinessRequest) return;
         console.debug('[TV] readiness unavailable', error);
-        if (request === serial && !this.destroyed && error.name !== 'AbortError') {
-          this.error = 'Couldn’t load TV. Try again.';
+        this.preparing = false;
+        const delay = Math.min(30000, 2000 * 2 ** Math.min(readinessFailures++, 4));
+        readinessTimer = setTimeout(() => this.readiness(), delay);
+      } finally {
+        if (request === readinessRequest) {
+          readinessRequest = null;
+          this.loading = false;
         }
-      } finally { if (request === serial) this.loading = false; }
+      }
     },
     async start() {
       if (this.starting) return;
       // Keep the last usable player until a replacement playlist is confirmed.
-      ++serial; clearTimeout(timer); controller?.abort(); controller = null;
+      this.cancelReadiness(); clearTimeout(launchTimer);
       const intent = ++playbackSerial;
       launchId ||= window.crypto?.randomUUID?.() || String(Date.now()) + '-' + Math.random().toString(36).slice(2);
       try { localStorage.setItem('tc-tv-launch', launchId); } catch (_) {}
@@ -241,7 +261,7 @@ function tvHome(maximum = 15) {
           if (data.message) { this.starting = false; this.error = data.message; return; }
           // An empty or rebuilding pool is normal preparation. Keep the same
           // launch intent and embedded loader until a prepared draw is ready.
-          timer = setTimeout(() => this.generate(intent), 2000);
+          launchTimer = setTimeout(() => this.generate(intent), 2000);
           return;
         }
         this.ready = true;
@@ -262,7 +282,7 @@ function tvHome(maximum = 15) {
       if (launchId === id) { launchId = null; this.launchPending = false; }
     },
     async openPlaylist(id) {
-      ++serial; clearTimeout(timer); controller?.abort(); controller = null;
+      this.cancelReadiness(); clearTimeout(launchTimer);
       const intent = ++playbackSerial;
       this.starting = false; this.loading = true; this.connecting = true;
       try {
@@ -356,7 +376,7 @@ function tvHome(maximum = 15) {
     stopPlayer() {
       if (player) this.report('bye');
       this.cancelVisualCheck();
-      ++serial; clearTimeout(timer); clearTimeout(artTimer); controller?.abort(); controller = null;
+      this.cancelReadiness(); clearTimeout(launchTimer); clearTimeout(artTimer);
       ++refillSerial; clearTimeout(refillTimer); refillRequest = null; this.refilling = false; this.waiting = false;
       ++playbackSerial;
       ++selectionSerial;
@@ -605,7 +625,8 @@ function tvHome(maximum = 15) {
         }
         const data = await response.json();
         if (this.destroyed) return;
-        this.maxMinutes = data.max_minutes; this.ready = data.ready; this.$refs.params.close();
+        this.cancelReadiness();
+        this.maxMinutes = data.max_minutes; this.ready = data.ready; this.preparing = !data.ready; this.$refs.params.close();
         this.error = data.message || '';
         if (!this.ready && !this.playerMounted && !this.starting) this.readiness();
       } catch (error) {
@@ -618,7 +639,7 @@ function tvHome(maximum = 15) {
       // its callbacks must still work when the user explicitly resumes TV.
       ++playbackSerial;
       this.cancelVisualCheck();
-      ++serial; clearTimeout(timer); clearTimeout(artTimer); controller?.abort(); controller = null;
+      this.cancelReadiness(); clearTimeout(launchTimer); clearTimeout(artTimer);
       ++refillSerial; clearTimeout(refillTimer); this.refilling = false; this.waiting = false;
       this.starting = false; this.connecting = false; this.loading = false;
       ownsPlayback = false;
@@ -650,10 +671,11 @@ function tvHome(maximum = 15) {
       } finally { this.resetting = false; }
     },
     destroy() {
-      this.destroyed = true; ++serial; clearTimeout(timer); controller?.abort(); this.stopPlayer();
+      this.destroyed = true; this.stopPlayer();
       viewObserver?.disconnect();
       window.removeEventListener('app-page-changed', updateView);
       window.removeEventListener('hashchange', updateView);
+      window.removeEventListener('home-area-loaded', updateView);
       window.removeEventListener('resize', layoutView);
       window.removeEventListener('animationend', layoutView);
       if (window.tvPlaybackControls === this.controls) delete window.tvPlaybackControls;

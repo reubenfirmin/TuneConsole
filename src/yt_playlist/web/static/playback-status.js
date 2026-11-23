@@ -89,9 +89,10 @@
       })
       .catch(() => {
         if (inFlight !== request) return;
-        // Keep an explicit recovery control through transient status failures.
-        // Saved state never supplies a live playback sample or radio indicator.
+        // Retain the song for the persistent card without publishing a live sample.
         publish({connected: !!bridgeSnapshot?.connected,
+          last_known_player: bridgeSnapshot?.connected &&
+            (bridgeSnapshot.now_playing || bridgeSnapshot.last_known_player),
           resumable_player: bridgeSnapshot?.resumable_player,
           radio_resume: bridgeSnapshot?.radio_resume});
       })

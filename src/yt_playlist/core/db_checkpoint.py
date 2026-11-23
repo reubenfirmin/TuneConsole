@@ -8,7 +8,6 @@ import logging
 import sqlite3
 
 from yt_playlist.core.db_diagnostics import DiagnosticConnection
-from yt_playlist.core.db_space import StorageCompacting
 
 log = logging.getLogger(__name__)
 
@@ -49,6 +48,6 @@ def checkpoint_wal(path):
         with closing(sqlite3.connect(path.as_uri() + '?mode=rw', uri=True, timeout=0,
                                      factory=DiagnosticConnection)) as conn:
             return conn.execute('PRAGMA wal_checkpoint(PASSIVE)').fetchone()
-    except (sqlite3.Error, StorageCompacting, TimeoutError):
+    except (sqlite3.Error, TimeoutError):
         log.warning('Post-publication WAL checkpoint deferred', exc_info=True)
         return None

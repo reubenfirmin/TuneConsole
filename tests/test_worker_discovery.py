@@ -49,7 +49,7 @@ class _ArtistClient(FakeClient):
 
 
 def _ctx(store, client):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     return iid, Ctx(store=store, client_provider=lambda: {iid: client}, now_fn=lambda: 1.0,
                     templates=None, jobs=None)
 
@@ -89,7 +89,7 @@ def test_worker_materializes_proposals(store, monkeypatch):
 def test_home_discover_serves_cached(store, monkeypatch, predecessors):
     from tests.test_growth_journey import early_journey
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if predecessors:
         early_journey(store)
     store.discovery.upsert_discovered_album("B", "X", "Cached LP", "2024", None, now=1.0)

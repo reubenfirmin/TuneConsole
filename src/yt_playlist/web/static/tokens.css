@@ -480,6 +480,9 @@
       color-mix(in srgb, var(--p-violet-600) 18%, transparent),
       color-mix(in srgb, var(--p-violet-800) 10%, transparent));
 
+  /* ---- Model Map trace ---- */
+  --model-map-third-hop: var(--p-lavender-300);
+
   /* ---- "boost"/supernova fire ramp (cluster central node) ---- */
   --fire-0: var(--p-red-800);   --fire-1: var(--p-orange-600);
   --fire-2: var(--p-orange-450); --fire-3: var(--p-amber-300);

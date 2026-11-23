@@ -30,7 +30,7 @@
             title="Play this mix" aria-label="Save and play this mix" @click.stop
             hx-post="/home/generate" hx-target="#gen-{{ p.lane }}"
             hx-swap="outerHTML" hx-disabled-elt="this" onclick="genOpenYT('gen-{{ p.lane }}')"
-            hx-vals='js:{name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: genRecipe("gen-{{ p.lane }}")}'><span aria-hidden="true">▶</span><span class="gen-play-label">Play mix</span></button>
+            hx-vals='js:{mix_card: "1", name: genName("gen-{{ p.lane }}"), tracks: genTracks("gen-{{ p.lane }}"), recipe: genRecipe("gen-{{ p.lane }}")}'><span aria-hidden="true">▶</span><span class="gen-play-label">Play mix</span></button>
     {% endif %}
     <div class="gen-concept">
     <p class="gen-direction">{{ p.label }}</p>
@@ -60,6 +60,7 @@
   <ol class="gen-list">
     {% for f in p.tracks %}
     <li class="gen-row" data-key="{{ f.key }}" data-vid="{{ f.video_id }}" data-title="{{ f.title }}"
+        {% if f.recording_id %}data-recording-id="{{ f.recording_id }}"{% endif %}
         data-artist="{{ f.artist }}" data-album="{{ f.album }}" data-thumb="{{ f.thumbnail or '' }}">
       <span class="gen-index" aria-hidden="true">{{ loop.index }}</span>
       <span class="gen-th"><img src="{{ f.thumbnail or ('https://i.ytimg.com/vi/' ~ (f.video_id|urlencode) ~ '/hqdefault.jpg') }}"

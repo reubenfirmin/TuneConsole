@@ -3,6 +3,8 @@ import json
 import os
 from pathlib import Path
 
+from tests.library_image.schema_coordinates import SCHEMA_FIELDS
+
 
 def report_file(path):
     """Keep existing check reports outside the container's disposable /tmp."""
@@ -20,8 +22,12 @@ def managed_database(source=None, report=None):
     if source is not None and Path(source).resolve() != path:
         return None  # Synthetic recovery subjects still exercise their own copy.
     if report is not None:
-        report['managed_library'] = json.loads(path.with_name('.baseline.json').read_text())
-        report['source_version'] = report['managed_library']['schema']
+        baseline = json.loads(path.with_name('.baseline.json').read_text())
+        workspace = json.loads(report_file('workspace.json').read_text())
+        schema = {key: workspace[key] for key in SCHEMA_FIELDS}
+        report['managed_library'] = baseline | schema
+        report['source_schema'] = schema
+        report['source_version'] = schema['schema']
         report['source_access'] = 'private filesystem snapshot; no per-test capture or relocation'
     return path
 

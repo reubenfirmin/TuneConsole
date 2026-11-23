@@ -1,156 +1,104 @@
-"""Revisioned human annotations. Callers own transactions and the Store lock."""
-from pathlib import Path
+"""Read and append human judgments and export their archived model output."""
+import json
 
-from yt_playlist.core import audio_annotation_files as files
-from yt_playlist.core.audio_annotation_contract import FILE_FORMAT, evaluation_values, validate
+from .audio_annotation_contract import TAXONOMIES, evaluation_values, validate
+
+
+SAMPLE_COLUMNS = ('sample_1_id', 'sample_2_id', 'sample_3_id')
+HEAD = ("a.kind<>'playback' AND "
+        'NOT EXISTS (SELECT 1 FROM audio_annotations successor WHERE successor.supersedes_id=a.id)')
+
+
+def decode(cursor, row):
+    annotation = dict(zip((field[0] for field in cursor.description), row))
+    for field in ('video_id', 'title', 'artist'):
+        annotation.pop(field)
+    annotation['sample_ids'] = [sample for column in SAMPLE_COLUMNS
+                                if (sample := annotation.pop(column)) is not None]
+    annotation['vibes'] = json.loads(annotation.pop('labels_json'))
+    annotation['archive'] = json.loads(annotation.pop('archive_json'))
+    return annotation
 
 
 def latest(conn, run_id, *, kind, taxonomy_version):
-    fields = ('id', 'run_id', 'kind', 'taxonomy_version', 'revision', 'state', 'created_at',
-              'legacy_run_key', 'resolution_status', 'unresolved_sample_count', 'model_output_filename',
-              'model_output_digest')
-    row = conn.execute('SELECT ' + ','.join(fields) + ' FROM audio_annotations '
-        'WHERE COALESCE(run_id,legacy_run_key)=? AND kind=? AND taxonomy_version=? AND sealed=1 '
-        'ORDER BY revision DESC LIMIT 1', (run_id, kind, taxonomy_version)).fetchone()
-    return dict(zip(fields, row)) if row else None
+    cursor = conn.execute(
+        "SELECT * FROM audio_annotations WHERE run_key=? AND kind=? AND taxonomy_version=? AND kind<>'playback' "
+        'ORDER BY revision DESC LIMIT 1', (run_id, kind, taxonomy_version))
+    row = cursor.fetchone()
+    return decode(cursor, row) if row else None
 
 
-def read(conn, annotation):
-    annotation_id = annotation['id']
-    run = annotation['run_id'] or annotation['legacy_run_key']
-    document = files.read(annotation['model_output_filename'], expected_digest=annotation['model_output_digest'], expected={
-        'run_key': run, 'kind': annotation['kind'], 'taxonomy_version': annotation['taxonomy_version'],
-        'revision': annotation['revision']})
-    samples = [row[0] for row in conn.execute('SELECT sample_id FROM audio_annotation_samples '
-                                             'WHERE annotation_id=? ORDER BY position', (annotation_id,))]
-    labels = [row[0] for row in conn.execute('SELECT vibe FROM audio_annotation_vibes '
-                                            'WHERE annotation_id=? ORDER BY position', (annotation_id,))]
-    return {**annotation, 'sample_ids': samples, 'vibes': labels,
-            'prediction': document['prediction'], 'updated_at': annotation['created_at'],
-            'legacy_sample_ids': (document.get('legacy') or {}).get('sample_ids'),
-            'unresolved_samples': document.get('unresolved_samples', [])}
+def read(conn, annotation_id):
+    cursor = conn.execute("SELECT * FROM audio_annotations WHERE id=? AND kind<>'playback'", (annotation_id,))
+    row = cursor.fetchone()
+    return decode(cursor, row) if row else None
 
 
-def evaluation(conn, annotation_id):
-    """Read the frozen, typed hypothesis; never rerun the current model."""
-    row = conn.execute('SELECT taxonomy_version,prediction_version,model_present,model_labels_present,model_sha256,'
-                        'model_feature_version,model_training_songs FROM audio_annotation_evaluations '
-                        'WHERE annotation_id=?', (annotation_id,)).fetchone()
-    if row is None:
-        return None
-    version, prediction_version, present, labels_present, digest, feature, training = row
-    model = ({key: value for key, value in (('sha256', digest), ('feature_version', feature),
-                                            ('training_songs', training)) if value is not None} if present else None)
-    if present and labels_present:
-        model['trained_labels'] = [row[0] for row in conn.execute('SELECT vibe FROM audio_annotation_model_labels '
-            'WHERE annotation_id=? ORDER BY position', (annotation_id,))]
-    return {'taxonomy_version': version, 'version': prediction_version, 'model': model,
-            'ranking': [{'vibe': vibe, 'score': score} for vibe, score in conn.execute(
-                'SELECT vibe,score FROM audio_annotation_scores WHERE annotation_id=? ORDER BY position',
-                (annotation_id,))],
-            'vibes': [row[0] for row in conn.execute('SELECT vibe FROM audio_annotation_predictions '
-                'WHERE annotation_id=? ORDER BY position', (annotation_id,))]}
-
-
-def _save_evaluation(conn, annotation_id, prediction):
+def evaluation(prediction):
+    """Interpret an archived hypothesis using the vocabulary it was recorded with."""
     if not isinstance(prediction, dict):
-        return
-    version = prediction.get('taxonomy_version')
-    vocabulary = {row[0] for row in conn.execute('SELECT vibe FROM audio_taxonomy_labels '
-                                                 'WHERE taxonomy_version=?', (version,))}
-    write_evaluation(conn, annotation_id, evaluation_values(prediction, vocabulary))
-
-
-def write_evaluation(conn, annotation_id, values):
+        return None
+    taxonomy = prediction.get('taxonomy_version')
+    if not isinstance(taxonomy, str):
+        return None
+    values = evaluation_values(prediction, TAXONOMIES.get(taxonomy, ()))
     if values is None:
-        return
-    version = values['header'][0]
-    conn.execute('INSERT INTO audio_annotation_evaluations VALUES (?,?,?,?,?,?,?,?)',
-                 (annotation_id, *values['header']))
-    conn.executemany('INSERT INTO audio_annotation_scores VALUES (?,?,?,?,?)',
-                     ((annotation_id, version, *row) for row in values['scores']))
-    conn.executemany('INSERT INTO audio_annotation_predictions VALUES (?,?,?)',
-                     ((annotation_id, label, position) for position, label in enumerate(values['predicted'])))
-    conn.executemany('INSERT INTO audio_annotation_model_labels VALUES (?,?,?,?)',
-                     ((annotation_id, version, label, position) for position, label in enumerate(values['trained'])))
+        return None
+    version, model_version, present, labels_present, digest, feature, training = values['header']
+    model = ({key: value for key, value in (('sha256', digest), ('feature_version', feature),
+                                            ('training_songs', training)) if value is not None}
+             if present else None)
+    if present and labels_present:
+        model['trained_labels'] = values['trained']
+    return {'taxonomy_version': version, 'version': model_version, 'model': model,
+            'ranking': [{'vibe': vibe, 'score': score} for vibe, _, score in values['scores']],
+            'vibes': values['predicted']}
 
 
-def save(conn, run_id, sample_ids, labels, taxonomy_version, prediction, now, *, kind='session',
-         state=None, memory_key=None):
-    """Publish a new immutable revision, including an explicitly empty judgment."""
+def save(conn, run_id, sample_ids, labels, taxonomy_version, prediction, now, *, kind='session', state=None):
+    """Append a judgment in the caller's write transaction."""
     samples, labels, state = validate(run_id, sample_ids, labels, now, kind=kind, state=state)
-    if not conn.in_transaction:
-        conn.execute('BEGIN IMMEDIATE')
-    # An existing transaction may be a deferred reader. Reserve the writer
-    # before publishing so concurrent orphan collection cannot remove the file
-    # in the gap before its reference is inserted.
-    conn.execute('UPDATE audio_annotations SET sealed=sealed WHERE 0')
-    if not conn.execute('SELECT 1 FROM audio_vibe_runs WHERE run_id=?', (run_id,)).fetchone():
+    if not conn.execute("SELECT 1 FROM audio_annotations WHERE run_key=? AND kind='playback'", (run_id,)).fetchone():
         raise ValueError('A new annotation requires an existing playback run')
-    vocabulary = {row[0] for row in conn.execute('SELECT vibe FROM audio_taxonomy_labels '
-                                                 'WHERE taxonomy_version=?', (taxonomy_version,))}
-    if not conn.execute('SELECT 1 FROM audio_taxonomies WHERE taxonomy_version=?', (taxonomy_version,)).fetchone() or not set(labels) <= vocabulary:
+    if taxonomy_version not in TAXONOMIES or not set(labels) <= set(TAXONOMIES[taxonomy_version]):
         raise ValueError('Labels do not belong to the annotation taxonomy')
-    for sample_id in samples:
-        owner = conn.execute('SELECT run_id FROM sample_attributes WHERE id=?', (sample_id,)).fetchone()
-        if owner is None or owner[0] != run_id:
+    for sample in samples:
+        if not conn.execute("SELECT 1 FROM sample_attributes WHERE id=? AND run_id=? AND file_status='ready'",
+                            (sample, run_id)).fetchone():
             raise ValueError('Annotation sample is missing or belongs to another run')
     previous = latest(conn, run_id, kind=kind, taxonomy_version=taxonomy_version)
-    revision = previous['revision'] + 1 if previous else 1
-    filename = files.publish(files.directory(conn, memory_key), {
-        'format': FILE_FORMAT, 'run_key': run_id, 'kind': kind, 'taxonomy_version': taxonomy_version,
-        'revision': revision, 'prediction': prediction, 'unresolved_samples': []})
-    annotation_id = conn.execute('INSERT INTO audio_annotations('
-        'run_id,kind,taxonomy_version,revision,state,created_at,supersedes_id,resolution_status,'
-        'model_output_filename,model_output_digest,file_format) VALUES (?,?,?,?,?,?,?,\'resolved\',?,?,?)',
-        (run_id, kind, taxonomy_version, revision, state, now, previous['id'] if previous else None,
-         filename, Path(filename).stem, FILE_FORMAT)).lastrowid
-    conn.executemany('INSERT INTO audio_annotation_samples VALUES (?,?,?)',
-                     ((annotation_id, sample_id, position) for position, sample_id in enumerate(samples)))
-    conn.executemany('INSERT INTO audio_annotation_vibes VALUES (?,?,?,?)',
-                     ((annotation_id, taxonomy_version, label, position) for position, label in enumerate(labels)))
-    _save_evaluation(conn, annotation_id, prediction)
-    conn.execute('UPDATE audio_annotations SET sealed=1 WHERE id=?', (annotation_id,))
-    return annotation_id
-
-
-def resolve_run(conn, run_id):
-    """Attach preserved history only when that exact run is explicitly admitted."""
-    if not conn.execute('SELECT 1 FROM audio_vibe_runs WHERE run_id=?', (run_id,)).fetchone():
-        raise ValueError('Cannot resolve annotations without their actual playback run')
-    conn.execute("UPDATE audio_annotations SET run_id=?,legacy_run_key=NULL,resolution_status='resolved' "
-                 'WHERE run_id IS NULL AND legacy_run_key=?', (run_id, run_id))
+    if previous and not labels and previous['state'] in ('labeled', 'withdrawn'):
+        state = 'withdrawn'
+    archive = {'prediction': prediction, 'unresolved_samples': []}
+    if (previous and previous['state'] == state and previous['sample_ids'] == samples
+            and previous['vibes'] == labels and previous['archive'] == archive):
+        return previous['id']
+    return conn.execute(
+        'INSERT INTO audio_annotations(run_key,kind,taxonomy_version,revision,state,created_at,'
+        'supersedes_id,sample_1_id,sample_2_id,sample_3_id,labels_json,archive_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+        (run_id, kind, taxonomy_version, previous['revision'] + 1 if previous else 1, state, now,
+         previous['id'] if previous else None, *samples, *([None] * (3 - len(samples))),
+         json.dumps(labels), json.dumps(archive, allow_nan=False))).lastrowid
 
 
 def training_rows(conn, taxonomy_version):
-    """Latest judgment per run, with typed labels and evaluation facts."""
-    rows = []
-    for annotation_id, run, created, video in conn.execute(
-            'SELECT a.id,COALESCE(a.run_id,a.legacy_run_key),a.created_at,COALESCE(r.video_id,'
-            '(SELECT video_id FROM sample_attributes WHERE run_id=COALESCE(a.run_id,a.legacy_run_key) '
-            'ORDER BY captured_at DESC,id DESC LIMIT 1)) FROM audio_annotations a '
-            'LEFT JOIN audio_vibe_runs r ON r.run_id=a.run_id '
-            "WHERE a.kind='session' AND a.taxonomy_version=? AND a.sealed=1 "
-            'AND NOT EXISTS(SELECT 1 FROM audio_annotations successor WHERE successor.supersedes_id=a.id AND successor.sealed=1) '
-            'ORDER BY a.created_at,COALESCE(a.run_id,a.legacy_run_key)', (taxonomy_version,)):
-        labels = [row[0] for row in conn.execute('SELECT vibe FROM audio_annotation_vibes '
-                                                'WHERE annotation_id=? ORDER BY position', (annotation_id,))]
-        rows.append({'id': annotation_id, 'run_id': run, 'updated_at': created, 'video_id': video,
-                     'labels': labels, 'evaluation': evaluation(conn, annotation_id)})
-    earlier = conn.execute("SELECT COUNT(*) FROM audio_annotations a WHERE sealed=1 "
-        "AND (kind<>'session' OR taxonomy_version<>?) AND NOT EXISTS("
-        'SELECT 1 FROM audio_annotations successor WHERE successor.supersedes_id=a.id AND successor.sealed=1)', (taxonomy_version,)).fetchone()[0]
+    """Latest session judgment per run, with the recorded model evaluation."""
+    cursor = conn.execute(
+        'SELECT a.id,a.run_key,a.created_at,a.labels_json,a.archive_json,COALESCE(r.video_id,'
+        '(SELECT video_id FROM sample_attributes WHERE run_id=a.run_key ORDER BY captured_at DESC,id DESC LIMIT 1)) '
+        "FROM audio_annotations a LEFT JOIN audio_annotations r ON r.run_key=a.run_key AND r.kind='playback' "
+        "WHERE a.kind='session' AND a.taxonomy_version=? AND " + HEAD +
+        ' ORDER BY a.created_at,a.run_key', (taxonomy_version,))
+    rows = [{'id': identity, 'run_id': run, 'updated_at': created, 'video_id': video,
+             'labels': json.loads(labels), 'evaluation': evaluation(json.loads(archive).get('prediction'))}
+            for identity, run, created, labels, archive, video in cursor]
+    earlier = conn.execute("SELECT COUNT(*) FROM audio_annotations a WHERE "
+                           "(kind<>'session' OR taxonomy_version<>?) AND " + HEAD,
+                           (taxonomy_version,)).fetchone()[0]
     return rows, earlier
 
 
-def export_snapshot(conn, root):
-    """Freeze all judgment revisions and their files for offline development."""
-    manifest = files.export(conn, root)
-    tables = {}
-    for table in ('audio_taxonomies', 'audio_taxonomy_labels', 'audio_annotations',
-                  'audio_annotation_samples', 'audio_annotation_vibes', 'audio_annotation_evaluations',
-                  'audio_annotation_scores', 'audio_annotation_predictions', 'audio_annotation_model_labels'):
-        cursor = conn.execute(f'SELECT * FROM {table} ORDER BY 1,2')
-        fields = [column[0] for column in cursor.description]
-        tables[table] = [dict(zip(fields, row)) for row in cursor]
-    return {'format': 'audio-annotation-relations-1', 'tables': tables, 'files_manifest': manifest}
+def export_snapshot(conn):
+    """Export all revisions and their model output directly from the archive."""
+    rows = conn.execute("SELECT * FROM audio_annotations WHERE kind<>'playback' ORDER BY id")
+    return {'format': 'audio-annotations-2', 'annotations': [decode(rows, row) for row in rows]}

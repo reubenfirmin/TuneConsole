@@ -4,6 +4,7 @@ import ast
 from collections import Counter
 from contextlib import nullcontext
 from functools import wraps
+from threading import RLock
 import hashlib
 import json
 from pathlib import Path
@@ -19,14 +20,82 @@ from fastapi.testclient import TestClient
 
 from tests.schema.actual_library import copy_readonly_library
 from tests.library_image.fixtures import report_file
+from yt_playlist.core import db_space
 from yt_playlist.core.store import Store
-from yt_playlist.rec import measurement, musical_character
+from yt_playlist.rec import measurement, mode_surfaces, musical_character
 from yt_playlist.rec.radio_candidates import RadioCandidates
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.controllers.recommendation_publications import RecommendationPublications
+from yt_playlist.repos import policies
+from yt_playlist.repos.radio_catalog import RadioCatalogRepo
+from yt_playlist.web.radio_listening import RadioListening
 from yt_playlist.web.radio_session import PlaylistRadio
+from yt_playlist.web.radio_state import Phase, Session
 from yt_playlist.web.routes import radio_session
+
+
+def test_prepared_chill_fill_actual_library(request, tmp_path, monkeypatch):
+    source = request.config.getoption('--schema-source-db')
+    output = request.config.getoption('--radio-tuning-report')
+    if not source or not output:
+        pytest.skip('Supply --schema-source-db and --radio-tuning-report for this opt-in profile')
+    report = {'python': sys.version, 'rank_reads': []}
+    database = copy_readonly_library(Path(source).resolve(strict=True), tmp_path / 'radio-fill.db',
+                                    monkeypatch, report)
+    at = report.get('managed_library', {}).get('created_at', time.time())
+    store = Store(database)
+    candidates = None
+    try:
+        store.init_schema()
+
+        def check_private_space(conn, growth=0):
+            assert Path(conn.execute('PRAGMA database_list').fetchone()[2]) == database
+            db_space.require_space(database.parent, growth, reserve=96 * 1024**2)
+
+        with monkeypatch.context() as prepare:
+            prepare.setattr(policies, 'require_database_space', check_private_space)
+            mode_surfaces.prepare_bundles(store, at)
+        read_ranks = RadioCatalogRepo.tuning_ranks
+
+        def timed_ranks(repo, *args, **kwargs):
+            start = time.perf_counter()
+            rows = read_ranks(repo, *args, **kwargs)
+            report['rank_reads'].append({
+                'seconds': time.perf_counter() - start, 'rows': len(rows),
+                'includes_offers': kwargs.get('fresh_surface') is not None,
+            })
+            return rows
+
+        monkeypatch.setattr(RadioCatalogRepo, 'tuning_ranks', timed_ranks)
+        candidates = RadioCandidates(store, at)
+        group = max(candidates.cluster_members, key=candidates.cluster_members.get)
+        seed = candidates._initial_track_group_pool(group)[0]
+        session = Session(None, candidates, store.accounts.get_master_account().id, 'Private On Air',
+                          phase=Phase.PLAYING, tracks=[seed], selected=[seed], heard=[seed],
+                          position=0, furthest=0, directions=RadioDirections(candidates, seed))
+        controller = RadioListening(store, None, None, RLock(), lambda: at)
+        tuned = candidates.for_tuning({**candidates.tuning, 'energy': 0.})
+        start = time.perf_counter()
+        assert controller.tune(session, tuned)
+        report['apply_seconds'] = time.perf_counter() - start
+        assert session.directions.filling
+        heads = [slot['tracks'][0]['video_id'] for slot in session.directions.slots]
+        assert len(set(heads)) == 4
+        start = time.perf_counter()
+        controller.fill_tuned_streams(session, cancelled=lambda: False)
+        report['fill_seconds'] = time.perf_counter() - start
+        assert not session.directions.filling
+        report['stream_lengths'] = [len(slot['tracks']) for slot in session.directions.slots]
+        assert report['stream_lengths'] == [6, 6, 6, 6]
+        assert heads == [slot['tracks'][0]['video_id'] for slot in session.directions.slots]
+        assert session.tracks == session.heard == [seed] and session.position == 0
+        assert any(read['includes_offers'] and read['rows'] for read in report['rank_reads'])
+    finally:
+        if candidates is not None:
+            candidates.close()
+        store.conn.close()
+        report_file(output).write_text(json.dumps(report, indent=2) + '\n')
 
 
 def test_actual_library_tuning(request, tmp_path, monkeypatch):
@@ -43,14 +112,17 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
                  'rec/radio_directions.py', 'repos/radio_catalog.py',
                  'repos/recommendation_publications.py', 'controllers/recommendation_publications.py',
                  'core/db_reads.py', 'core/store.py',
-                 'core/preparation/listening_views.py', 'web/radio_listening.py',
+                 'core/listening_views.py', 'web/radio_listening.py',
                  'web/radio_session.py', 'web/radio_launch.py', 'web/radio_state.py', 'web/static/radio.js'):
         report['sources'][name] = hashlib.sha256((Path('src/yt_playlist') / name).read_bytes()).hexdigest()
     destination = tmp_path / 'radio-tuning.db'
     started = time.perf_counter()
     destination = copy_readonly_library(Path(source).resolve(strict=True), destination, monkeypatch, report)
     report['copy_seconds'] = time.perf_counter() - started
-    store = Store.open_current(destination)
+    store = Store(destination)
+    # The managed baseline can predate bounded schema changes in the checkout.
+    # Startup runs only against this disposable workspace, before timing Apply.
+    store.init_schema()
     try:
         saved, _ = store.radio_checkpoints.load()
         report['checkpoint_sha256'] = hashlib.sha256(json.dumps(saved, sort_keys=True).encode()).hexdigest()
@@ -65,13 +137,29 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
             report['baseline_revision'] = baseline
         captured_now = time.time()
         variants = ('baseline', 'optimized') if baseline else ('optimized',)
-        for profiled in (False, True):
+        representative = {'comfort': .17, 'theme': .5, 'energy': .31}
+        cases = [('comfort_energy', representative)]
+        if not baseline:
+            cases.insert(0, ('restored', representative))
+            changed = {'comfort': .17, 'theme': .9, 'energy': .31}
+            for axes in (('comfort',), ('theme',), ('energy',), ('comfort', 'theme'),
+                         ('theme', 'energy'), ('comfort', 'theme', 'energy')):
+                cases.append(('_'.join(axes), {axis: value if axis in axes else .5
+                                             for axis, value in changed.items()}))
+            cases.extend([
+                ('eclectic_full_on', {'comfort': .17, 'theme': 0., 'energy': 1.}),
+                ('themed_chill', {'comfort': .17, 'theme': 1., 'energy': 0.}),
+            ])
+        for case, values, profiled in [(name, values, False) for name, values in cases] + [
+                ('comfort_energy', representative, True)]:
             for variant in variants:
                 # Every measurement starts with the exact same checkpoint,
                 # clock, library and random seed. Only private output changes.
                 _, revision = store.radio_checkpoints.load()
                 store.radio_checkpoints.save(json.dumps(saved), expected=revision)
                 name = variant + ('_profile' if profiled else '')
+                if not baseline and case != 'comfort_energy':
+                    name += '_' + case
                 report[name] = {'timings': {}, 'profiled': profiled}
                 report['phase'] = name
                 report_path.write_text(json.dumps(report, indent=2, default=str) + '\n')
@@ -80,10 +168,11 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
                         _baseline(measured, baseline, report)
                     _measure(store, report[name], measured,
                              report_path.with_name(report_path.stem + '-' + name + '.json'),
-                             captured_now, profiled=profiled)
+                             captured_now, values, profiled=profiled, warm=case != 'restored')
                 if baseline and variant == 'optimized':
                     counterpart = 'baseline' + ('_profile' if profiled else '')
-                    assert report[counterpart]['directions'] == report[name]['directions'], 'Optimization changed seeded continuations'
+                    report[name]['matching_first_songs'] = sum(
+                        old == new for old, new in zip(report[counterpart]['directions'], report[name]['directions'], strict=True))
         report['phase'] = 'complete'
     finally:
         report_path.write_text(json.dumps(report, indent=2, default=str) + '\n')
@@ -92,8 +181,7 @@ def test_actual_library_tuning(request, tmp_path, monkeypatch):
 
 def _rotation(store, report, destination, monkeypatch):
     """Real catalog/prepared streams; controlled starts affect only this snapshot."""
-    owned = {row[0] for row in store.conn.execute('SELECT DISTINCT r.identity_key FROM library_memberships m '
-        'JOIN catalog_entries e ON e.id=m.entry_id JOIN recordings r ON r.id=e.recording_id')}
+    owned = store.rec_query.library_keys()
     heard = {row[0] for row in store.conn.execute('SELECT r.identity_key FROM recordings r WHERE '
         'EXISTS(SELECT 1 FROM play_events p WHERE p.recording_id=r.id) OR '
         'EXISTS(SELECT 1 FROM listening_observations o WHERE o.recording_id=r.id) UNION '
@@ -138,7 +226,7 @@ def _rotation(store, report, destination, monkeypatch):
         current = {'session': session, 'picks': [], 'branches': [], 'timings': {}}
         report['sessions'].append(current)
         started = time.perf_counter()
-        candidates = RadioCandidates(store, now + session * 3600, comparison=None)
+        candidates = RadioCandidates(store, now + session * 3600)
         candidates.rng.seed(1212 + session)
         current['preparation'] = {'generation': candidates.generation,
             'publication': candidates.prepared.generation if candidates.prepared else None,
@@ -212,23 +300,25 @@ def _launch_rotation(store, report, monkeypatch, now):
     evidence = report['launch'] = {'issued': [], 'branches': {}}
     with monkeypatch.context() as controlled, radio_controller(controlled, store, []) as (c, remote, _, _, _):
         controlled.setattr(session_module, 'RadioCandidates', RadioCandidates)
-        remote.create_playlist = lambda *args: 'PLSESSION'
         remote.get_song = lambda video: {'videoDetails': {'lengthSeconds': '200'}}
         c.ctx.now_fn = lambda: now
 
-        def issued(store, title, tracks, client, at, account, *, recipe=None):
+        def issued(store, title, tracks, client, at, account, **options):
             facts = store.radio_catalog.rotation_facts(t['key'] for t in tracks)
             for track in tracks:
                 fact = facts[track['key']]
                 expected = 'familiar' if fact['heard'] else 'unplayed' if fact['owned'] else 'new'
                 assert track['_radio_rotation_slot'] == expected
                 evidence['issued'].append({'key': track['key'], 'kind': expected})
-            return create(store, title, tracks, client, at, account, recipe=recipe)
+            result = create(store, title, tracks, client, at, account, **options)
+            evidence['readback'] = [row['videoId'] for row in result['initial_snapshot']['tracks']]
+            return result
 
         controlled.setattr(generated_acquisition, 'create_generated_playlist', issued)
         result = c.start()
         assert result['ok'], result
         assert [t['_radio_rotation_slot'] for t in c.session.tracks] == [t['kind'] for t in evidence['issued']]
+        assert [t['video_id'] for t in c.session.tracks] == evidence['readback']
         initial = list(c.session.tracks)
 
         def listen(video):
@@ -239,29 +329,36 @@ def _launch_rotation(store, report, monkeypatch, now):
         for track in initial:
             listen(track['video_id'])
         while len(c.session.heard) < 7:
+            heard = len(c.session.heard)
             listen(remote.ids[-1])
+            assert len(c.session.heard) > heard, 'Observed playback did not advance generated Radio'
         state = c.persistence.load()
         evidence['history'] = [{'key': t['key'], 'kind': t.get('_radio_rotation_slot')} for t in state['heard']]
         c.suspend()
         restored = PlaylistRadio(c.ctx)
         controlled.setattr(restored.work, 'start_thread', lambda *args, **kwargs: None)
         try:
-            restored.join()
+            assert restored.join()['active']
             for legacy, theme in ((False, .51), (True, .52)):
                 if legacy:
                     for tracks in (restored.session.tracks, restored.session.heard):
                         for track in tracks[:3]:
                             track.pop('_radio_rotation_slot', None)
                             track['_radio_rotation'] = 'familiar'
-                assert restored.tune({**restored.session.candidates.tuning, 'theme': theme})['ok']
+                result = restored.tune({**restored.session.candidates.tuning, 'theme': theme})
+                assert result['ok'], result
+                # The fixture suppresses the observer that fills the published heads.
+                with restored.operation:
+                    restored.listening.fill_tuned_streams(restored.session, cancelled=lambda: False)
+                assert not restored.session.directions.filling
                 branches = []
                 for branch in restored.session.directions.slots:
                     facts = store.radio_catalog.rotation_facts(t['key'] for t in branch['tracks'])
                     counts = Counter('familiar' if facts[t['key']]['heard'] else
                                      'unplayed' if facts[t['key']]['owned'] else 'new' for t in branch['tracks'])
                     branches.append(dict(counts))
+                    evidence['branches']['legacy' if legacy else 'preserved'] = branches
                     assert all(counts[kind] >= 1 for kind in ('familiar', 'unplayed', 'new')), counts
-                evidence['branches']['legacy' if legacy else 'preserved'] = branches
         finally:
             restored.suspend()
             restored.work.stop_executor()
@@ -288,7 +385,12 @@ def _baseline(monkeypatch, revision, report):
         for method in methods:
             definition = next(child for child in node.body if isinstance(child, ast.FunctionDef) and child.name == method)
             exec(compile(ast.Module(body=[definition], type_ignores=[]), f'{revision}:{path}', 'exec'), namespace)
-            monkeypatch.setattr(owner, method, namespace[method])
+            original = namespace[method]
+            if method == '_stored_intensity_candidates' and 'heads' not in (original.__kwdefaults__ or {}):
+                def legacy_intensity(self, *args, heads=False, original=original):
+                    return original(self, *args)
+                original = legacy_intensity
+            monkeypatch.setattr(owner, method, original)
 
     # The baseline hydration method now belongs to the controller. Its pure
     # projection still accepts the same captured pages and catalog facts.
@@ -303,7 +405,7 @@ def _baseline(monkeypatch, revision, report):
     monkeypatch.setattr(RecommendationPublications, '_hydrate_pages', namespace['_hydrate_pages'])
 
 
-def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled):
+def _measure(store, report, monkeypatch, report_path, captured_now, values, *, profiled, warm):
     controller = None
     try:
         saved, _ = store.radio_checkpoints.load()
@@ -324,6 +426,9 @@ def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled)
         monkeypatch.setattr(controller.work, 'start_thread', lambda *args, **kwargs: None)
         assert controller.join()['active']
         controller.ctx.radio = controller
+        if warm:
+            controller.session.candidates.planning_model().rng.seed(1105)
+        report['model_ready_at_apply'] = controller.session.candidates.model_ready
         before = {'tracks': list(controller.session.tracks), 'heard': list(controller.session.heard)}
 
         def timed(name, operation):
@@ -340,7 +445,7 @@ def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled)
             return call
 
         for owner, name in ((RadioCandidates, '__init__'), (RadioCandidates, '_stored_intensity_candidates'),
-                            (RadioCandidates, '_score'), (RadioCandidates, '_energy'),
+                            (RadioCandidates, '_score'), (RadioCandidates, '_energy'), (RadioCandidates, '_genre_modes'),
                             (RadioCandidates, 'refresh_exclusions'), (PreparedRadio, 'intensity_pool'),
                             (RecommendationPublications, 'candidate_pages'),
                             (RecommendationPublications, '_hydrate_pages'), (musical_character, 'load')):
@@ -354,7 +459,6 @@ def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled)
         monkeypatch.setattr(RadioCandidates, '__init__', seeded)
         app = FastAPI()
         app.include_router(radio_session.build(controller.ctx))
-        values = {'comfort': .17, 'theme': .5, 'energy': .31}
         profile = cProfile.Profile()
         with TestClient(app) as client:
             started = time.perf_counter()
@@ -391,8 +495,20 @@ def _measure(store, report, monkeypatch, report_path, captured_now, *, profiled)
                                     for key, value in sorted(stats.stats.items(), key=lambda item: item[1][3], reverse=True)[:35]]
         assert result['ok'] and result['tuning'] == report['saved_tuning'] == values
         assert report['history_unchanged'] and report['tracks_unchanged']
-        assert len(report['directions']) == 4 and all(len(branch) == 6 for branch in report['directions'])
-        assert all(len(branch) == len(set(branch)) for branch in report['directions'])
+        assert len(report['directions']) == 4 and all(len(branch) == 1 for branch in report['directions'])
+        assert len({branch[0] for branch in report['directions']}) == 4
+        assert all(branch['filling'] for branch in result['directions'])
+        report['apply_work'] = {name: dict(times) for name, times in report['timings'].items()}
+        started = time.perf_counter()
+        with controller.operation:
+            controller.listening.fill_tuned_streams(controller.session, cancelled=lambda: False)
+        report['fill_seconds'] = time.perf_counter() - started
+        final = controller.status()
+        assert final['menu_id'] == result['menu_id']
+        for first, filled in zip(result['directions'], final['directions'], strict=True):
+            assert not filled['filling'] and filled['id'] == first['id']
+            assert filled['tracks'][0]['video_id'] == first['tracks'][0]['video_id']
+            assert len({track['key'] for track in filled['tracks']}) == len(filled['tracks'])
     finally:
         report_path.write_text(json.dumps(report, indent=2, default=str) + '\n')
         if controller:

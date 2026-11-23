@@ -88,6 +88,9 @@ class EnrichmentReports:
     def queue_remaining(self):
         return self.repository.queue_remaining()
 
+    def has_pending_tracks(self):
+        return self.repository.has_pending_tracks()
+
     def queue_stats(self):
         return self.repository.queue_stats()
 

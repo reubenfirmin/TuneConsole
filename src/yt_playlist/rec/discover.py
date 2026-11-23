@@ -10,12 +10,10 @@ it, and which of your playlists it fits. Runs in the background worker; Last.fm 
 from yt_playlist.core.accounts import catalog_client
 from yt_playlist.core.activity import check_stopping, WorkClosing
 
-import numpy as np
-
-from yt_playlist.util.matching import normalize
-from yt_playlist.util.thumbnails import best_thumb
-from yt_playlist.rec import artist_model, content_model, embed, embedding_vectors as vectors, rec_params
-from yt_playlist.rec.scoring import discovery_facet_weight
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
+from yt_playlist.rec import rec_params
+from yt_playlist.rec.content_projection import ContentProjection as ContentProjection
+from yt_playlist.rec.scoring import discovery_album_facet_weights, discovery_facet_weight
 from yt_playlist.rec.artist_bridges import anchor_values, rank_candidates as _rank_candidates
 
 
@@ -29,113 +27,6 @@ def fetch_artist_info(ctx, name, browse_id=None):
     return catalog(ctx).artist(name, browse_id)
 
 
-def _check_album_alias(ctx, client, artist, discography):
-    """Compare at most one candidate pair, with no network work under a DB lock."""
-    from yt_playlist.library.discovery_composition import catalog
-    return catalog(ctx).aliases(client, artist, discography)
-
-
-class ContentProjection:
-    """Learned cold-start grounding (ACARec-flavored): a ridge map from content features to the
-    collaborative embedding, fit on the library's own (content, vector) pairs. Lets an *enriched* cold
-    candidate get a predicted taste vector to score against the per-playlist model, an alternative to
-    the heuristic bridge proxy, kept only if it beats it on recall@k (eval_recs.projection_recall).
-
-    §2: the feature basis is the SHARED audio-aware content space from content_model.build_content_model
-    (genre family + subgenre + decade + musical key/scale, plus z-scored audio: bpm / energy /
-    danceability / moods / loudness / dynamic-complexity), not genre+year alone. Audio is the dominant
-    organizing axis in electronic music, so it separates tracks a coarse genre tag cannot (a 172-BPM
-    roller from an 88-BPM dub), which is the core lift over the 0.227 genre+year baseline. Reusing the
-    same encoder as the content vectors keeps the projection and those vectors in one space. Degrades
-    gracefully: a track with only a genre still projects from whatever features it has (never worse
-    than the old genre+year grounding). Sharpens as enrichment densifies audio coverage.
-
-    §2c (deferred): for tracks missing audio, Last.fm tags and an artist-similarity signal are the
-    intended next fallback features. Artist similarity belongs in the #28 artist-relationship model
-    (artist_model.artist_neighbors); see the TODO in fit() for the seam to fold it in once #28 lands.
-    """
-
-    def __init__(self, model, W, aidx=None, AV=None, artist_keys=None, *, genre_axes=None):
-        self.genre_axes = genre_axes
-        self.model = model          # embed content model: {'cat': {tok: col}, 'ncat': int, 'cont': [...]}
-        self.W = W                  # (F, dim), F = content_dim + artist_dim
-        self.aidx = aidx or {}      # {normalized_artist: row} into the collaborative artist vectors (#28)
-        self.AV = AV                # (n_artists, adim) collaborative artist vectors, or None
-        self.artist_keys = artist_keys or {}
-        self.content_dim = model["ncat"] + len(model["cont"])
-        self.adim = AV.shape[1] if AV is not None else 0
-
-    def _features(self, genre, year, audio, artist):
-        """Augmented feature row: the content vector (genre/subgenre/decade + audio) concatenated with
-        the track artist's collaborative vector (#28 §2c). The artist block lets tracks missing audio
-        (or even genre) still ground on the artist-relationship signal; a missing block is zeros."""
-        xc = content_model.encode_content(self.model, genre, year, audio,genre_axes=self.genre_axes)
-        xc = np.zeros(self.content_dim) if xc is None else xc
-        av = np.zeros(self.adim)
-        if artist and self.AV is not None:
-            names = artist if isinstance(artist,(list,tuple,set)) else [artist]
-            rows = [self.aidx.get(self.artist_keys.get(a) or (a if str(a).startswith('@artist:') else normalize(a))) for a in names]
-            rows = [r for r in rows if r is not None]
-            if rows:
-                av = self.AV[rows].mean(0)
-        return np.concatenate([xc, av])
-
-    def predict(self, genre, year=None, audio=None, artist=None):
-        """Predicted (un-normalized) taste vector for an enriched candidate. `audio` is the optional
-        per-track feature dict; `artist` (display name) folds in the #28 artist signal. Either block
-        missing degrades gracefully to the other."""
-        return self._features(genre, year, audio, artist) @ self.W
-
-    @classmethod
-    def fit(cls, store, lam=1.0, *, training_keys=None, include_artist=True):
-        """Fit on the requested target identities only, including feature vocabulary/statistics.
-
-        Evaluation disables the precomputed artist block because its fitting history is shared
-        with the reference embedding. Production keeps that relational feature.
-        """
-        with store.read_view() as reader:
-            reference = vectors.load_vectors(reader)
-            dao = reader.rec_query
-            content, audio = dao.track_content(), dao.track_audio_features()
-            artist_vectors = artist_model.load_artist_vectors(reader) if include_artist else None
-            refs = reader.artists.track_keys(library=True) if include_artist else {}
-            artist_keys = reader.artists.name_keys() if include_artist else {}
-            axes = reader.genres.feature_axes([*(value[0] for value in content.values()),
-                *(row.get('genre') for row in reader.discovery.get_discovered_tracks())])
-        return cls.fit_from_inputs(reference, content, audio, lam=lam, training_keys=training_keys,
-                                   artist_vectors=artist_vectors, refs=refs, artist_keys=artist_keys,genre_axes=axes)
-
-    @classmethod
-    def fit_from_inputs(cls, reference, content, audio, lam=1.0, *, training_keys=None,
-                        artist_vectors=None, refs=None, artist_keys=None, genre_axes=None):
-        """Fit detached evidence; each fold still learns its own feature statistics."""
-        _, V, idx = reference
-        if V is None:
-            return None
-        if training_keys is not None:
-            allowed = set(training_keys)
-            idx = {key: row for key, row in idx.items() if key in allowed}
-            content = {key: value for key, value in content.items() if key in idx}
-            audio = {key: value for key, value in audio.items() if key in idx}
-        model = content_model.build_content_model(content, audio,genre_axes=genre_axes)
-        _, AV, aidx = artist_vectors if artist_vectors is not None else ([], None, {})
-        refs = refs or {}
-        proj = cls(model, None, aidx, AV,artist_keys,genre_axes=genre_axes)
-        rows = []
-        for k in idx:                                   # only library tracks that ARE in the embedding
-            g, y = content.get(k, (None, None))
-            x = proj._features(g, y, audio.get(k), refs.get(k,()))
-            if np.any(x):                               # at least one feature present
-                rows.append((k, x))
-        if len(rows) < 20:
-            return None
-        F = proj.content_dim + proj.adim
-        X = np.array([x for _, x in rows])
-        Y = np.array([V[idx[k]] for k, _ in rows])
-        proj.W = np.linalg.solve(X.T @ X + lam * np.eye(F), X.T @ Y)       # ridge closed form: (X'X + λI)^-1 X'Y
-        return proj
-
-
 def _anchors(store, V, idx, top_n=30):
     """[(display_name, weight, unit_vector)]: your artists weighted by play × taste-centrality, so
     the *core* of your taste anchors discovery (not one-off saves)."""
@@ -146,37 +37,18 @@ def _anchors(store, V, idx, top_n=30):
     return anchor_values(V, idx, seeds, refs, artists)
 
 
-def _artist_thumb(ctx, name):
-    """Best-effort artist image from a YTM artist search, for the graphical new-artist cards.
-    Cheap (the search result already carries thumbnails; no second get_artist call). None on any miss."""
-    try:
-        client = catalog_client(ctx.client_provider())
-        if client is None:
-            return None
-        return _search_artist_thumb(client, name)
-    except WorkClosing:
-        raise
-    except Exception:  # noqa: BLE001 - no client / network / parse all degrade to no image
-        return None
-
-
-def _search_artist_thumb(client, name):
-    results = client.search(name, filter="artists") or []
-    return best_thumb(results[0].get("thumbnails")) if results else None
-
-
 def repair_artist_images(ctx, artist_ids, now):
     """Repair a small visible cohort in the worker, without a database lock during I/O."""
     bridge = getattr(ctx, 'bridge', None)
     if bridge is not None and not bridge.connected:
         return
-    client = catalog_client(ctx.client_provider())
+    client = YouTubeMusicAccess.for_client(catalog_client(ctx.client_provider()))
     if client is None:
         return
     for artist in ctx.store.discovery.artist_images_due(artist_ids, now):
         check_stopping()
         try:
-            thumbnail = _search_artist_thumb(client, artist['artist'])
+            thumbnail = client.artist_thumbnail(artist['artist'])
         except WorkClosing:
             raise
         except Exception:
@@ -266,9 +138,8 @@ def pick_discovered_albums(store, n, now, recent_frac=0.7, *, facet_leans=None):
     if not albums:
         return []
     axes = store.genres.feature_axes(a.get('genre') for a in albums)
-    family_weights = {family: discovery_facet_weight(store, family, now,
-        **({'leans': facet_leans} if facet_leans is not None else {}))
-        for family in {axes[a['genre']][0] if a.get('genre') else None for a in albums}}
+    families = {axes[a['genre']][0] if a.get('genre') else None for a in albums}
+    family_weights = discovery_album_facet_weights(store, families, now, recent=facet_leans)
     return album_values(albums, axes, family_weights, n, recent_frac)
 
 

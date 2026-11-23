@@ -33,12 +33,12 @@ def _pristine_current_schema():
 @pytest.fixture
 def album_routes(monkeypatch, home_page_bytecode):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import album, app_update, audio_preview
+    from yt_playlist.web.routes import album, app_update, audio_vibes
 
     # Keep the real album controller, HTTP middleware and templates. Unrelated
     # routes and metadata-provider setup are below the page's boundary.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, album)])
+        for module in (app_update, audio_vibes, album)])
     templates = webapp.Jinja2Templates
 
     def compiled(*args, **kwargs):
@@ -67,17 +67,17 @@ def album_subjects(store, monkeypatch):
         # facts. Provider metadata capture is below this boundary; keep actual
         # identities, credits, ownership and incidental release associations.
         with atomic_write(store):
-            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+            entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                        (video_id,)).fetchone()
             if entry is None:
                 key = identity_key(title, artist)
                 seed_publication_subjects(store, [dict(key=key, video_id=video_id, title=title,
                     artist=artist, album=album, duration_s=duration_s)], unowned=() if library else (key,))
-                entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+                entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                            (video_id,)).fetchone()
                 artists.observe(store.conn, entry[0], artist)
             elif library:
-                store.conn.execute("INSERT OR IGNORE INTO library_memberships VALUES (?,'fixture',NULL)",
+                store.conn.execute("UPDATE track_sources SET library_origin='fixture',library_added_at=NULL WHERE id=? AND library_origin IS NULL",
                                    (entry[0],))
             if album_browse_id:
                 albums.link(store.conn, entry[0], album_browse_id, title=album, artist=artist)
@@ -89,7 +89,7 @@ def album_subjects(store, monkeypatch):
 @pytest.mark.parametrize('ownership',['saved','unsaved','upload'])
 @pytest.mark.parametrize('case',['baseline','incidental','removed','unavailable','partial','offline'])
 def test_album_page_and_expansion_follow_published_occurrences(store,ownership,case,album_subjects):
-    account = store.accounts.upsert_account('Main','credential',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     browse = UPLOAD_RELEASE_PREFIX+'release' if ownership=='upload' else 'release'
     if ownership=='saved':
         store.collection.replace_saved_albums([{'browse':browse,'title':'Release','artist':'Artist'}])
@@ -129,16 +129,16 @@ def test_album_page_and_expansion_follow_published_occurrences(store,ownership,c
         'WHERE a.id=? ORDER BY o.position',(aid,))]==[t['videoId'] for t in current['tracks']]
     # Incidental evidence survives without entering the published sequence.
     if case=='incidental':
-        assert store.conn.execute('SELECT 1 FROM album_item_observations i JOIN catalog_entries e ON e.id=i.entry_id '
+        assert store.conn.execute('SELECT 1 FROM album_item_observations i JOIN track_sources e ON e.id=i.entry_id '
                                   "WHERE i.album_id=? AND e.video_id='bonus'",(aid,)).fetchone()
     if ownership=='unsaved':
         assert not store.collection.saved_album_ids()
         if case!='incidental':
-            assert not store.conn.execute('SELECT 1 FROM library_memberships').fetchone()
+            assert not store.conn.execute('SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL').fetchone()
 
 
 def test_published_table_keeps_local_and_unresolved_positions_and_exact_upload_choice(store):
-    account = store.accounts.upsert_account('Main','credential',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     with store.conn:
         alternate = catalog.upsert(store.conn,'alternate','Alternate','Artist',library=False)
         exact = catalog.upsert(store.conn,'exact','Exact','Artist',library=False)
@@ -146,6 +146,7 @@ def test_published_table_keeps_local_and_unresolved_positions_and_exact_upload_c
         unresolved = catalog.upsert(store.conn,None,'Captured title','Artist',source_ref='unresolved:input',library=False)
     recording = store.tracks.catalog_subject(exact)['recording_id']
     store.tracks.associate_youtube_item('alternate',recording,source='verified',evidence={'same':True},now=10)
+    store.tracks.set_track_title(alternate, 'Canonical title')
     store.collection.cache_album_tracklist('mixed','Mixed','Artist',None,[],entries=[
         {'entry_id':local},{'raw_source_ref':'unknown','captured_title':'Unresolved occurrence'},
         {'entry_id':exact},{'entry_id':unresolved},{'entry_id':exact}])
@@ -153,7 +154,7 @@ def test_published_table_keeps_local_and_unresolved_positions_and_exact_upload_c
         for occurrence, in store.conn.execute('SELECT id FROM album_track_occurrences WHERE raw_source_ref=?',('exact',)).fetchall():
             store.conn.execute("INSERT INTO album_occurrence_sources VALUES (?,?,'youtube')",(occurrence,alternate))
     detail = store.charts.album_tracks_detail('mixed')
-    assert [t['title'] for t in detail]==['Local title','Unresolved occurrence','Exact','Captured title','Exact']
+    assert [t['title'] for t in detail]==['Local title','Unresolved occurrence','Canonical title','Captured title','Canonical title']
     assert [t['video_id'] for t in detail]==['','','exact','','exact']
     assert [t['track_id'] for t in detail]==[local,None,exact,unresolved,exact]
     client = TestClient(create_app(store,lambda:{account:FakeClient()},now_fn=lambda:1,

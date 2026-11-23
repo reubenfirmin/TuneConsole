@@ -11,7 +11,7 @@ from yt_playlist.rec import artist_model
 
 
 def test_playlist_and_album_import_keep_all_ordered_credits(store):
-    identity = store.accounts.upsert_account('main','credential',None,True)
+    identity = store.accounts.upsert_account('main',None,True)
     source = {'videoId':'v','title':'Song','artists':[{'name':'First','id':'UC1'},
               {'name':'Second, with comma','id':'UC2'}], 'duration_seconds':200}
     client = FakeClient(tracks={'P':[source]})

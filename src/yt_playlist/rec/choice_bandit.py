@@ -76,7 +76,7 @@ def admitted_decisions(offers, responses, now, excluded, *, params):
         yield oid, offer, chosen, seen, at, start, end, actions
 
 
-def observations(decisions, excluded, *, params, expanded_options):
+def observations(decisions, excluded, *, params, expanded_options, rating_advances=frozenset()):
     """Detached outcome attribution over admitted decisions and verified descriptors."""
     for oid, offer, chosen, seen, at, start, end, actions in decisions:
         options = expanded_options[oid]
@@ -103,7 +103,8 @@ def observations(decisions, excluded, *, params, expanded_options):
                     continue
                 classification = classify_exit(position, duration)
                 completion |= classification == 'completion'
-                early |= classification == 'skip' and details['kind'] == 'track_exit'
+                early |= (classification == 'skip' and details['kind'] == 'track_exit'
+                          and details.get('player_event_id') not in rating_advances)
             selected = chosen == option_id and chosen in seen
             positive = ((params['choice'] if selected else 0)
                         + params['open'] * ('open' in kinds)

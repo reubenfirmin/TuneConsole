@@ -13,7 +13,6 @@ import pytest
 
 from yt_playlist.core import fao, profile_files as owner
 from yt_playlist.core.db_writes import atomic_write
-from tests.file_preparation_support import profiles
 from yt_playlist.core.store import Store
 from yt_playlist.core.profile_paths import record_path
 
@@ -23,22 +22,20 @@ def payload(value):
     return raw, hashlib.sha256(raw.encode()).hexdigest()
 
 
-def seed(store, names=('one', 'two')):
+def seed(store, names=('one', 'two'), *, pack_size=None):
     for name in names:
         store.tracks.upsert_track(name, name, 'Artist', '', 100)
     keys = [r[0] for r in store.conn.execute('SELECT identity_key FROM recordings ORDER BY id')]
-    bodies = {}
-    with atomic_write(store):
-        for key in keys:
-            raw, digest = payload(key)
-            store.conn.execute('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)', (key, raw, 'v1', digest, 1))
-            bodies[key] = raw
+    rows = [(key, raw, 'v1', digest) for key in keys for raw, digest in (payload(key),)]
+    size = pack_size or len(rows)
+    for offset in range(0, len(rows), size):
+        store.musical_profiles.publish_recordings(rows[offset:offset+size], 1)
+    bodies = {key: raw for key, raw, _, _ in rows}
     return keys, bodies
 
 
 def test_profile_page_batches_heads_and_validates_mixed_publications(store, monkeypatch):
     keys, bodies = seed(store)
-    profiles.prepare(store, limit=1)
     statements, opened = [], []
     original = original_bytes
     def read(path, **options):
@@ -52,19 +49,18 @@ def test_profile_page_batches_heads_and_validates_mixed_publications(store, monk
     finally:
         store.conn.set_trace_callback(None)
     assert len(opened) == 1
-    assert len([sql for sql in statements if sql.startswith('SELECT')]) == 2
+    assert len([sql for sql in statements if sql.startswith('SELECT')]) == 1
     with pytest.raises(Exception, match='byte budget'):
         owner.read_page(store.conn, 'recording', keys, max_bytes=1)
     with atomic_write(store):
-        store.conn.execute('UPDATE recording_profile_files SET byte_size=byte_size+1')
+        store.conn.execute('UPDATE recordings SET musical_profile_size=musical_profile_size+1 '
+                           'WHERE musical_profile_size IS NOT NULL')
     with pytest.raises(fao.CorruptFile, match='exact head'):
         owner.read_page(store.conn, 'recording', keys)
 
 
 def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monkeypatch):
-    keys, bodies = seed(store, ('one', 'two', 'three', 'four', 'five', 'six'))
-    for _ in range(3):
-        assert profiles.prepare(store, limit=2) == 2
+    keys, bodies = seed(store, ('one', 'two', 'three', 'four', 'five', 'six'), pack_size=2)
     opened = []
     read = original_bytes
     def counted(path, **options):
@@ -77,17 +73,9 @@ def test_profile_page_reuses_a_chunk_for_interleaved_identity_order(store, monke
     assert len(opened) == len(set(opened)) == 3
 
 
-def test_exact_partial_conversion_budgets_and_failed_file_publication(store, monkeypatch):
-    keys, bodies = seed(store)
-    with monkeypatch.context() as patch:
-        patch.setattr(fao, 'write', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
-        with pytest.raises(OSError, match='disk full'):
-            profiles.prepare(store, limit=1)
-    assert dict(store.conn.execute('SELECT identity_key,payload FROM rec_musical_profiles')) == bodies
-    assert profiles.prepare(store, limit=1) == 1
+def test_exact_profile_reads_respect_individual_and_work_budgets(store):
+    keys, bodies = seed(store, pack_size=1)
     assert [owner.read(store.conn, 'recording', key) for key in keys] == [bodies[key] for key in keys]
-    assert profiles.prepare(store, limit=1) == 1
-    assert profiles.prepare(store, limit=1) == 0
     assert len(list(owner.references(store.conn))) == 2
     assert store.musical_profiles.by_keys(keys) == {key: json.loads(bodies[key]) for key in keys}
     with pytest.raises(fao.FileBudgetExceeded):
@@ -98,7 +86,6 @@ def test_exact_partial_conversion_budgets_and_failed_file_publication(store, mon
 
 def test_cached_profile_page_keeps_file_and_caller_budget_checks(store, monkeypatch):
     keys, bodies = seed(store)
-    profiles.prepare(store)
     assert owner.read_page(store.conn, 'recording', keys) == {
         key: json.loads(body) for key, body in bodies.items()}
     with monkeypatch.context() as patch:
@@ -117,7 +104,6 @@ def test_cached_profile_page_keeps_file_and_caller_budget_checks(store, monkeypa
 
 def test_snapshot_retains_old_body_and_independent_restore(store, tmp_path):
     keys, bodies = seed(store)
-    profiles.prepare(store)
     with store.read_view() as snapshot:
         before = owner.read(snapshot.conn, 'recording', keys[0])
         raw, digest = payload('successor')
@@ -148,7 +134,7 @@ def test_runtime_profile_interruption_keeps_selected_bytes_and_committed_pending
     from yt_playlist.repos import profile_file_writes
     store = file_consumer_store
     keys, bodies = seed(store)
-    profiles.prepare(store)
+    original_file = store.conn.execute("SELECT max(file_address) FROM collection_file_writes WHERE kind='profile'").fetchone()[0]
     raw, digest = payload('replacement')
     files = store.musical_profiles.files
     write, complete = files.write_reserved, profile_file_writes.complete
@@ -157,7 +143,7 @@ def test_runtime_profile_interruption_keeps_selected_bytes_and_committed_pending
     def interrupted_file(records):
         assert not store.conn.in_transaction
         with closing(sqlite3.connect(store._db_path)) as observer:
-            observed.extend(observer.execute('SELECT id,file_status FROM profile_file_writes'))
+            observed.extend(observer.execute("SELECT file_address,file_status FROM collection_file_writes WHERE kind='profile'"))
         raise OSError('file interrupted')
 
     def interrupted_status(conn, kind, references):
@@ -172,12 +158,14 @@ def test_runtime_profile_interruption_keeps_selected_bytes_and_committed_pending
         with pytest.raises(OSError, match='interrupted'):
             store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 2)
     assert owner.read(store.conn, 'recording', keys[0]) == bodies[keys[0]]
-    assert store.conn.execute('SELECT file_status FROM profile_file_writes').fetchone()[0] == 'pending'
+    assert store.conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='profile' AND file_address>?",
+                              (original_file,)).fetchone()[0] == 'pending'
     if boundary == 'file':
-        assert len(observed) == 1 and observed[0][1] == 'pending'
+        assert [status for identity, status in observed if identity > original_file] == ['pending']
     store.musical_profiles.publish_recordings([(keys[0], raw, 'v2', digest)], 3)
     assert owner.read(store.conn, 'recording', keys[0]) == raw
-    identity = store.conn.execute('SELECT file_id FROM recording_profile_files WHERE recording_id='
-        '(SELECT id FROM recordings WHERE identity_key=?)', (keys[0],)).fetchone()[0]
-    assert store.conn.execute('SELECT file_status FROM profile_file_writes WHERE id=?', (identity,)).fetchone()[0] == 'ready'
+    identity = store.conn.execute('SELECT musical_profile_file_id FROM recordings WHERE identity_key=?',
+                                  (keys[0],)).fetchone()[0]
+    assert store.conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='profile' AND file_address=?",
+                              (identity,)).fetchone()[0] == 'ready'
     assert (owner.directory(store.conn) / record_path('recording', identity)).is_file()

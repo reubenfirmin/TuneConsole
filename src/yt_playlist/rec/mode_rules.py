@@ -7,8 +7,6 @@ CARD_SURFACES = ('wheelhouse', 'explore', 'comfort', 'fresh')
 
 
 def bundle_metadata(store, *, generation=None):
-    if not getattr(store, '_recommendation_files', False):
-        return (store.rec_proposals.get_proposals('mode_bundles') or {}).get('_meta', {})
     row = store.recommendations.framing('home', generation=generation)
     if row is None:
         return {}

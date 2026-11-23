@@ -10,18 +10,13 @@ class LowDiskSpace(RuntimeError):
     pass
 
 
-class StorageCompacting(RuntimeError):
-    def __init__(self):
-        super().__init__('Storage is compacting. Please retry this change when it finishes.')
-
-
 def require_space(directory, growth=0, *, reserve=MIN_FREE_BYTES):
     free = shutil.disk_usage(directory).free
     needed = reserve + growth
     if free < needed:
         raise LowDiskSpace(f'Insufficient database disk space at {directory}: '
                            f'{free / 1048576:.1f} MiB available, {needed / 1048576:.1f} MiB required. '
-                           'Free space or choose a destination on another filesystem; '
+                           'Free disk space before retrying; '
                            'existing database and WAL files must be preserved.')
 
 

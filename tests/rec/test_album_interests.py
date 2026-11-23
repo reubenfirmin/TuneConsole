@@ -1,7 +1,10 @@
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from tests import model_support
+from tests.group_support import publish, recordings
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store, without_query_timing
 from yt_playlist.core.db_writes import atomic_write
@@ -40,7 +43,7 @@ def album(store, browse, title, genre, size, year='2020'):
         store.collection.add_saved_album({"browse": browse, "title": title, "artist": title, "year": year})
         seed_publication_subjects(store, tracks)
         for track in tracks:
-            entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?',
+            entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?',
                                        (track['video_id'],)).fetchone()[0]
             store.tracks.albums.link(entry, browse, title=title, artist=title)
     return [track['key'] for track in tracks]
@@ -64,10 +67,10 @@ def test_saved_album_only_library_seeds_both_spaces_without_history(store):
 def test_album_day_counts_keep_lifetime_cross_account_deduplication(store):
     keys = album(store, 'release', 'Record', 'Jazz', 2)
     store.collection.cache_album_tracklist('release', 'Record', 'Record', None, keys)
-    first = store.accounts.upsert_account('first', 'cred', None, True)
-    second = store.accounts.upsert_account('second', 'cred', None, False)
+    first = store.accounts.upsert_account('first', None, True)
+    second = store.accounts.upsert_account('second', None, False)
     unrelated = store.tracks.upsert_track('other', 'Unrelated', 'Elsewhere', None, 100)
-    other_key = store.conn.execute('SELECT identity_key FROM tracks WHERE id=?', (unrelated,)).fetchone()[0]
+    other_key = store.conn.execute('SELECT identity_key FROM catalog_tracks WHERE id=?', (unrelated,)).fetchone()[0]
     at = 1_000_000_000
     store.history.import_listening_events(first,
         [(keys[0], None, at), (keys[0], None, at + 86400)]
@@ -111,7 +114,7 @@ def test_context_allocation_does_not_prefer_the_average_of_separated_interests()
 def test_album_recommendations_use_interest_ranking_for_new_releases(store):
     album(store, "release-a", "Techno", "Techno", 2)
     album(store, "release-b", "Folk", "Folk", 2)
-    entry = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', ('release-a-0',)).fetchone()[0]
+    entry = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?', ('release-a-0',)).fetchone()[0]
     store.artists.observe(entry, 'Techno', source='fixture')
     model_support.build_content_model(store)
     discoveries = [{"browse_id": "new-techno", "title": "New", "artist": "New artist",
@@ -208,7 +211,7 @@ def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in
     from tests.recommendation_support import seed_publication_subjects
     from yt_playlist.core import listening
 
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     cases = [('one', 12, 1), ('five', 12, 5), ('whole', 12, 12), ('short', 6, 6), ('long', 24, 24)]
     keys, vectors, observations = [], [], []
     with store.conn:
@@ -251,7 +254,7 @@ def test_album_returns_scale_from_one_favorite_to_several_to_the_whole_record_in
 
 
 def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denominator(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     keys = album(store, 'record', 'Record', None, 12)
     store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
     store.collection.remove_saved_album('record')
@@ -277,7 +280,7 @@ def test_partial_album_returns_focus_on_heard_tracks_without_shrinking_the_denom
 
 @pytest.mark.parametrize('tracklist', ['missing', 'truncated', 'unresolved', 'empty'])
 def test_unknown_album_coverage_keeps_saved_support_without_guessing_a_return_boost(store, tracklist):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     keys = album(store, 'record', 'Record', 'Techno', 6)
     if tracklist != 'missing':
         if tracklist == 'truncated':
@@ -305,8 +308,8 @@ def test_unknown_album_coverage_keeps_saved_support_without_guessing_a_return_bo
 
 
 def test_album_returns_do_not_pool_different_songs_days_or_count_generated_and_duplicate_plays(store):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
-    other = store.accounts.upsert_account('other', 'cred', None, False)
+    iid = store.accounts.upsert_account('main', None, True)
+    other = store.accounts.upsert_account('other', None, False)
     keys = album(store, 'record', 'Record', 'Techno', 6)
     # Repeating a recording within the tracklist cannot enlarge its coverage share.
     entries = [{'entry_id': row[0]} for row in store.conn.execute(
@@ -332,7 +335,7 @@ def test_album_returns_do_not_pool_different_songs_days_or_count_generated_and_d
 
 @pytest.mark.parametrize('played', [1, 5, 12])
 def test_confirmed_album_queue_returns_use_track_coverage_and_corrections_without_organic_leakage(store, played):
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     keys = album(store, 'record', 'Record', 'Techno', 12)
     anchor = album(store, 'anchor', 'Anchor', 'Folk', 2)
     store.collection.cache_album_tracklist('record', 'Record', 'Record', None, keys)
@@ -390,7 +393,7 @@ def test_confirmed_album_queue_returns_use_track_coverage_and_corrections_withou
 
 
 def test_album_feedback_changes_only_the_declared_release_and_is_reversible(store):
-    store.accounts.upsert_account('main','credentials',None,True)
+    store.accounts.upsert_account('main',None,True)
     album(store, "release-a", "Techno", "Techno", 2)
     album(store, "release-b", "Folk", "Folk", 2)
     model_support.build_content_model(store)
@@ -440,15 +443,12 @@ def test_album_picker_applies_shared_nonzero_genre_and_era_preferences(store):
 
 
 def test_organic_current_and_session_layers_affect_album_picker_and_expire(store):
-    album(store, 'a', 'Techno', 'Techno', 2)
+    techno = album(store, 'a', 'Techno', 'Techno', 2)
     folk = album(store, 'b', 'Folk', 'Folk', 2)
     model_support.build_content_model(store)
-    _, matrix, index = embedding_vectors.load_content_vectors(store)
-    space = embedding_vectors.content_space_id(store)
-    store.modes.replace_modes([{'mode_id': i, 'label': browse, 'families': [], 'size': 2,
-        'centroid': matrix[index[key]], 'rep_keys': [key], 'space': space}
-        for i, (browse, key) in enumerate([('Techno', 'track 0|techno'), ('Folk', folk[0])])], [], 1)
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    corpus = recordings([('Techno', 2, .9), ('Folk', 2, .1)])
+    publish(store, [replace(track, key=key) for track, key in zip(corpus, techno + folk)])
+    iid = store.accounts.upsert_account('main', None, True)
     rec_params.set_param(store, 'now_min_events', 2)
     rec_params.set_param(store, 'play_transient_w', 0)
     rec_params.set_param(store, 'audio_transient_w', 0)
@@ -456,7 +456,8 @@ def test_organic_current_and_session_layers_affect_album_picker_and_expire(store
     def score(at):
         return next(row['score'] for row in album_choices.prepare(store, at, []) if row['browse_id'] == 'b')
     baseline = score(now)
-    store.history.import_play_events(iid, [(key, f'b-{i}', now) for i, key in enumerate(folk)])
+    for i, key in enumerate(folk):
+        store.history.record_play_event(iid, key, f'b-{i}', now, source_timezone='UTC')
     current = score(now + 1)
     assert current > baseline
     rec_params.set_param(store, 'now_gain', 0)
@@ -464,6 +465,36 @@ def test_organic_current_and_session_layers_affect_album_picker_and_expire(store
     assert baseline < session < current
     assert baseline < score(now + 8 * 3600) < session
     assert score(now + 25 * 3600) == pytest.approx(baseline)
+
+
+def test_prepared_discovered_albums_use_supported_current_group_fit(store, monkeypatch):
+    now = 1_000_000
+    techno = album(store, 'techno', 'Techno', 'Techno', 2)
+    folk = album(store, 'folk', 'Folk', 'Folk', 2)
+    model_support.build_content_model(store)
+    corpus = recordings([('Techno', 2, .9), ('Folk', 2, .1)])
+    publish(store, [replace(track, key=key) for track, key in zip(corpus, techno + folk, strict=True)])
+    for label in ('Folk', 'Techno', 'Jazz', None):
+        store.discovery.upsert_discovered_album(f'discovered-{label}', f'New artist {label}',
+            f'New release {label}', '2020', None, now, genre=label)
+    account = store.accounts.upsert_account('main', None, True)
+    rec_params.set_param(store, 'now_min_events', 2)
+    for i, key in enumerate(folk):
+        store.history.record_play_event(account, key, f'folk-{i}', now, source_timezone='UTC')
+
+    payload = album_choices.prepare_cached(store, now + 1)
+    scored = {row['browse_id']: row for row in payload['items'] if row['classification'] == 'discovery'}
+    assert len(scored) == 4 and all(not row['keys'] for row in scored.values())
+    # Change just the categorical group signal. This keeps moods, play events,
+    # content coordinates, and the release shortlist identical in the control.
+    with monkeypatch.context() as control:
+        control.setattr(scoring, 'group_prior', lambda *_: ({}, 0.))
+        neutral = {row['browse_id']: row['score'] for row in
+                   album_choices.prepare(store, now + 1, store.discovery.get_discovered_albums())}
+    assert scored['discovered-Folk']['score'] > neutral['discovered-Folk']
+    assert scored['discovered-Techno']['score'] == pytest.approx(neutral['discovered-Techno'])
+    assert scored['discovered-Jazz']['score'] == neutral['discovered-Jazz']
+    assert scored['discovered-None']['score'] == neutral['discovered-None']
 
 
 def test_prepared_albums_reuse_unchanged_snapshot_and_refresh_actual_preferences(store, monkeypatch):

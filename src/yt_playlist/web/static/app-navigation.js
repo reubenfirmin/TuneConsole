@@ -12,6 +12,8 @@
   });
   document.addEventListener('htmx:afterRequest', event => writes.delete(event.detail.xhr));
   const assetKey = url => new URL(url, location.href).pathname;
+  const bundledScripts = script => (script.dataset.includes || '').split(' ').filter(Boolean)
+    .map(name => '/static/' + name + '.js');
 
   function cancelRecovery() {
     if (!recovery) return;
@@ -32,26 +34,33 @@
   }
   window.addEventListener('pagehide', cancelRecovery);
 
-  async function loadAssets(page, signal) {
+  function assetMaps() {
     scripts ||= new Map([...document.scripts].filter(script => script.src)
-      .map(script => [assetKey(script.src), Promise.resolve()]));
+      .flatMap(script => [assetKey(script.src), ...bundledScripts(script)])
+      .map(key => [key, Promise.resolve()]));
     stylesheets ||= new Map([...document.querySelectorAll('head link[rel="stylesheet"]')]
       .map(style => [assetKey(style.href), Promise.resolve()]));
+  }
+
+  function loadStyle(source) {
+    const key = assetKey(source.href);
+    if (stylesheets.has(key)) return stylesheets.get(key);
+    const loaded = new Promise((resolve, reject) => {
+      const link = document.importNode(source, true);
+      const fail = () => { clearTimeout(timeout); link.remove(); reject(new Error('Stylesheet unavailable')); };
+      const timeout = setTimeout(fail, 10000);
+      link.onload = () => { clearTimeout(timeout); resolve(); }; link.onerror = fail;
+      document.head.append(link);
+    });
+    stylesheets.set(key, loaded);
+    loaded.catch(() => stylesheets.delete(key));
+    return loaded;
+  }
+
+  async function loadAssets(page, signal) {
+    assetMaps();
     const styles = [...page.querySelectorAll('head link[rel="stylesheet"]')];
-    await Promise.all(styles.map(style => {
-      const key = assetKey(style.href);
-      if (stylesheets.has(key)) return stylesheets.get(key);
-      const loaded = new Promise((resolve, reject) => {
-        const link = document.importNode(style, true);
-        const fail = () => { clearTimeout(timeout); link.remove(); reject(new Error('Stylesheet unavailable')); };
-        const timeout = setTimeout(fail, 10000);
-        link.onload = () => { clearTimeout(timeout); resolve(); }; link.onerror = fail;
-        document.head.append(link);
-      });
-      stylesheets.set(key, loaded);
-      loaded.catch(() => stylesheets.delete(key));
-      return loaded;
-    }));
+    await Promise.all(styles.map(loadStyle));
     await loadScripts(page, signal, false);
     signal.throwIfAborted();
     // Keep page-specific rules from leaking into the next page. TV's own style
@@ -61,27 +70,77 @@
       style.disabled = !style.hasAttribute('data-persistent') && !active.has(assetKey(style.href));
   }
 
+  function loadScript(source) {
+    const key = assetKey(source.src);
+    if (scripts.has(key)) return scripts.get(key);
+    const loaded = new Promise((resolve, reject) => {
+      const script = document.createElement('script');
+      for (const attribute of source.attributes) script.setAttribute(attribute.name, attribute.value);
+      script.async = false;
+      const fail = () => { clearTimeout(timeout); script.remove(); reject(new Error('Page script unavailable')); };
+      const timeout = setTimeout(fail, 10000);
+      script.onload = () => { clearTimeout(timeout); resolve(); }; script.onerror = fail;
+      document.head.append(script);
+    });
+    scripts.set(key, loaded);
+    loaded.catch(() => scripts.delete(key));
+    return loaded;
+  }
+
   async function loadScripts(page, signal, modules) {
     for (const source of page.querySelectorAll('head script[src]')) {
       if ((source.type === 'module') !== modules) continue;
       signal.throwIfAborted();
-      const key = assetKey(source.src);
-      if (!scripts.has(key)) {
-        const loaded = new Promise((resolve, reject) => {
+      if (!source.dataset.includes) {
+        await loadScript(source);
+      } else if (!scripts.has(assetKey(source.src))) {
+        // After navigation, install only the scripts the existing document lacks.
+        const version = new URL(source.src, location.href).search;
+        for (const path of bundledScripts(source)) {
+          signal.throwIfAborted();
           const script = document.createElement('script');
-          for (const attribute of source.attributes) script.setAttribute(attribute.name, attribute.value);
-          script.async = false;
-          const fail = () => { clearTimeout(timeout); script.remove(); reject(new Error('Page script unavailable')); };
-          const timeout = setTimeout(fail, 10000);
-          script.onload = () => { clearTimeout(timeout); resolve(); }; script.onerror = fail;
-          document.head.append(script);
-        });
-        scripts.set(key, loaded);
-        loaded.catch(() => scripts.delete(key));
+          script.src = path + version;
+          await loadScript(script);
+        }
       }
-      await scripts.get(key);
     }
   }
+
+  window.loadHomeAssets = async (styles, sources, version, active) => {
+    assetMaps();
+    const url = (file, extension) => '/static/' + file + extension + '?v=' + encodeURIComponent(version);
+    const links = styles.map(file => {
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = url(file, '.css');
+      if (file === 'tv') link.dataset.persistent = '';
+      return link;
+    });
+    await Promise.all(links.map(loadStyle));
+    if (!active()) return;
+    const keys = new Set(links.map(link => assetKey(link.href)));
+    for (const link of document.querySelectorAll('head link[rel="stylesheet"]')) {
+      if (keys.has(assetKey(link.href))) link.disabled = false;
+    }
+    for (const file of sources) {
+      if (!active()) return;
+      const script = document.createElement('script');
+      script.src = url(file, '.js');
+      await loadScript(script);
+    }
+  };
+
+  window.refreshHomePage = () => {
+    const controller = new AbortController();
+    const cancel = () => controller.abort();
+    window.navigation?.addEventListener('navigate', cancel, {once: true});
+    window.addEventListener('pagehide', cancel, {once: true});
+    return showPage({destination: {url: location.href}, info: {refresh: true}, signal: controller.signal})
+      .finally(() => {
+        window.navigation?.removeEventListener('navigate', cancel);
+        window.removeEventListener('pagehide', cancel);
+      });
+  };
 
   function updateNavigation(page) {
     for (const link of document.querySelectorAll('.topbar nav a[href]')) {
@@ -111,7 +170,13 @@
     const main = document.getElementById('app-page');
     if (!event.info?.recovery) main.setAttribute('aria-busy', 'true');
     try {
-      const response = await fetch(event.destination.url, {
+      const requestUrl = new URL(event.destination.url);
+      if (!event.formData && requestUrl.pathname === '/' && requestUrl.hash) {
+        const anchor = requestUrl.hash.slice(1);
+        if (!requestUrl.searchParams.has('panel'))
+          requestUrl.searchParams.set('panel', anchor.startsWith('gen-') ? 'directions' : anchor);
+      }
+      const response = await fetch(requestUrl, {
         signal: event.signal, headers: {Accept: 'text/html'},
         ...(event.formData ? {method: 'POST', body: event.formData} : {}),
       });

@@ -33,8 +33,14 @@ def test_off_taste_candidate_is_gated_out(taste):
     opposed = PlaylistTaste(["Positive", "Negative"], np.array([[1., 0.], [-1., 0.]]),
                             np.array([.25, .75]))
     assert _rank_candidates({"cancelled": [_bridge(5., [1., 0.])]}, opposed, 2) == []
+
+
+def test_missing_taste_keeps_candidates_with_supporting_bridges():
     empty = PlaylistTaste([], np.empty((0, 2)), np.zeros(0))
-    assert _rank_candidates({"unknown": [_bridge(5., [1., 0.])]}, empty, 2) == []
+    bridges = {"supported": [_bridge(5., [1., 0.])], "unsupported": []}
+    assert _rank_candidates(bridges, empty, 2) == [
+        {"cand": "supported", "score": 5.0, "because": ["anchor"], "fits": []},
+    ]
 
 
 def test_because_names_top_anchors_and_fits_pass_through(taste):

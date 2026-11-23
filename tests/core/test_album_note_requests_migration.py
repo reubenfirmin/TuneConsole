@@ -1,16 +1,12 @@
 """Release-note demand survives output expiry and fences superseded workers."""
-from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
-import json
 import sqlite3
 from threading import Barrier
 
 import pytest
 
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
-from yt_playlist.core import album_note_requests as owner, albums, recommendation_outputs as outputs
-from yt_playlist.core.migrations import current, migrate, registry
-from yt_playlist.core.migrations.runner import MigrationError
+from yt_playlist.core.migrations import current
 from yt_playlist.core.store import Store
 
 ALBUM = {'browse_id': 'release-one', 'artist': 'Artist', 'title': 'Release',
@@ -26,7 +22,7 @@ def acknowledgement_schema():
 def test_acknowledgement_input_keeps_empty_demand_and_real_guards(acknowledgement_schema):
     assert acknowledgement_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert acknowledgement_schema._revision_script
-    assert not acknowledgement_schema.execute('SELECT 1 FROM album_note_requests').fetchone()
+    assert not acknowledgement_schema.execute('SELECT 1 FROM album_provider_ids WHERE note_pending=1').fetchone()
     assert not acknowledgement_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -48,21 +44,20 @@ def test_newer_visible_request_survives_old_worker_and_re_admission(store):
     assert store.album_notes.next_request()[1][0] != second[0]
 
 
-def test_note_publication_file_failure_does_not_acknowledge_request_or_erase_last_good(store, monkeypatch):
+def test_note_write_failure_does_not_acknowledge_request_or_erase_last_good(store):
     store.album_notes.publish(ALBUM['browse_id'], {'label': 'Last good'}, 100)
     store.album_notes.request([ALBUM], 101)
     _, token = store.album_notes.next_request()
-    def disk_failure(*args, **kwargs):
-        raise OSError('Interrupted durable output write')
-    monkeypatch.setattr(store.album_notes.files, 'publish_reserved', disk_failure)
-    with pytest.raises(OSError, match='Interrupted'):
+    store.conn.execute("CREATE TEMP TRIGGER fail_note BEFORE UPDATE OF note_json ON album_provider_ids "
+                       "BEGIN SELECT RAISE(ABORT,'Interrupted output write'); END")
+    with pytest.raises(sqlite3.IntegrityError, match='Interrupted'):
         store.album_notes.publish(ALBUM['browse_id'], {'label': 'Replacement'}, 102,
                                                expected_request=token)
     assert store.album_notes.next_request()[1] == token
     assert store.rec_proposals.get_proposals('album_notes') == {ALBUM['browse_id']: {'label': 'Last good'}}
 
 
-def test_note_cache_eviction_keeps_visible_demand_and_reader_files(store):
+def test_note_cache_eviction_keeps_visible_demand_and_reader_snapshot(store):
     store.album_notes.publish(ALBUM['browse_id'], {'label': 'Original'}, 100)
     store.album_notes.request([ALBUM], 101, visible=True)
     with store.read_view() as reader:
@@ -70,10 +65,7 @@ def test_note_cache_eviction_keeps_visible_demand_and_reader_files(store):
             store.album_notes.publish(f'other-{number}', {'label': str(number)}, 102)
         assert len(store.rec_proposals.get_proposals('album_notes')) == 128
         assert ALBUM['browse_id'] not in store.rec_proposals.get_proposals('album_notes')
-        assert outputs.collect_orphans(store.conn) == 0
         assert reader.rec_proposals.get_proposals('album_notes') == {ALBUM['browse_id']: {'label': 'Original'}}
-    # The record-owned file remains available to existing readers until idle
-    # retention reclaims its abandoned receipt.
     assert store.rec_proposals.get_proposals('album_notes').get(ALBUM['browse_id']) is None
     assert ALBUM['browse_id'] in store.rec_proposals.get_proposals('album_note_requests')
 
@@ -129,16 +121,26 @@ def test_two_connections_can_acknowledge_one_request_only_once(tmp_path, acknowl
 def test_sql_owner_shape_revision_and_retired_bucket_are_enforced(store):
     store.album_notes.request([ALBUM], 100)
     for sql, args in (
-        ('UPDATE album_note_requests SET revision=0', ()),
-        ('UPDATE album_note_requests SET title=?', ('Unfenced change',)),
-        ('UPDATE album_note_requests SET unresolved_reason=NULL,revision=revision+1', ()),
-        ('UPDATE album_note_requests SET requested_until=?,revision=revision+1', (float('inf'),)),
+        ('UPDATE album_provider_ids SET note_work_revision=0', ()),
+        ("UPDATE album_provider_ids SET note_work_revision='invalid'", ()),
+        ('UPDATE album_provider_ids SET note_request_order=NULL', ()),
+        ('UPDATE album_provider_ids SET note_requested_until=?', (float('inf'),)),
         ("INSERT INTO rec_proposals VALUES ('album_note_requests','{}',1)", ()),
     ):
         with pytest.raises(sqlite3.IntegrityError):
             with store.conn:
                 store.conn.execute(sql, args)
     current.validate(store.conn)
+
+
+def test_canonical_metadata_edits_invalidate_pending_editorial_work(store):
+    store.album_notes.request([ALBUM], 100)
+    _, before = store.album_notes.next_request()
+    with store.conn:
+        store.conn.execute("UPDATE albums SET title='Corrected' WHERE title=?", (ALBUM['title'],))
+    album, after = store.album_notes.next_request()
+    assert album['title'] == 'Corrected'
+    assert after[0] == before[0] and after[1] > before[1]
 
 
 @pytest.mark.parametrize('pause_flag', ['activity_paused', '_read_only'])

@@ -7,7 +7,7 @@ import pytest
 from tests.store_fixture_support import (
     bounded_consumer_schema, file_consumer_store as store, without_query_timing,
 )
-from yt_playlist.core import album_aliases, albums, album_tracklists
+from yt_playlist.core import album_aliases, album_playback_context, albums, album_tracklists
 from yt_playlist.core.migrations import registry
 from yt_playlist.core.migrations.runner import validate_version
 from yt_playlist.core.store import Store
@@ -37,7 +37,7 @@ def test_alias_input_keeps_empty_album_owners_and_real_guards(_pristine_current_
     assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert store._snapshot_revisions.conn is store.conn
     assert not store.conn.execute('SELECT 1 FROM albums').fetchone()
-    assert not store.conn.execute('SELECT 1 FROM album_alias_reconciliations').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM albums WHERE canonical_album_id IS NOT NULL').fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -50,8 +50,8 @@ def release():
 
 def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(store, tmp_path):
     payload = release()
-    first = store.accounts.upsert_account('First', 'c', None, True)
-    second = store.accounts.upsert_account('Second', 'c2', None, False)
+    first = store.accounts.upsert_account('First', None, True)
+    second = store.accounts.upsert_account('Second', None, False)
     playlist = store.playlists.upsert_playlist(first, 'P', 'Mix', 1, 'h', 0)
     entry = store.tracks.upsert_track('video-0', 'Track 0', 'All Them Witches', payload['title'], 181,
                                     album_browse_id=OLD)
@@ -64,12 +64,19 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     store.history.import_play_events(first, [('track 0|all them witches', 'video-0', 100)])
     before_revision = store.collection.saved_album_revision(first)
     with store.conn:
-        album_tracklists.freeze(store.conn,albums.lookup(store.conn,ALIAS),ALIAS,'Frozen',['video-0'],now=10)
+        album_tracklists.freeze(store.conn,albums.lookup(store.conn,ALIAS),ALIAS,'Frozen',['video-0'])
     old_id, alias_id = store.collection.album_id(OLD), store.collection.album_id(ALIAS)
     assert old_id != alias_id
+    pending = {'opportunity_id': 'offer', 'browse': ALIAS, 'playlist': 'OLAK-release',
+               'videos': ['video-0', 'video-0'], 'at': 199, 'account_id': first}
+    with store.conn:
+        album_playback_context.put(store.conn, pending)
     assert store.collection.observe_album_representation(OLD, payload, now=200)
     assert store.collection.observe_album_representation(ALIAS, payload, now=201)
     assert store.collection.album_id(ALIAS) == old_id
+    assert album_playback_context.load(store.conn) == pending
+    assert store.conn.execute('SELECT id,playback_revision FROM albums WHERE playback_revision IS NOT NULL'
+                              ).fetchone()[:] == (old_id, 1)
     assert store.collection.saved_album_ids() == {OLD, ALIAS}
     assert len(store.collection.get_saved_albums()) == 1
     assert len(store.collection.get_saved_albums(account_id=second)) == 1
@@ -82,7 +89,7 @@ def test_exact_aliases_aggregate_once_and_preserve_accounts_playback_and_shares(
     assert store.collection.playback_source(album_browse_id=ALIAS)['browse'] == ALIAS
     assert len(store.charts.album_tracks_detail(ALIAS)) == 1
     assert store.artists.album_credits(ALIAS)
-    assert album_tracklists.share(store.conn,old_id,ALIAS)=={'title':'Frozen','video_ids':['video-0']}
+    assert album_tracklists.cached_share(store.conn,old_id,ALIAS)=={'title':'Frozen','video_ids':['video-0']}
     assert store.collection.saved_album_revision(first) > before_revision
     # A remote snapshot admitted before reconciliation cannot erase the merged ownership.
     assert store.collection.replace_saved_album_snapshots({first: []}, expected_revisions={first: before_revision}) == set()
@@ -149,24 +156,26 @@ def test_retained_replaced_release_order_prevents_alias_merge(store):
 
 
 def test_interrupted_collection_merge_keeps_identity_and_memberships_retryable(store, monkeypatch):
+    from yt_playlist.core import album_memberships
+
     payload = release()
     for bid in (OLD, ALIAS):
         store.collection.add_saved_album({'browse': bid, 'title': payload['title'], 'artist': 'All Them Witches'})
     store.collection.observe_album_representation(OLD, payload)
-    before = [tuple(row) for row in store.conn.execute('SELECT * FROM unattributed_album_memberships')]
-    repository = store.collection.aliases.repository
-    merge = repository._move_memberships
+    unattributed = 'SELECT album_id,source,saved_at FROM saved_album_memberships WHERE account_id IS NULL ORDER BY album_id'
+    before = [tuple(row) for row in store.conn.execute(unattributed)]
+    merge = album_memberships.merge
 
     def interrupted(*args):
         merge(*args)
         raise RuntimeError('interrupted reconciliation')
 
-    monkeypatch.setattr(repository, '_move_memberships', interrupted)
-    with pytest.raises(RuntimeError, match='interrupted reconciliation'):
-        store.collection.observe_album_representation(ALIAS, payload)
-    assert [tuple(row) for row in store.conn.execute('SELECT * FROM unattributed_album_memberships')] == before
+    with monkeypatch.context() as patch:
+        patch.setattr(album_memberships, 'merge', interrupted)
+        with pytest.raises(RuntimeError, match='interrupted reconciliation'):
+            store.collection.observe_album_representation(ALIAS, payload)
+    assert [tuple(row) for row in store.conn.execute(unattributed)] == before
     assert store.collection.album_id(OLD) != store.collection.album_id(ALIAS)
-    monkeypatch.setattr(repository, '_move_memberships', merge)
     assert store.collection.observe_album_representation(ALIAS, payload)
     assert store.collection.album_id(OLD) == store.collection.album_id(ALIAS)
 
@@ -186,7 +195,7 @@ def test_discovery_state_and_pending_tiles_resolve_either_alias_once(store):
 
 
 def test_retry_after_owner_commits_does_not_duplicate_discovery_or_feedback(store, monkeypatch):
-    store.accounts.upsert_account('Main', 'main.json', None, True)
+    store.accounts.upsert_account('Main', None, True)
     for index, browse in enumerate((OLD, ALIAS)):
         store.discovery.upsert_discovered_album(browse, 'All Them Witches', release()['title'], '2015', None, 1)
         store.discovery.record_discovery_impressions('album', [browse], 'same-view', 10)
@@ -205,8 +214,8 @@ def test_retry_after_owner_commits_does_not_duplicate_discovery_or_feedback(stor
     with pytest.raises(RuntimeError, match='before identity publication'):
         store.collection.observe_album_representation(ALIAS, release(), now=31)
     assert store.collection.album_id(ALIAS) == retired
-    assert store.conn.execute('SELECT COUNT(*) FROM discovery_impressions WHERE album_id=?', (target,)).fetchone()[0] == 3
-    assert not store.conn.execute('SELECT 1 FROM discovery_impressions WHERE album_id=?', (retired,)).fetchone()
+    assert store.conn.execute('SELECT count(*) FROM albums a,json_each(a.discovery_views) WHERE a.id=?', (target,)).fetchone()[0] == 3
+    assert not store.conn.execute('SELECT 1 FROM albums a,json_each(a.discovery_views) WHERE a.id=?', (retired,)).fetchone()
     responses = [tuple(row) for row in store.conn.execute('SELECT * FROM album_feedback ORDER BY id')]
     assert len(responses) == 2
     assert store.conn.execute('SELECT source_browse_id FROM album_feedback WHERE withdrawn_at IS NULL').fetchone()[0] == ALIAS
@@ -227,8 +236,8 @@ def test_aliases_preserve_repeated_full_occurrences_and_each_frozen_share(store)
     expected = [row['videoId'] for row in payload['tracks']]
     # Fetched entries are catalog-only; folding them into library controls share readiness.
     with store.conn:
-        store.conn.execute("INSERT OR IGNORE INTO library_memberships(entry_id,origin) "
-                           "SELECT entry_id,'test' FROM album_tracks WHERE is_full=1")
+        store.conn.execute("UPDATE track_sources SET library_origin='test' WHERE library_origin IS NULL "
+                           "AND id IN (SELECT entry_id FROM album_tracks WHERE is_full=1)")
     assert [row['video_id'] for row in store.charts.album_tracks_detail(ALIAS)] == expected
     assert store.collection.cached_album_share(OLD)['video_ids'] == expected
     assert store.collection.cached_album_share(ALIAS)['video_ids'] == expected
@@ -253,14 +262,14 @@ def test_preferred_id_can_use_full_cache_captured_under_its_verified_alias(store
     store.collection.observe_album_representation(OLD, payload)
     store.collection.observe_album_representation(ALIAS, payload)
     with store.conn:
-        store.conn.execute("INSERT OR IGNORE INTO library_memberships(entry_id,origin) "
-                           "SELECT entry_id,'test' FROM album_tracks WHERE is_full=1")
+        store.conn.execute("UPDATE track_sources SET library_origin='test' WHERE library_origin IS NULL "
+                           "AND id IN (SELECT entry_id FROM album_tracks WHERE is_full=1)")
     assert store.collection.album_id(OLD) == store.collection.album_id(ALIAS)
     assert store.collection.is_album_tracklist_complete(OLD)
     assert store.collection.cached_album_share(OLD)['video_ids'] == [track['videoId'] for track in payload['tracks']]
     assert store.conn.execute('SELECT provider_id FROM album_tracklists WHERE id='
         '(SELECT current_tracklist_id FROM albums WHERE id=?)',(store.collection.album_id(OLD),)).fetchone()[0] == ALIAS
-    assert not store.conn.execute('SELECT 1 FROM album_share_snapshots').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM album_provider_ids WHERE share_json IS NOT NULL').fetchone()
 
 
 @pytest.mark.parametrize('first', [OLD, ALIAS])
@@ -311,14 +320,14 @@ def test_concurrent_accepted_album_responses_publish_coherent_proofs_and_tracks(
         assert (store.collection.album_id(first) == store.collection.album_id(second)) is (not changed)
         for browse, payload in ((first, older), (second, current)):
             digest, videos = album_aliases.fingerprint(payload)
-            assert store.conn.execute('SELECT digest FROM album_provider_fingerprints '
+            assert store.conn.execute('SELECT fingerprint_digest FROM album_provider_ids '
                 "WHERE provider='youtube' AND provider_id=?", (browse,)).fetchone()[0] == digest
             album_id = store.collection.album_id(browse)
             actual = [row[0] for row in store.conn.execute('SELECT e.video_id FROM album_tracks t '
-                'JOIN catalog_entries e ON e.id=t.entry_id WHERE t.album_id=? AND t.is_full=1 '
+                'JOIN track_sources e ON e.id=t.entry_id WHERE t.album_id=? AND t.is_full=1 '
                 'ORDER BY t.position,t.id', (album_id,))]
             assert actual == videos
-            assert album_tracklists.share(store.conn,album_id,browse)['video_ids'] == videos
+            assert store.collection.cached_album_share(browse)['video_ids'] == videos
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         store.conn.close()
@@ -330,6 +339,9 @@ def test_verified_aliases_survive_restart_without_repeating_reconciliation(store
     path = store._db_path
     payload = release()
     for bid in (OLD, ALIAS):
+        store.discovery.upsert_discovered_album(bid, 'All Them Witches', payload['title'], 2015, None, 90)
+        store.discovery.remember_album_fetch(bid)
+    for bid in (OLD, ALIAS):
         store.collection.observe_album_representation(bid, payload, now=100)
     canonical = store.collection.album_id(OLD)
     store.conn.close()
@@ -337,10 +349,16 @@ def test_verified_aliases_survive_restart_without_repeating_reconciliation(store
     try:
         reopened.init_schema()
         assert reopened.collection.album_id(ALIAS) == canonical
+        assert reopened.discovery.fetched_albums([OLD, ALIAS, 'unfetched']) == {OLD, ALIAS}
+        for bid in (OLD, ALIAS):
+            reopened.discovery.remember_album_fetch(bid)
+        markers = list(map(tuple, reopened.conn.execute('SELECT f.value->>1,o.album_id '
+            "FROM discovery_origins o,json_each(o.fetch_sources) f WHERE f.value->>0='album' ORDER BY 1")))
+        assert markers == [(bid, canonical) for bid in sorted((OLD, ALIAS))]
         reopened.collection.observe_album_representation(ALIAS, payload, now=200)
-        assert reopened.conn.execute('SELECT COUNT(*) FROM album_alias_reconciliations').fetchone()[0] == 1
-        assert reopened.conn.execute('SELECT COUNT(*) FROM album_provider_fingerprints').fetchone()[0] == 2
-        assert reopened.conn.execute('SELECT COUNT(*) FROM album_primary_provider_ids').fetchone()[0] == 1
+        assert reopened.conn.execute('SELECT COUNT(*) FROM albums WHERE canonical_album_id IS NOT NULL').fetchone()[0] == 1
+        assert reopened.conn.execute('SELECT COUNT(*) FROM album_provider_ids WHERE fingerprint_digest IS NOT NULL').fetchone()[0] == 2
+        assert reopened.conn.execute('SELECT COUNT(*) FROM album_provider_ids WHERE is_primary=1').fetchone()[0] == 1
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchall()
     finally:
         reopened.conn.close()

@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 def render(results, tag, source_run, *, evidence=Path("evidence")):
-    lines = [f"Release `{tag}`; candidate source run `{source_run}`.", "",
+    source = f"Candidate source run `{source_run}`." if source_run else "Candidate selection did not complete."
+    lines = [f"Release `{tag}`. {source}", "",
              "| Stage | Result |", "| --- | --- |"]
     lines.extend(f"| {name} | {value['result']} |" for name, value in results.items())
     lines.append("")
@@ -25,12 +26,15 @@ def render(results, tag, source_run, *, evidence=Path("evidence")):
     if results.get("promote", {}).get("result") == "success":
         lines.append("All downloads and applicable update channels passed public verification. See the promotion job summary for links.")
     else:
+        command = f"gh workflow run release.yml --ref main -f tag={tag}"
+        if source_run:
+            command += f" -f source_run={source_run}"
         lines.extend(["", "Recover only incomplete work:", "",
-                      "- Missing/expired candidates: rerun the affected source jobs; keep successful architecture artifacts.",
+                      "- Missing or expired candidates: inspect the candidate jobs or prepare assets on main for this tag.",
                       "- Publication failed or unresolved: retain the draft/checkpoint; the coordinator reconciles it before retrying.",
                       "- Already public: keep assets immutable and retry public verification with the same candidates.", "",
                       "When all candidates are available, use the publication-only path:", "",
-                      "```sh", f"gh workflow run release.yml -f tag={tag} -f source_run={source_run}", "```"])
+                      "```sh", command, "```"])
     return "\n".join(lines) + "\n"
 
 

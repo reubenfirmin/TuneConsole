@@ -15,6 +15,10 @@ import pytest
     "tv_pause", "tv_pause_failed", "tv_pause_legacy", "tv_pause_no_music",
     "tv_delayed_play", "tv_delayed_heartbeat", "tv_delayed_state",
     "confirmed_pause", "confirmed_lost_reply", "confirmed_missing_receiver", "confirmed_legacy",
+    "radio_loaded_tab", "radio_loading_tab",
+    "radio_native_playing", "radio_native_during_dispatch", "radio_native_stale",
+    "radio_native_wrong_queue", "radio_native_muted",
+    "radio_native_behind_relay", "radio_native_verifying", "radio_native_verifying_muted",
 ])
 def test_playlist_launch_reuses_and_controls_the_playing_tab(scenario):
     node = shutil.which("node")
@@ -31,6 +35,8 @@ const app = {id: 1, url: 'http://127.0.0.1:8765/', active: true};
 const old = {id: 2, url: 'https://music.youtube.com/watch?v=autoplay&list=RDAMVMautoplay',
              active: false, audible: ['audible', 'tab_muted', 'media_muted'].includes(scenario), lastAccessed: 1};
 const browsing = {id: 3, url: 'https://music.youtube.com/', active: true, lastAccessed: 100};
+if (scenario==='radio_loaded_tab' || scenario.startsWith('radio_native_')) browsing.status='complete';
+if (scenario==='radio_loading_tab') browsing.status='loading';
 if (scenario === 'tab_muted') Object.assign(browsing, {audible: true, mutedInfo: {muted: true}});
 if (scenario === 'media_muted') browsing.audible = true;
 let tabs = [app, old, browsing];
@@ -44,9 +50,11 @@ if (['concurrent', 'no_music', 'tv_pause_no_music'].includes(scenario)) {
   tabs = [app, {id: 8, url: 'https://music.youtube.com.evil.example/'}];
 }
 if (scenario === 'leaving') tabs = [app, {...old, pendingUrl: 'https://example.org/'}];
-const messages = [], frames = [], created = [], updated = [];
+const messages = [], frames = [], created = [], updated = [], pageNavigations = [];
+const rescueTimers = new Set();
 let receiverUpgraded = false;
-const runtime = {onMessage: event(), onStartup: event(), onInstalled: event()};
+const runtime = {onMessage: event(), onStartup: event(), onInstalled: event(),
+  getManifest: () => ({version: '0.1.24'})};
 const sockets = [];
 class Socket {
   static OPEN = 1;
@@ -100,24 +108,95 @@ const chrome = {
     },
     onUpdated: event(), onRemoved: event(),
   },
-  scripting: {executeScript: async () => {
+  scripting: {executeScript: async ({args}) => {
     if (scenario==='next_account_upgrade') receiverUpgraded = true;
+    if (args) {
+      pageNavigations.push(args[0]);
+      if (scenario==='radio_native_during_dispatch') await reportNativeStart();
+      return [{result:true}];
+    }
   }},
   storage: {session: {get: async () => ({})}},
   windows: {onRemoved: event()},
   alarms: {create() {}, onAlarm: event()},
 };
 const context = vm.createContext({chrome, WebSocket: Socket, URL,
-  console: {log() {}, warn() {}}, setTimeout() {}, clearTimeout() {},
+  console: {log() {}, warn() {}}, setTimeout(fn, delay) {
+    if (delay === 2500) rescueTimers.add(fn);
+    return fn;
+  }, clearTimeout(fn) { rescueTimers.delete(fn); },
 });
 const {playback, tabs: musicTabs} = require('./tests/extension_worker.cjs').loadWorker(context);
 sockets[0].readyState = Socket.OPEN;
 const report = async (id, msg) => {
-  for (const listener of runtime.onMessage.listeners) listener(msg, {tab: tabs.find(t => t.id === id)});
+  const tab = tabs.find(t => t.id === id);
+  for (const listener of runtime.onMessage.listeners) listener(msg, {tab, url: tab.url});
   await playback.drained;
 };
+const nativeStart = () => ({
+  type:'pevent', kind:'native-playing', videoId:'song',
+  playlist:scenario==='radio_native_wrong_queue'?'PL_other':'RDAMPLPL_new',
+  playingAt:Date.now() - (scenario==='radio_native_stale'?5000:0), playingSource:'media-event',
+  paused:false, muted:scenario==='radio_native_muted', volume:1, brandKnown:true,
+});
+const reportNativeStart = () => report(browsing.id, nativeStart());
 const next = 'https://music.youtube.com/watch?list=PL_new';
 (async () => {
+  if (scenario.startsWith('radio_')) {
+    const target='https://music.youtube.com/watch?v=song&list=PL_new';
+    await playback.navigate(target,'radio-start');
+    const loaded=scenario!=='radio_loading_tab';
+    assert.deepEqual(pageNavigations, loaded?[target]:[]);
+    assert.deepEqual(updated, loaded?[]:[{id:3,url:target}]);
+    assert.equal(created.length,0);
+    const report=frames.find(frame=>frame.type==='radio-launch-timing');
+    assert.equal(report.launchId,'radio-start');
+    assert.equal(report.method,loaded?'loaded-tab':'tab-update');
+    assert(report.dispatchedAt>=report.selectedAt && report.selectedAt>=report.admittedAt &&
+      report.admittedAt>=report.receivedAt);
+    if (['radio_native_behind_relay', 'radio_native_verifying', 'radio_native_verifying_muted'].includes(scenario)) {
+      const timer = [...rescueTimers][0];
+      const get = chrome.tabs.get;
+      let release;
+      if (scenario === 'radio_native_behind_relay') {
+        const list = musicTabs.list;
+        musicTabs.list = () => new Promise(resolve => { release = resolve; });
+        playback.receive({type: 'pevent', kind: 'state', state: 'playing'}, {tab: old});
+        await new Promise(setImmediate);
+        musicTabs.list = list;
+      } else {
+        chrome.tabs.get = () => new Promise(resolve => { release = resolve; });
+      }
+      const confirmation = reportNativeStart();
+      chrome.tabs.get = get;
+      await new Promise(setImmediate);
+      const recovering = timer();
+      await new Promise(setImmediate);
+      assert.deepEqual(updated, [], 'recovery must wait for a matching native start already received');
+      if (scenario === 'radio_native_behind_relay') release(tabs);
+      else release({...browsing, mutedInfo: {muted: scenario.endsWith('muted')}});
+      await confirmation;
+      await recovering;
+      const recovery = frames.filter(frame => frame.type === 'radio-launch-recovery');
+      assert(recovery.every(frame => frame.launchId === 'radio-start' && frame.extensionVersion === '0.1.24'));
+      if (scenario.endsWith('muted')) {
+        assert.deepEqual(recovery.map(frame => frame.action), ['navigate', 'activate']);
+        assert.deepEqual(updated, [{id: 3, url: target}, {id: 3, active: true}]);
+      } else {
+        assert.deepEqual(recovery.map(frame => frame.action), ['confirmed-native']);
+        assert.deepEqual(updated, []);
+      }
+      return;
+    }
+    if (scenario.startsWith('radio_native_')) {
+      if (scenario!=='radio_native_during_dispatch') await reportNativeStart();
+      assert.equal(browsing.url, 'https://music.youtube.com/');
+      const confirmed = ['radio_native_playing', 'radio_native_during_dispatch'].includes(scenario);
+      assert.equal(rescueTimers.size, confirmed?0:1);
+      assert.equal(frames.some(frame=>frame.kind==='native-playing'), scenario!=='radio_native_muted');
+    }
+    return;
+  }
   if (scenario.startsWith('tv_delayed_')) {
     tabs = [app, old];
     let release, queries = 0;

@@ -4,17 +4,18 @@ from contextlib import closing
 from tests.enrichment_support import complete_entries, complete_discovered
 from tests.derived_rating_support import seed_dislike, seed_like
 
+import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeClient
-from tests.onboarding_support import publish_personal_mix
+from tests.conftest import FakeClient, seed_catalog_track
+from tests.onboarding_support import publish_live_mix_inputs, publish_personal_mix
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, initialize_consumer, native_sql_calls,
     mock_snapshot_coordinator, reuse_reporting_reader, without_query_timing)
 from yt_playlist.core.store import Store
-from yt_playlist.rec import account_growth, tv
+from yt_playlist.rec import account_growth, mix_tuning, tv
 from yt_playlist.web.app import create_app
 
 
@@ -67,11 +68,11 @@ def tv_http_routes(request, monkeypatch):
     """Build the real TV, playlist and bridge routes used by these checks."""
     from yt_playlist.providers import genres
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, home_tv, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, home, home_tv, playlists
 
     monkeypatch.setattr(genres, 'configure', lambda *args, **kwargs: None)
-    routes = (app_update, audio_preview, home_tv, playlists) if 'tv_launch_web' in request.fixturenames else (
-        app_update, audio_preview, home, playlists)
+    routes = (app_update, audio_vibes, home_tv, playlists) if 'tv_launch_web' in request.fixturenames else (
+        app_update, audio_vibes, home, playlists)
     if 'tv_launch_web' in request.fixturenames:
         from fastapi import APIRouter
         from yt_playlist.web.routes import audio_vibes
@@ -98,10 +99,10 @@ def completed_video_catalog(store, monkeypatch):
         with store.conn:
             # Prepared visual editions are unowned until the generated TV
             # playlist publishes them; they must retain generated quarantine.
-            store.conn.executemany('DELETE FROM library_memberships WHERE entry_id='
-                '(SELECT id FROM catalog_entries WHERE video_id=?)', [(row['video_id'],) for row in rows])
+            store.conn.executemany('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id='
+                '(SELECT id FROM track_sources WHERE video_id=?)', [(row['video_id'],) for row in rows])
         entries = {row['video_id']: store.conn.execute(
-            'SELECT id FROM catalog_entries WHERE video_id=?', (row['video_id'],)).fetchone()[0]
+            'SELECT id FROM track_sources WHERE video_id=?', (row['video_id'],)).fetchone()[0]
             for row in rows}
 
         def ingested(video, title='', artist='', album=None, duration_s=None, **kwargs):
@@ -154,11 +155,17 @@ def prepared_tv_predecessors(monkeypatch):
 
 
 def prepare_tv_formats(store, *, mixes=4):
-    """Publish this case's mixes/radio after its independent early journey."""
+    """Supply live mix inputs and a separate Radio offer after the early journey."""
+    from yt_playlist.rec import fresh_pool
+
+    fields = ('key', 'title', 'artist', 'video_id', 'genre', 'score')
+    reserve = [{field: track.get(field) for field in fields}
+               for track in fresh_pool.pick(store, 1000, size=48, minimum=1)]
     tracks = publish_personal_mix(store, count=mixes, tracks_per_card=1)
+    publish_live_mix_inputs(store, count=mixes, fresh_reserve=reserve)
     store.settings.set_setting('radio_seed_offer', json.dumps({
         'menu_id': 'prepared-radio', 'tracks': tracks[:4]}))
-    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM tracks')], 1000)
+    complete_entries(store, [row[0] for row in store.conn.execute('SELECT id FROM catalog_tracks WHERE id IN (SELECT id FROM track_sources WHERE library_origin IS NOT NULL)')], 1000)
     complete_discovered(store, [row[0] for row in store.conn.execute(
         'SELECT identity_key FROM discovered_tracks')], 1000)
     return tracks
@@ -166,7 +173,7 @@ def prepare_tv_formats(store, *, mixes=4):
 
 def test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey(store, tv_journey_inputs):
     from tests.test_tv_stream import video
-    iid = store.accounts.upsert_account('TV account', 'cred', None, True)
+    iid = store.accounts.upsert_account('TV account', None, True)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('home_format', 'mixes')
     prepare_tv_formats(store)
@@ -180,15 +187,18 @@ def test_home_keeps_tv_entry_with_prepared_queue_after_the_early_journey(store, 
     with TestClient(app, base_url='http://127.0.0.1') as client:
         html = client.get('/').text
         assert 'data-dash="tv"' in html and '>TV<span' in html
-        assert 'class="tv-home tv-session"' in html
         assert 'Adjust TV parameters' in html
+        panel = client.get('/?panel=tv&fragment=1')
+        assert panel.status_code == 200
+        assert 'class="tv-home tv-session"' in panel.text
+        assert 'id="tv-params-title"' in panel.text
         assert client.get('/home/tv').json()['ready'] is True
 
 
 @pytest.mark.parametrize('failed', [False, True])
 def test_empty_and_failed_tv_status_remains_readable_when_the_journey_reaches_tv(
         store, failed, tv_journey_inputs):
-    iid = store.accounts.upsert_account('TV account', 'cred', None, True)
+    iid = store.accounts.upsert_account('TV account', None, True)
     store.settings.set_setting('last_sync_at', '1')
     store.settings.set_setting('home_format', 'albums')
     prepare_tv_formats(store)
@@ -202,7 +212,7 @@ def test_empty_and_failed_tv_status_remains_readable_when_the_journey_reaches_tv
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000, background_work=False)
     with TestClient(app, base_url='http://127.0.0.1') as client:
         html = client.get('/').text
-        assert 'data-dash="tv"' in html and 'class="tv-home tv-session"' in html
+        assert 'data-dash="tv"' in html
         status = client.get('/home/tv').json()
         assert status['ready'] is False
         assert ('reconnecting' if failed else 'liked songs') in status['message']
@@ -299,6 +309,44 @@ def test_preferred_searches_rank_footage_ahead_of_stills_and_visualizers(store):
     assert [query for query, _ in client.searches] == [f'Artist Prepared 0 {edition}' for edition in tv.SEARCHES]
 
 
+@pytest.mark.parametrize('credits,expected', [
+    ([{'name': 'ATB'}], 'visual00001'),
+    ([{'name': 'Beatbox'}], 'visual00002'),
+    ([], 'visual00002'),
+])
+def test_resolver_requires_a_matching_credit_before_preferring_live_footage(credits, expected):
+    seed = {'key': 'believe|atb', 'title': 'Believe', 'artist': 'ATB'}
+    client = Videos([
+        row(1, title='ATB - Believe (Live Session)', artists=credits),
+        row(2, title='Believe (Official Music Video)', artists=[{'name': 'Guest'}, {'name': 'ATB'}]),
+    ])
+
+    offered, = tv.resolve(client, [seed], 15)
+
+    assert offered['video_id'] == expected
+    assert offered['source_key'] == seed['key']
+    assert client.lookups == [expected]
+
+
+def test_worker_keeps_the_liked_recording_attached_to_a_credited_upload(store):
+    seed, = publish_personal_mix(store, count=1, tracks_per_card=1)
+    seed_like(store, seed['key'], 1000)
+    client = Videos([
+        row(1, title=f"{seed['title']} (Live Session)",
+            artists=[{'name': f"The {seed['artist']} Tribute"}]),
+        row(2, title=f"{seed['title']} (Official Music Video)",
+            artists=[{'name': 'Guest'}, {'name': seed['artist']}]),
+    ])
+
+    tv.prepare(store, client, 1001)
+
+    offered, = tv.queue(store, 1001)
+    assert offered['video_id'] == 'visual00002'
+    assert offered['source_key'] == seed['key']
+    assert offered['source_artist'] == seed['artist']
+    assert offered['group'] == 'liked'
+
+
 @pytest.mark.parametrize('details', [
     {'musicVideoType': 'MUSIC_VIDEO_TYPE_ATV'}, {'author': 'Artist - Topic'},
     {'shortDescription': 'Provided to YouTube by a record company'},
@@ -311,15 +359,20 @@ def test_detailed_audio_evidence_overrules_misleading_visual_title(store, detail
 
 
 def test_pool_uses_likes_unowned_artist_tracks_and_discovery_without_exposure(store, monkeypatch):
+    from tests.recommendation_support import publish_bundles
+    from yt_playlist.rec import home_cards
+
     seeds = publish_personal_mix(store)
     for seed in seeds:
         seed_like(store, seed['key'], 1000)
+    publish_bundles(store, {str(index): {'wheelhouse': seeds[index*4:index*4+4]}
+                           for index in range(4)})
     fresh = [{'key': f'fresh-{i}', 'title': f'New {i}', 'artist': artist, 'video_id': f'new-{i}'}
              for i, artist in enumerate(['Artist', 'Discovery A', 'Artist', 'Discovery B'])]
     monkeypatch.setattr(tv.fresh_pool, 'pick', lambda *args, **kwargs: fresh)
     def forbidden(*args, **kwargs):
         raise AssertionError('TV must not render cards or log mix exposure')
-    monkeypatch.setattr(tv.home_prepared, 'cards', forbidden)
+    monkeypatch.setattr(home_cards.HomeCards, 'cards', forbidden)
     picked = tv.seed_tracks(store, 1000)
     assert [t['group'] for t in picked[:6]] == list(tv.GROUPS) * 2
     # The shared fixture publishes four separate mix ranks. TV interleaves those
@@ -328,6 +381,28 @@ def test_pool_uses_likes_unowned_artist_tracks_and_discovery_without_exposure(st
         seeds[index]['key'] for index in (0, 4, 8, 12, 1, 5, 9, 13, 2, 6, 10, 14, 3, 7, 11, 15)]
     assert all(t['artist'] == 'Artist' for t in picked if t['group'] == 'your_artists')
     assert not set(t['key'] for t in picked if t['group'] != 'liked') & store.rec_query.library_keys()
+
+
+def test_supplemental_liked_seed_order_is_independent_of_similar_disliked_recording(store, monkeypatch):
+    from tests.recommendation_support import publish_bundles
+
+    ranked = publish_personal_mix(store, count=1, tracks_per_card=1)[0]
+    publish_bundles(store, {'all': {'wheelhouse': [ranked]}})
+    seed_like(store, ranked['key'], 1000)
+    match, other, disliked = 'a-supplement', 'b-supplement', 'disliked-reference'
+    for key in (match, other, disliked):
+        seed_catalog_track(store, key, key, key, video_id=key)
+    for key in (match, other):
+        seed_like(store, key, 1000)
+    monkeypatch.setattr(tv.fresh_pool, 'pick', lambda *args, **kwargs: [])
+    original = [track['key'] for track in tv.seed_tracks(store, 1000)]
+    assert original == [ranked['key'], match, other]
+    store.rec_model.replace_rec_vectors([
+        (key, np.array(vector, dtype=np.float32).tobytes())
+        for key, vector in [(disliked, [1, 0]), (match, [1, 0]), (other, [0, 1]),
+                            (ranked['key'], [1, 0])]])
+    seed_dislike(store, disliked, until=2000, now=1)
+    assert [track['key'] for track in tv.seed_tracks(store, 1000)] == original
 
 
 def prepare_pool(store, client, now=1, *, seeds=None):
@@ -400,6 +475,51 @@ def test_empty_home_refresh_keeps_available_prepared_videos_but_respects_feedbac
     assert tv.due(store, 5), 'Feedback expiry must admit preparation before the search deadline'
 
 
+@pytest.mark.parametrize('skipped', [False, True], ids=['progress', 'skip-with-progress'])
+def test_tv_search_guards_recording_eligibility_but_accepts_playback_ticks(store, monkeypatch, skipped):
+    now = 1000
+    account = store.accounts.upsert_account('main', None, True)
+    seeds = publish_personal_mix(store, now=now, count=1, tracks_per_card=6)
+    for seed in seeds:
+        seed_like(store, seed['key'], now)
+    video = seeds[0]['video_id']
+    store.player_events.record_player_event(account, 'tick', video, 10, 200, None, None, now - 20)
+    with mix_tuning.adjusting(store, now - 10):
+        pass
+    assert mix_tuning.remaining(store, now) > 0
+    client = Videos([row(i, title=f'Prepared {i} Visualizer') for i in range(len(seeds))])
+    search = client.search
+
+    def playing_search(query, filter):
+        if not client.searches:
+            store.player_events.record_player_event(account, 'tick', video, 12, 200, None, None, now + 1)
+            if skipped:
+                store.player_events.record_player_event(account, 'track_exit', video, 12, 200, None, None, now - 1)
+        return search(query, filter)
+
+    monkeypatch.setattr(client, 'search', playing_search)
+    assert tv.prepare(store, client, now)
+    first_pool = tv.cached(store)
+    if skipped:
+        assert first_pool is None
+        return
+    first_seeds = {seed['key'] for seed in seeds[:tv.MAX_SEEDS]}
+    assert first_pool is not None
+    assert set(first_pool['attempted']) == first_seeds
+    assert {item['source_key'] for item in first_pool['items']} == first_seeds
+
+    client.searches.clear()
+    now += 2
+    assert not tv.prepare(store, client, now)
+    pool = tv.cached(store)
+    assert set(pool['attempted']) == {seed['key'] for seed in seeds}
+    assert len(pool['items']) == len(seeds)
+    searched = tuple(f"{seed['artist']} {seed['title']} " for seed in seeds if seed['key'] in first_seeds)
+    assert all(not query.startswith(searched) for query, _ in client.searches)
+    store.player_events.record_player_event(account, 'tick', video, 18, 200, None, None, now + 5)
+    assert not tv.due(store, now + 5)
+
+
 def test_search_cannot_publish_after_source_removal(store, monkeypatch):
     client = Videos()
     previous = prepare_pool(store, client)
@@ -407,11 +527,28 @@ def test_search_cannot_publish_after_source_removal(store, monkeypatch):
     assert tv.seed_tracks(store, 2)
     search = client.search
     def remove_source(*args, **kwargs):
-        store.rec_proposals.put_proposals('home_tuned', {}, 2)
+        with store.conn.atomic():
+            store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id LIKE 'prepared-%'")
         return search(*args, **kwargs)
     client.search = remove_source
     assert tv.prepare(store, client, 2)
     assert tv.cached(store) == previous
+
+
+def test_search_cannot_overwrite_newer_tv_pool(store, monkeypatch):
+    client = Videos()
+    previous = prepare_pool(store, client)
+    now = tv.MAX_AGE + 2
+    newer = {**previous, 'at': now}
+
+    def resolve(client, seeds, maximum):
+        store.rec_proposals.put_proposals(tv.SURFACE, newer, now)
+        return []
+
+    monkeypatch.setattr(tv, 'resolve', resolve)
+    with pytest.raises(tv.WorkBudgetExceeded, match='TV output changed during preparation'):
+        tv.prepare(store, client, now)
+    assert tv.cached(store) == newer
 
 
 def test_expired_pool_remains_playable_during_unsuccessful_refresh(store):
@@ -476,7 +613,7 @@ def test_lost_pool_recovers_saved_tv_output_offline_without_restoring_excluded_s
     assert not tv.queue(store, 1002)
 
 
-@pytest.mark.parametrize('change', ['feedback', 'home'])
+@pytest.mark.parametrize('change', ['feedback', 'upload'])
 def test_failed_search_cannot_publish_saved_tv_after_inputs_change(store, monkeypatch, change):
     from yt_playlist.core import tv_output_retention
 
@@ -491,7 +628,8 @@ def test_failed_search_cannot_publish_saved_tv_after_inputs_change(store, monkey
         if change == 'feedback':
             seed_dislike(store, previous['items'][0]['source_key'], until=None, now=1001)
         else:
-            store.rec_proposals.put_proposals('home_tuned', {}, 1001)
+            with store.conn.atomic():
+                store.conn.execute("UPDATE track_sources SET available=0 WHERE video_id LIKE 'prepared-%'")
         raise ConnectionError('changed while offline')
     monkeypatch.setattr(client, 'search', offline)
     with pytest.raises(ConnectionError, match='changed while offline'):
@@ -564,15 +702,14 @@ def test_refill_continues_across_menu_changes_and_keeps_prepared_videos(store, m
 @pytest.fixture
 def tv_launch_web(store, monkeypatch, prepared_tv_predecessors, completed_video_catalog):
     from tests.test_tv_stream import video
-    from yt_playlist.rec import onboarding, onboarding_outputs
+    from yt_playlist.rec import onboarding_outputs
 
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '1')
     prepared_tv_predecessors()
     # TV consumes completed Mix tapes readiness. The real prerequisite journey
     # is tested above; this workflow keeps TV eligibility and writes real.
-    monkeypatch.setattr(onboarding, 'prepared_mixes_ready', lambda *args, **kwargs: True)
-    monkeypatch.setattr(onboarding_outputs, 'prepared_mixes_ready', lambda *args, **kwargs: True)
+    monkeypatch.setattr(onboarding_outputs, 'mixes_ready', lambda *args, **kwargs: True)
     seeds = [{'key': f'prepared {index}|artist', 'title': f'Prepared {index}',
               'artist': 'Artist', 'video_id': f'prepared-{index}', 'genre': 'house'}
              for index in range(4)]
@@ -668,6 +805,26 @@ def test_precalculated_serving_parameters_generation_and_sidebar_launch(store, t
     assert 'current TV choices' in web.get('/home/tv').json()['message']
 
 
+def test_launch_skips_unavailable_upload_and_reports_an_unplayable_pool(store, tv_launch_web):
+    web, client = tv_launch_web
+    first = tv.queue(store, 1)[0]['video_id']
+    with store.conn:
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE video_id=?', (first,))
+
+    reply = web.post('/home/tv/play').json()
+    playlist = store.playlists.get_playlist(reply['playlist_id'])
+    sent = [item['videoId'] for item in client.get_playlist(playlist.provider_playlist_id)['tracks']]
+    assert sent == [item['video_id'] for item in reply['items']]
+    assert len(sent) == tv.QUEUE_SIZE and first not in sent
+
+    with store.conn:
+        store.conn.executemany('UPDATE track_sources SET available=0 WHERE video_id=?',
+                               [(item['video_id'],) for item in tv.cached(store)['items']])
+    assert web.get('/home/tv').json()['ready'] is False
+    assert web.post('/home/tv/play').status_code == 202
+    assert len(client.created) == 1
+
+
 def test_missing_pool_requests_background_preparation_and_keeps_playback_locked(store, monkeypatch):
     app = create_app(store, lambda: {}, now_fn=lambda: 1)
     requests = []
@@ -734,18 +891,18 @@ def test_handoff_waits_for_extension_confirmation_and_never_assumes_success(stor
 @pytest.fixture
 def tv_length_routes(monkeypatch, tv_http_routes, native_sql_calls):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home_tv, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, home_tv, playlists
 
     # The length check launches TV; it does not render unrelated Home controls.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx) for module in
-                                                       (app_update, audio_preview, home_tv, playlists)])
+                                                       (app_update, audio_vibes, home_tv, playlists)])
 
 
 def test_tv_length_cap_can_admit_long_video_without_changing_music_limit(
         store, prepared_tv_predecessors, completed_video_catalog, tv_length_routes):
     from yt_playlist.library.playlist_generated import create_generated_playlist
     from tests.test_tv_stream import video
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     prepare_tv_formats(store)
     prepared_tv_predecessors()
     # Resolver matching has separate owners; length admission consumes a full
@@ -796,7 +953,7 @@ def test_tv_tab_waits_for_real_mixes_and_follows_long_play(tv_home_store, prepar
                 self.in_tab = False
 
     store = tv_home_store
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     # An imported empty account has no preparation to await. Model a real
     # library whose first offers are still being prepared.
     seed_catalog_track(store, 'waiting|artist', 'Waiting', 'Artist', video_id='waiting')

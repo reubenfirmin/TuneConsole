@@ -1,63 +1,43 @@
-"""File publication stays outside SQL while receipt and annotation writes remain guarded."""
+"""Check atomic annotation publication and SQL facts for file-backed evidence."""
 import sqlite3
-from pathlib import Path
 
 import pytest
 
-from yt_playlist.core import audio_annotation_files
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.providers.base import MetadataObservation
-from tests.file_custody_support import expire_file
 
 
-def test_annotation_publication_is_safe_from_collection_without_holding_a_sql_writer(
-        file_backed_store, monkeypatch):
-    store = file_backed_store
+@pytest.mark.parametrize('run,samples,labels,taxonomy', [
+    ('missing', [], ['cruise'], TAXONOMY_VERSION), ('run', [], ['cruise'], 'unknown'),
+    ('run', [], ['unknown'], TAXONOMY_VERSION), ('run', ['sample'], ['cruise'], TAXONOMY_VERSION),
+])
+def test_invalid_annotation_is_rejected_atomically(store, run, samples, labels, taxonomy):
     store.audio_vibes.save_playback('run', 'video', 'Song', 'Artist', 1)
-    repository = store.audio_vibes.repository
-    publish = repository.publish_annotation
-    other = sqlite3.connect(store._db_path, timeout=0)
-
-    def collecting(*args, **kwargs):
-        assert not store.conn.in_transaction
-        filename, _digest, _size = kwargs['reference']
-        assert audio_annotation_files.collect_orphans(other) == 0
-        assert Path(filename).is_file()
-        return publish(*args, **kwargs)
-
-    monkeypatch.setattr(repository, 'publish_annotation', collecting)
-    try:
-        store.audio_vibes.save_feedback('run', [], ['cruise'], TAXONOMY_VERSION, {'original': True}, 2)
-        assert store.audio_vibes.feedback('run')['prediction'] == {'original': True}
-        assert audio_annotation_files.collect_orphans(other) == 0
-    finally:
-        other.close()
+    store.audio_vibes.save_sample(dict(id='sample', run_id='another-run', video_id='video', point='thirty',
+                                      title='Song', artist='Artist'), 1)
+    with pytest.raises(ValueError):
+        store.audio_vibes.save_feedback(run, samples, labels, taxonomy, None, 2)
+    assert not store.conn.in_transaction
+    assert not store.conn.execute("SELECT 1 FROM audio_annotations WHERE kind<>'playback'").fetchone()
 
 
 def test_failed_annotation_sql_keeps_the_previous_judgment_and_retry_advances_once(store):
     store.audio_vibes.save_playback('run', 'video', 'Song', 'Artist', 1)
     store.audio_vibes.save_feedback('run', [], ['cruise'], TAXONOMY_VERSION, None, 2)
     previous = store.audio_vibes.feedback('run')
-    store.conn.execute("CREATE TEMP TRIGGER fail_annotation_seal BEFORE UPDATE OF sealed ON audio_annotations "
-                       "WHEN NEW.sealed=1 BEGIN SELECT RAISE(ABORT,'annotation interrupted'); END")
+    store.conn.execute("CREATE TEMP TRIGGER fail_annotation_insert AFTER INSERT ON audio_annotations "
+                       "BEGIN SELECT RAISE(ABORT,'annotation interrupted'); END")
     with pytest.raises(sqlite3.IntegrityError, match='annotation interrupted'):
         store.audio_vibes.save_feedback('run', [], ['relax'], TAXONOMY_VERSION, {'new': True}, 3)
     assert not store.conn.in_transaction
     assert store.audio_vibes.feedback('run') == previous
-    assert store.conn.execute('SELECT COUNT(*) FROM audio_annotations').fetchone()[0] == 1
-    pending = store.conn.execute("SELECT id FROM annotation_file_writes WHERE file_status='pending'").fetchone()[0]
-    filename = audio_annotation_files.record_path(store.audio_vibes.annotation_files.root, pending)
-    assert audio_annotation_files.collect_orphans(store.conn, memory_key=store._evidence_key) == 0
-    expire_file(filename)
-    # A failed native publication retains its ordinary expiry grace; once old,
-    # it expires independently of the readable previous judgment.
-    assert audio_annotation_files.collect_orphans(store.conn, memory_key=store._evidence_key) == 1
-    store.conn.execute('DROP TRIGGER fail_annotation_seal')
+    assert store.conn.execute("SELECT COUNT(*) FROM audio_annotations WHERE kind<>'playback'").fetchone()[0] == 1
+    store.conn.execute('DROP TRIGGER fail_annotation_insert')
     store.audio_vibes.save_feedback('run', [], ['relax'], TAXONOMY_VERSION, {'new': True}, 4)
     store.audio_vibes.save_feedback('run', [], ['relax'], TAXONOMY_VERSION, {'new': True}, 5)
     assert store.audio_vibes.feedback('run')['vibes'] == ['relax']
-    assert [tuple(row) for row in store.conn.execute('SELECT revision,sealed FROM audio_annotations ORDER BY id')] == [
-        (1, 1), (2, 1)]
+    revisions = store.conn.execute("SELECT revision FROM audio_annotations WHERE kind<>'playback' ORDER BY id")
+    assert [row[0] for row in revisions] == [1, 2]
 
 
 def test_an_outdated_sample_receipt_plan_cannot_insert_over_a_committed_receipt(store):

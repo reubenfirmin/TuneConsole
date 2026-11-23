@@ -36,7 +36,7 @@ def test_private_disk_storage_closes_and_removes_files(tmp_path, monkeypatch, re
                 assert next(rows)['key'] == 'a'
                 rows.close()
             elif repo_type is HomeSelectionRepo:
-                repo.add_candidates([(7, 1, 'a', 'Artist', '', 'jazz', 1, 2000, 1, 0, 1)])
+                repo.add_candidates([(7, 1, 'a', 'Artist', '', 'jazz', 1, 2000, 0, 1)])
                 rows = repo.ranked(query(CandidateFilter(7)))
                 assert next(rows)['key'] == 'a'
                 rows.close()
@@ -65,7 +65,7 @@ def test_ordered_cursor_checks_cancellation_at_the_next_page(repo_type):
             repo.add([(i, str(i), '', '', 0, 0, .5) for i in range(300)])
             rows = repo.ranked()
         else:
-            repo.add_candidates([(7, i, str(i), '', '', 'jazz', 1, 2000, 1, 0, 1)
+            repo.add_candidates([(7, i, str(i), '', '', 'jazz', 1, 2000, 0, 1)
                                  for i in range(300)])
             rows = repo.ranked(query(CandidateFilter(7)))
         assert [next(rows)['key'] for _ in range(128)] == [str(i) for i in range(128)]
@@ -83,22 +83,22 @@ def test_home_filtering_steering_and_seen_keys_share_the_same_candidate_set():
     with HomeSelectionRepo.open() as repository:
         repo = HomeSelection(repository)
         repo.add_candidates([
-            (7, 0, 'a', 'A', '', 'jazz', 1, 1980, 1, 0, 1),
-            (7, 1, 'b', 'B', '', 'jazz', 1, 2000, 1, 0, 0),
-            (7, 2, 'c', 'C', '', 'rock', 1, 2020, 1, .3, 1),
-            (7, 3, 'd', 'D', '', 'jazz', 1, 2010, 2, -.5, 1),
-            (7, 4, 'e', 'E', '', 'jazz', 1, 2005, 1, 0, 1),
-            (7, 5, 'f', 'F', '', 'jazz', 1, 2020, 1, 0, 1),
+            (7, 0, 'a', 'A', '', 'jazz', 1, 1980, 0, 1),
+            (7, 1, 'b', 'B', '', 'jazz', 1, 2000, 0, 0),
+            (7, 2, 'c', 'C', '', 'rock', 1, 2020, .3, 1),
+            (7, 3, 'd', 'D', '', 'jazz', 1, 2010, -.5, 1),
+            (7, 4, 'e', 'E', '', 'jazz', 1, 2005, 0, 1),
+            (7, 5, 'f', 'F', '', 'jazz', 1, 2020, 0, 1),
         ])
         selected = CandidateFilter(7, year_band=1, years=(1990, 2010), include=('jazz',), eligible=True)
-        repo.add_ppr([('mode', 'd', 2), ('mode', 'e', 3)])
+        repo.add_ppr([('mode', 'd', 3), ('mode', 'e', 2)])
         assert repo.count(selected) == 2
         assert [row['key'] for row in repo.ranked(selected)] == ['d', 'e']
-        assert [row['key'] for row in repo.ranked(selected, mode='mode', ranker='ppr', scale=3)] == ['e', 'd']
-        assert [row['key'] for row in repo.ranked(selected, ranker='cosine')] == ['d', 'e']
+        assert [row['key'] for row in repo.ranked(selected, mode='mode', ranker='ppr')] == ['e', 'd']
+        assert [(row['key'], row['tilt']) for row in repo.ranked(selected, ranker='cosine')] == [
+            ('e', 0), ('d', -.5)]
         repo.considered(1, selected)
-        assert [tuple(row) for row in repo.considered_rows(1)] == [('d', -.5), ('e', 0)]
-        assert repo.has_negative_ordering()
+        assert [row[0] for row in repo.considered_rows(1)] == ['d', 'e']
         repo.mark_seen(selected, ['f'])
         remaining = CandidateFilter(7, include=('jazz',), eligible=True, unseen=True)
         assert [row['key'] for row in repo.ranked(remaining)] == ['a']

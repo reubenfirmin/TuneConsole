@@ -1,13 +1,14 @@
 """Publication order and maintenance decisions without SQLite or managed files."""
 from contextlib import nullcontext
 import json
+import time
 from unittest.mock import create_autospec
 
 import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.controllers.recommendation_impressions import RecommendationImpressions
-from yt_playlist.core import served_facts
+from yt_playlist.core import fao, served_facts
 from yt_playlist.core.served_files import ServedFiles
 from yt_playlist.repos.rec_ledger import RecLedgerRepo
 
@@ -50,12 +51,8 @@ def test_file_failure_keeps_reporting_owners_unpublished(impressions):
     impressions.repository.insert_reserved_impressions.assert_not_called()
 
 
-def test_legacy_event_stays_in_sql_and_empty_batch_does_no_work(impressions):
+def test_empty_batch_does_no_work(impressions):
     impressions.record([], versions=[])
-    impressions.repository.served_facts_active.assert_not_called()
-    impressions.repository.served_facts_active.return_value = False
-    impressions.record([event()], versions=['version'])
-    impressions.repository.insert_served_impressions.assert_called_once_with([event()], versions=['version'])
     impressions.repository.reserve_impression_ids.assert_not_called()
     impressions.files.retained.assert_not_called()
 
@@ -81,18 +78,16 @@ def test_legacy_or_missing_report_does_not_open_a_diagnostic(impressions):
     impressions.files.diagnostic.assert_not_called()
 
 
-def test_expiry_is_committed_before_deletion_and_only_deleted_files_are_acknowledged(impressions):
+def test_expiry_is_committed_before_file_deletion(impressions):
     events = []
-    impressions.repository.expire_diagnostics.side_effect = lambda *args, **kwargs: events.append('expiry')
-    impressions.repository.diagnostic_retirements.return_value = [1, 2]
-    impressions.files.delete_many.side_effect = lambda rows: events.append('delete') or [1]
-    impressions.repository.acknowledge_diagnostic_retirements.side_effect = lambda rows: events.append('ack')
+    impressions.repository.expire_diagnostics.side_effect = lambda *args, **kwargs: events.append('expiry') or [1, 2]
+    impressions.files.delete_many.side_effect = lambda rows: events.append('delete')
     impressions.files.orphan_candidates.return_value = [(3, 'three'), (4, 'four')]
-    impressions.repository.existing_impressions.return_value = {4}
+    impressions.repository.active_diagnostics.return_value = {4}
     impressions.maintain(10_000_000, before=1_000_000)
-    assert events == ['expiry', 'delete', 'ack']
+    assert events == ['expiry', 'delete']
     impressions.repository.expire_diagnostics.assert_called_once_with(10_000_000 - served_facts.RETAIN_SECONDS, limit=256)
-    impressions.repository.acknowledge_diagnostic_retirements.assert_called_once_with([1])
+    impressions.files.delete_many.assert_called_once_with([1, 2])
     impressions.files.delete_orphans.assert_called_once_with([(3, 'three')])
 
 
@@ -104,14 +99,29 @@ def test_retained_reader_defers_every_maintenance_write(impressions):
     impressions.files.delete_many.assert_not_called()
 
 
-def test_failed_expiry_or_unlink_keeps_the_durable_retirement_queue(impressions):
+def test_overlapping_cleanup_preserves_owned_and_replaced_diagnostics(impressions, tmp_path):
+    files = ServedFiles(tmp_path / 'served')
+    impressions.files = files
+    files.publish_many([(identity, 100, {}) for identity in (1, 2, 3, 4)])
+    gone, owned, replaced, orphan = (files.root / served_facts.relative(identity) for identity in (1, 2, 3, 4))
+    replacement = b'replacement contents'
+    impressions.repository.expire_diagnostics.return_value = []
+
+    def owners(candidates):
+        assert set(candidates) == {1, 2, 3, 4}
+        gone.unlink()
+        fao.write(replaced, replacement)
+        return {2}
+
+    impressions.repository.active_diagnostics.side_effect = owners
+    impressions.maintain(time.time() + served_facts.RETAIN_SECONDS + 10, before=100)
+    assert not gone.exists() and not orphan.exists()
+    assert owned.is_file()
+    assert fao.read(replaced).bytes == replacement
+
+
+def test_failed_expiry_preserves_diagnostics(impressions):
     impressions.repository.expire_diagnostics.side_effect = RuntimeError('sql failure')
     with pytest.raises(RuntimeError, match='sql failure'):
         impressions.maintain(10_000_000, before=1_000_000)
     impressions.files.delete_many.assert_not_called()
-    impressions.repository.expire_diagnostics.side_effect = None
-    impressions.repository.diagnostic_retirements.return_value = [1]
-    impressions.files.delete_many.side_effect = OSError('busy')
-    with pytest.raises(OSError, match='busy'):
-        impressions.maintain(10_000_000, before=1_000_000)
-    impressions.repository.acknowledge_diagnostic_retirements.assert_not_called()

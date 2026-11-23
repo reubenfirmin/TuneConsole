@@ -15,6 +15,7 @@ from tests.browser import test_extension_lifecycle_browser as lifecycle
 from tests.browser.test_extension_lifecycle_browser import installed_bridge  # noqa: F401
 from tests.browser.test_tv_browser import store, tv_ui  # noqa: F401
 from tests.browser.test_tv_navigation_browser import start_tv
+from yt_playlist.web.fao_static import HOME_SHELL
 
 
 @pytest.fixture
@@ -35,7 +36,7 @@ def test_native_music_play_retires_tv_and_mix_play_pauses_the_retained_iframe(
     h = installed_bridge
     page.set_viewport_size({'width': 1440, 'height': 1000})
     loaded = {}
-    assets = {'tv.js', 'playback-status.js', 'playback-controls.js', 'player-card.js'}
+    assets = {'tv.js', 'home-shell.js'}
 
     def asset(response):
         name = urlsplit(response.url).path.removeprefix('/static/')
@@ -123,5 +124,9 @@ def test_native_music_play_retires_tv_and_mix_play_pauses_the_retained_iframe(
     expect(page.locator('tr[data-vid="mix-song"]')).to_have_class(re.compile(r'\bnow-playing\b'))
     expect(page.locator('#playback-error, #toasts [role="alert"]')).to_have_count(0)
     root = Path(__file__).resolve().parents[2] / 'src/yt_playlist/web/static'
-    assert loaded == {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in assets}
+    scripts, extension, separator, _ = HOME_SHELL['home-shell.js']
+    assert {'playback-status', 'playback-controls', 'player-card'}.issubset(scripts)
+    shell = separator.join((root / (name + extension)).read_bytes() for name in scripts)
+    assert loaded == {'home-shell.js': hashlib.sha256(shell).hexdigest(),
+                      'tv.js': hashlib.sha256((root / 'tv.js').read_bytes()).hexdigest()}
     page.screenshot(path='/tmp/tuneconsole-1153-installed-extension-handoff.png')

@@ -164,9 +164,6 @@ def test_radio_preparation_starts_inside_lifespan_after_work_opens(store, monkey
         def __init__(self, ctx):
             self.ctx = ctx
 
-        def retain_provenance(self):
-            pass
-
         def prepare(self):
             def warm():
                 started.set()
@@ -229,7 +226,7 @@ def test_shutdown_cannot_restart_workers_after_deferred_startup(store, monkeypat
 
 
 def test_restart_waits_for_a_generated_playlist_save(store, monkeypatch):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     app = create_app(store, lambda: {iid: object()}, background_work=False)
     ctx = app.state.ctx
     started, release = threading.Event(), threading.Event()

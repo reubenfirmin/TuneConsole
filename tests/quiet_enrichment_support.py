@@ -11,7 +11,7 @@ from yt_playlist.providers import base, musicbrainz, waterfall
 @pytest.fixture
 def quiet_enrichment(store, monkeypatch, canonical_genre_matcher):
     monkeypatch.delenv('LASTFM_API_KEY', raising=False)
-    identity = store.accounts.upsert_account('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     playlist = store.playlists.upsert_playlist(identity, 'QUIET', 'Quiet enrichment', 2, '', 1)
     tracks = [store.tracks.upsert_track(f'quiet-{n}', f'Quiet song {n}', 'Artist', 'Quiet album',
                                       200, album_browse_id='QUIET-ALBUM') for n in range(2)]

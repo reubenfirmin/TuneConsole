@@ -36,7 +36,7 @@ def test_recall_none_without_vectors(no_database):
 
 def _two_cluster_playlists(store, *, fit=True):
     """Two tight 8-track clusters, one per playlist, so the embedding separates A from B. Returns iid."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0) for i in range(8)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None, created_at=0) for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
@@ -54,8 +54,10 @@ def test_rolling_temporal_recall_recovers_recent_plays_without_live_vectors(stor
     day, t_recent = 86400, 1_000_000.0
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
-    store.history.record_history_plays(iid, t_recent,
+    store.history.record_history_plays(iid, t_recent - day,
         [identity_key(f"A{i}", "AB") for i in range(4, 8)], source_timezone="UTC")
+    # End the window after the date-only targets' full day.
+    store.history.record_play_event(iid, identity_key("A0", "AB"), "a0", t_recent)
 
     res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
     assert res["trials"] == 4                 # the four held-out recent plays, none seen before the cutoff
@@ -74,18 +76,22 @@ def test_rolling_temporal_recall_excludes_generated_only_held_plays(store, sourc
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
     held = [identity_key(f"A{i}", "AB") for i in range(4, 8)]
-    store.history.record_history_plays(iid, t_recent,
+    store.history.record_history_plays(iid, t_recent - day,
         [(key, 'Today') for key in held] if source == 'ytm_history' else held, source_timezone="UTC")
+    store.history.record_play_event(iid, identity_key("A0", "AB"), "a0", t_recent)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
-    # cutoff = 1_000_000 - 5*86400 = 568_000; all provenance rows below are inside the window.
-    store.history.record_play_event(iid, identity_key("A6", "AB"), "a6", 999_000.0, playlist_ytm_id="PLGEN")
-    store.history.record_play_event(iid, identity_key("A7", "AB"), "a7", 998_000.0, playlist_ytm_id="PLGEN")
+    # The generated plays are on the same full day as the imported history.
+    store.history.record_play_event(iid, identity_key("A6", "AB"), "a6", 999_000.0 - day,
+                                    playlist_ytm_id="PLGEN")
+    store.history.record_play_event(iid, identity_key("A7", "AB"), "a7", 998_000.0 - day,
+                                    playlist_ytm_id="PLGEN")
     # A5 is MIXED evidence: one generated play plus one organic (no-playlist) play, spaced beyond
     # the 30-minute live-dedup merge window so they land as two distinct rows. It must stay held.
-    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0, playlist_ytm_id="PLGEN")
-    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0, playlist_ytm_id=None)
+    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 997_000.0 - day,
+                                    playlist_ytm_id="PLGEN")
+    store.history.record_play_event(iid, identity_key("A5", "AB"), "a5", 990_000.0 - day)
 
     res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
 
@@ -104,14 +110,15 @@ def test_rolling_temporal_recall_all_held_generated_is_insufficient_not_perfect(
     store.history.record_history_plays(iid, t_recent - 10 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
     held = [identity_key(f"A{i}", "AB") for i in range(4, 8)]
-    store.history.record_history_plays(iid, t_recent,
+    store.history.record_history_plays(iid, t_recent - day,
         [(key, 'Today') for key in held] if source == 'ytm_history' else held, source_timezone="UTC")
+    store.history.record_play_event(iid, identity_key("A0", "AB"), "a0", t_recent)
     store.playlists.upsert_playlist(iid, "PLGEN", "Gen mix", 0, "h", 1.0)
     store.playlists.set_playlist_group("PLGEN", GENERATED_GROUP)
     store.playlists.mark_generated_playlist('PLGEN')
     for i in range(4, 8):
-        store.history.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}", 990_000.0 + i * 3600,
-                                playlist_ytm_id="PLGEN")
+        store.history.record_play_event(iid, identity_key(f"A{i}", "AB"), f"a{i}",
+                                        990_000.0 - day + i * 3600, playlist_ytm_id="PLGEN")
 
     res = eval_recs.rolling_temporal_recall(store, holdout_days=5, k=8, windows=1, dim=4)
 
@@ -126,7 +133,7 @@ def test_rolling_temporal_recall_all_held_generated_is_insufficient_not_perfect(
 
 
 def test_rolling_temporal_recall_none_without_reconstructable_vectors(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for i, timestamp in enumerate((100_000.0, 1_000_000.0)):
         store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None, created_at=0)
         store.history.record_history_plays(iid, timestamp, [identity_key(f"A{i}", "AB")],
@@ -152,8 +159,9 @@ def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
     day, t = 86400, 5_000_000.0
     store.history.record_history_plays(iid, t - 20 * day,
         [identity_key(f"A{i}", "AB") for i in range(4)], source_timezone="UTC")
-    store.history.record_history_plays(iid, t,
+    store.history.record_history_plays(iid, t - day,
         [identity_key(f"A{i}", "AB") for i in range(4, 8)], source_timezone="UTC")
+    store.history.record_play_event(iid, identity_key("A0", "AB"), "a0", t)
 
     result = eval_recs.rolling_temporal_recall(store, holdout_days=5, windows=3, k=8, dim=4)
 
@@ -166,7 +174,7 @@ def test_rolling_temporal_recall_rebuilds_as_of_cutoff(store):
 
 
 def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tracks = [store.tracks.upsert_track(f"v{i}", f"T{i}", "Artist", None, None, created_at=10) for i in range(8)]
     stable = store.playlists.upsert_playlist(iid, "stable", "Stable", 4, "s", 20)
     changed = store.playlists.upsert_playlist(iid, "changed", "Changed", 4, "old", 20)
@@ -184,7 +192,7 @@ def test_as_of_baskets_ignore_post_cutoff_playlist_changes(store):
 def test_projection_recall_breakdown_by_family_and_coverage(store):
     # The scalar projection_recall hides where grounding fails. The breakdown must partition trials by
     # genre family, era, and coverage band so the failure modes are locatable.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(15)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(15)]
     for t in A:
@@ -238,7 +246,7 @@ def test_projection_recall_pins_reference_during_model_publication(store, monkey
 
 def test_historical_fit_checks_memory_before_training(no_database, monkeypatch):
     from yt_playlist.rec import embedding_training, model_refresh
-    store = repository_store(rec_evidence={'rec_baskets_as_of': (
+    store = repository_store(rec_evidence={'evaluation_listening': [], 'rec_baskets_as_of': (
         [[f'a{i}|ab' for i in range(8)], [f'b{i}|bb' for i in range(8)]], {})})
     monkeypatch.setattr(embedding_training, 'build_vectors_from_baskets',
                         lambda *a, **kw: pytest.fail('fit exceeded memory admission'))

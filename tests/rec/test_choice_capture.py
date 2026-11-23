@@ -49,7 +49,7 @@ def test_capture_freezes_menu_and_observations_before_worker_writes(capture, mon
     assert len(worker.jobs.measurements) == 3
     assert choices.opportunity(store, oid)['at'] == 100
     # Confirmed playback can bind to a menu while its raw write is still queued.
-    iid = store.accounts.upsert_account('main', 'test', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     choice_outcomes.bind(store, iid, 'PL', 'v1', oid, 'a', 104)
     assert choice_outcomes.observe(store, iid, 'PL', 'v1', 'ended', 180, 180, 1, 105)
     assert not calls

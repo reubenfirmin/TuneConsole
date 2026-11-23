@@ -63,3 +63,17 @@ history; detailed machine-readable evidence remains under the existing ignored
 `audio_lab/local/` paths. Local evidence paths are relative to `audio_lab/` and
 are not guaranteed to exist in a fresh checkout. A source archive or receipt
 check establishes integrity, not model quality or independent acceptance.
+
+## Recurring NOW
+
+The November 19, 2026 [session replay](investigations/now_patterns.py) used a
+read-only actual-library snapshot. Hard four- and six-hour buckets, with or
+without a weekday/weekend split, had higher loss than ordinary NOW group scoring
+on 32 retrospective first plays. The retained group publications yielded no
+point-in-time test starts, and only two attributed choices had enough evidence to
+compare the visible options at the branch level. These results measure hard-bucket
+predictions of first-play groups. The [recurring NOW design](https://github.com/reubenfirmin/TuneConsole/issues/1314#issuecomment-7013275310)
+learns continuously from deliberate choices among alternatives shown during normal
+use. The frozen protocol, source and fold results are in
+`build/test-reports/now-patterns-four-hour-branches/`. The replay accepts
+`--hour-bin 6` for the time-window sensitivity check.

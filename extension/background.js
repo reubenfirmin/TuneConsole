@@ -22,7 +22,10 @@ const tuneConsole = (() => {
   const audioCollection = createAudioCollection({appOrigin: TC_CONFIG.appOrigin, capture: audioCapture});
 
   async function dispatch(frame) {
-    if (frame && frame.type === "navigate") { playback.navigate(frame.url); return; }
+    if (frame && frame.type === "navigate") {
+      playback.navigate(frame.url, frame.radioLaunchId, frame.radioRecovery);
+      return;
+    }
     if (frame && frame.type === "playpause") {
       const result = await playback.playPause(frame);
       if (Number.isSafeInteger(frame.id) && frame.id > 0)
@@ -34,7 +37,7 @@ const tuneConsole = (() => {
       let result;
       try {
         result = frame.type === "rate" ? await playback.rate(frame.action, frame.videoId, frame.likeStatus, frame.skip, frame.brandId)
-          : frame.type === "next" ? await playback.next(frame.videoId, frame.brandId)
+          : frame.type === "next" ? await playback.next(frame.videoId, frame.brandId, frame.ratingAdvance)
           : frame.type === "pause-for-tv" ? await playback.pauseForTv() : await radio.update(frame);
       } catch (e) { result = {ok: false, error: String(e)}; }
       return {id: frame.id, status: 200, body: JSON.stringify(result)};
@@ -50,7 +53,7 @@ const tuneConsole = (() => {
   chrome.runtime.onMessage.addListener(setup.receive);
   chrome.runtime.onMessage.addListener(playback.receive);
   chrome.runtime.onConnectExternal?.addListener(port => {
-    if (!audioCollection.connect(port)) audioCapture.connect(port);
+    if (!audioCollection.connect(port)) port.disconnect();
   });
   chrome.tabs.onRemoved.addListener(id => { playback.removed(id); sensors.removed(id); });
   chrome.tabs.onUpdated.addListener((id, info, tab) => {

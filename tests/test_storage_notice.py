@@ -4,12 +4,11 @@ import re
 from fastapi.testclient import TestClient
 import pytest
 
-from yt_playlist.core import db_space, playback_feedback
-from yt_playlist.core.storage_maintenance import COPY_DEFERRED_MESSAGE
+from yt_playlist.core import playback_feedback
 from yt_playlist.web.app import create_app
 
 
-@pytest.mark.parametrize('preparation', ['recommendations', 'enrichment', 'maintenance', 'retry'])
+@pytest.mark.parametrize('preparation', ['recommendations', 'enrichment', 'retry'])
 def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monkeypatch, preparation):
     app = create_app(store, lambda: {}, background_work=False)
     ctx = app.state.ctx
@@ -17,8 +16,6 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
     if preparation == 'retry':
         from yt_playlist.rec.worker_queue import Job
         ctx.rec_worker.jobs.retry[Job.HOME].dirty = True
-    elif preparation == 'maintenance':
-        ctx.storage_maintenance.ready.clear()
     else:
         monkeypatch.setattr(type(worker), 'busy', property(lambda _: True))
     with TestClient(app, base_url='http://127.0.0.1') as client:
@@ -39,11 +36,10 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
             assert client.get('/storage-maintenance/status').json()['banner_message'] == ''
         prepared_html = client.get('/playlists').text
         assert re.search(r'<div id="storage-maintenance"[^>]* hidden>', prepared_html)
-        ctx.storage_maintenance.active = True
+        store._recommendation_retirement_pending = True
         assert client.get('/storage-maintenance/status').json()['banner_message'] == (
             'Optimizing app storage; some recommendations are temporarily unavailable.')
-        ctx.storage_maintenance.active = False
-        ctx.storage_maintenance.ready.set()
+        store._recommendation_retirement_pending = False
         ctx.rec_worker.jobs.cancel()
         monkeypatch.undo()
         assert client.get('/storage-maintenance/status').json()['banner_message'] == ''
@@ -51,39 +47,21 @@ def test_preparation_uses_existing_notice_without_pausing_normal_use(store, monk
 
 @pytest.mark.parametrize('state,expected,active,warning', [
     ('idle', '', False, False),
-    ('compacting', 'Optimizing app storage; some recommendations are temporarily unavailable.', True, False),
+    ('retirement', 'Optimizing app storage; some recommendations are temporarily unavailable.', True, False),
     ('evidence', '', False, False),
     ('retrying', '', False, True),
     ('feedback', '', False, False),
-    ('low_space', '', False, True),
-    ('deferred', '', False, True),
-    ('schema_retry', '', False, True),
-    ('copy_stopped', '', False, True),
-    ('recovery_required', '', True, False),
 ])
 def test_notice_matches_status_without_javascript(store, state, expected, active, warning):
     app = create_app(store, lambda: {}, background_work=False)
-    maintenance = app.state.ctx.storage_maintenance
-    if state in ('compacting', 'recovery_required'):
-        maintenance.active = True
-        maintenance.phase = state
-        maintenance.ready.clear()
-        if state == 'recovery_required':
-            maintenance.report = {'analytics_pending': True}
+    if state == 'retirement':
+        store._recommendation_retirement_pending = True
     elif state in ('evidence', 'retrying'):
         store._evidence_recovery_pending = True
         store._evidence_recovery_failed = state == 'retrying'
     elif state == 'feedback':
-        identity = store.accounts.upsert_account('Main', 'credential', None, True)
+        identity = store.accounts.upsert_account('Main', None, True)
         playback_feedback.capture(store, 'player', identity, {'kind': 'state', 'state': 'paused'}, 1)
-    elif state in ('low_space', 'deferred'):
-        maintenance.phase = 'deferred'
-        maintenance._deferred(db_space.LowDiskSpace('full') if state == 'low_space' else RuntimeError('stopped'))
-    elif state == 'schema_retry':
-        maintenance.phase = state
-    elif state == 'copy_stopped':
-        maintenance.phase = 'deferred'
-        maintenance.message = COPY_DEFERRED_MESSAGE
     with TestClient(app, base_url='http://127.0.0.1') as client:
         status = client.get('/storage-maintenance/status').json()
         assert (status['active'], status['warning'], status['recording']) == (active, warning, not active)
@@ -104,11 +82,9 @@ def test_notice_matches_status_without_javascript(store, state, expected, active
             assert response.text == status['message']
 
 
-def test_analytics_preparation_stays_quiet_with_usable_recommendations(store):
+def test_evidence_cleanup_stays_quiet_with_usable_recommendations(store):
     app = create_app(store,lambda:{},background_work=False)
-    maintenance = app.state.ctx.storage_maintenance
-    maintenance.ready.clear()
-    maintenance.report = {'analytics_pending':True}
+    store._evidence_recovery_pending = True
     store.rec_proposals.put_proposals('home_prepared',{'schema':1,'protos':[
         {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
     with TestClient(app,base_url='http://127.0.0.1') as client:
@@ -116,7 +92,6 @@ def test_analytics_preparation_stays_quiet_with_usable_recommendations(store):
         assert status['banner_message'] == ''
         assert not status['active'] and status['recording']
         assert re.search(r'<div id="storage-maintenance"[^>]* hidden>', client.get('/playlists').text)
-        maintenance.report['analytics_pending'] = False
-        maintenance.ready.set()
+        store._evidence_recovery_pending = False
         assert client.get('/storage-maintenance/status').json()['banner_message']==''
 

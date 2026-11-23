@@ -63,7 +63,7 @@ def recordings(rows, *, inputs):
         # Old versions remain readable until replacement, but cannot feed a new resolver.
         sources = [source for source in sources if source['version'] == profiles.VERSION]
         genre = overrides.get('genre') if 'genre' in overrides else features.get('genre')
-        profile = profiles.resolve(sources, selected=features.get('audio'), overrides=overrides, genre=genre)
+        profile = profiles.resolve(sources, overrides=overrides, genre=genre)
         profile['sources_truncated'] = truncated
         result.append((key, profiles.canonical(profile), profiles.VERSION, profiles.digest(profile)))
     return result

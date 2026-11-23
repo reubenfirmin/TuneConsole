@@ -6,7 +6,7 @@ import json
 import pytest
 
 from tests.core.test_metadata_runtime import entry, runtime_store
-from yt_playlist.core import metadata_native, metadata_runtime_files as files
+from yt_playlist.core import content_work, metadata_native, metadata_runtime_files as files
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.core.store import Store
 
@@ -45,16 +45,21 @@ def test_identical_deliveries_keep_input_revision_files_and_work_unchanged(runti
     track, _ = entry(store)
     record(store, track, [observation()], 'first', 10)
     before = inputs(store)
-    tables = ('rec_musical_sources', 'rec_musical_pending', 'rec_content_pending')
-    rows = {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table))) for table in tables}
+    work = ('SELECT source_key,pending_position,pending_cursor FROM rec_musical_sources ORDER BY source_key',
+            'SELECT identity_key,position,revision FROM content_refreshes ORDER BY identity_key')
+    rows = [list(map(tuple, store.conn.execute(sql))) for sql in work]
+    revision = store.conn.execute('SELECT revision FROM rec_musical_sources').fetchone()[0]
     paths = {path: path.read_bytes() for path in files.directory(store.conn).rglob('*.json')}
     for number in range(20):
         record(store, track, [observation()], 'unchanged-'+str(number), 30+number)
     assert inputs(store) == before
-    assert rows == {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table))) for table in tables}
+    assert rows == [list(map(tuple, store.conn.execute(sql))) for sql in work]
+    assert tuple(store.conn.execute('SELECT revision,accepted_run,accepted_at FROM rec_musical_sources').fetchone()) == (
+        revision, 'unchanged-19', 49)
     assert paths == {path: path.read_bytes() for path in files.directory(store.conn).rglob('*.json')}
-    for table in ('metadata_deliveries', 'native_metadata_observations', 'musical_source_observations'):
+    for table in ('metadata_deliveries', 'native_metadata_observations'):
         assert store.conn.execute('SELECT count(*) FROM '+table).fetchone()[0] == 0
+    assert store.conn.execute('SELECT selected_observations FROM rec_musical_sources').fetchone()[0] == '{}'
 
 
 def test_equal_time_first_delivery_wins_and_replay_does_not_renew_its_time(runtime_store):
@@ -71,15 +76,15 @@ def test_equal_time_first_delivery_wins_and_replay_does_not_renew_its_time(runti
 def test_partial_deliveries_keep_other_fields_and_exact_run_result(runtime_store):
     store = runtime_store
     track, _ = entry(store)
-    mood, energy = observation(), observation(.4, field='energy')
-    record(store, track, [mood, energy], 'initial', 10)
+    mood, dance = observation(), observation(.4, field='danceability')
+    record(store, track, [mood, dance], 'initial', 10)
     record(store, track, [mood], 'partial', 30)
-    record(store, track, [observation(.1, field='energy')], 'late', 20)
-    assert {key: value['value'] for key, value in inputs(store).items()} == {'mood_party': .8, 'energy': .4}
+    record(store, track, [observation(.1, field='danceability')], 'late', 20)
+    assert {key: value['value'] for key, value in inputs(store).items()} == {'mood_party': .8, 'danceability': .4}
     with pytest.raises(ValueError, match='cannot change its result'):
-        record(store, track, [mood, energy], 'partial', 30)
-    record(store, track, [observation(.6, field='energy')], 'new-energy', 40)
-    assert {key: value['value'] for key, value in inputs(store).items()} == {'mood_party': .8, 'energy': .6}
+        record(store, track, [mood, dance], 'partial', 30)
+    record(store, track, [observation(.6, field='danceability')], 'new-danceability', 40)
+    assert {key: value['value'] for key, value in inputs(store).items()} == {'mood_party': .8, 'danceability': .6}
     assert inputs(store)['mood_party']['provenance']['model_version'] == 'classifier-1'
 
 
@@ -89,7 +94,7 @@ def test_new_model_provenance_is_a_real_input_change(runtime_store):
     record(store, track, [observation()], 'first', 10)
     revision = store.conn.execute('SELECT revision FROM rec_musical_sources').fetchone()[0]
     with store.conn:
-        store.conn.execute('DELETE FROM rec_musical_pending')
+        store.conn.execute('UPDATE rec_musical_sources SET pending_position=NULL,pending_cursor=NULL')
     record(store, track, [observation(model_version='classifier-2')], 'new-model', 30)
     dependencies, references = store.musical_profiles.source_dependencies(source())
     values, pending, _ = store.musical_profiles.source_input(source(), observation_ids=references)
@@ -124,7 +129,7 @@ def test_identical_acceptance_during_profile_calculation_keeps_publication(runti
     monkeypatch.setattr(musical_profiles, 'source_profile', accept_unchanged)
     assert musical_preparation.source_step(store, 40)
     assert not store.musical_profiles.pending()
-    assert store.conn.execute('SELECT count(*) FROM rec_musical_source_profiles').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(musical_profile_version) FROM rec_musical_sources').fetchone()[0] == 1
 
 
 def test_changed_link_during_profile_calculation_still_prevents_publication(runtime_store, monkeypatch):
@@ -142,7 +147,7 @@ def test_changed_link_during_profile_calculation_still_prevents_publication(runt
 
     monkeypatch.setattr(musical_profiles, 'source_profile', unlink)
     assert not musical_preparation.source_step(store, 40)
-    assert store.conn.execute('SELECT count(*) FROM rec_musical_source_profiles').fetchone()[0] == 0
+    assert store.conn.execute('SELECT count(musical_profile_version) FROM rec_musical_sources').fetchone()[0] == 0
 
 
 def test_a_reader_consuming_the_delivery_token_still_guards_it(runtime_store):
@@ -199,10 +204,12 @@ def test_failed_publication_rolls_back_freshness_and_allows_retry(runtime_store,
     track, _ = entry(store)
     record(store, track, [observation()], 'first', 10)
     record(store, track, [observation()], 'newest', 30)
-    tables = ('metadata_native_delivery_heads', 'rec_musical_sources', 'rec_musical_pending',
-              'rec_content_pending', 'metadata_file_references')
     def selected():
-        return {table: list(map(tuple, store.conn.execute('SELECT * FROM '+table))) for table in tables}
+        rows = {'sources': list(map(tuple, store.conn.execute('SELECT * FROM rec_musical_sources'))),
+                'work': content_work.pending(store.conn, -1)}
+        rows['selected_files'] = list(map(tuple, store.conn.execute("SELECT * FROM collection_file_writes "
+                                                                  "WHERE kind='runtime-metadata' AND selected=1")))
+        return rows
     before = selected()
     publish = store.enrichment_state.files.write_reserved
     interrupted = []
@@ -222,7 +229,8 @@ def test_failed_publication_rolls_back_freshness_and_allows_retry(runtime_store,
     assert inputs(store)['mood_party']['value'] == .8
     assert not store.conn.in_transaction
     assert len(interrupted) == 1
-    pending = store.conn.execute('SELECT file_status FROM metadata_file_writes WHERE id=?',
+    pending = store.conn.execute("SELECT file_status FROM collection_file_writes "
+                                 "WHERE kind='runtime-metadata' AND file_address=?",
                                  (interrupted[0]['file_id'],)).fetchone()
     assert tuple(pending) == ('pending',)
     monkeypatch.setattr(store.enrichment_state.files, 'write_reserved', publish)
@@ -253,7 +261,7 @@ def test_existing_active_source_lazily_adopts_its_known_capture(runtime_store):
     # An already-active #681 source has capture provenance in its immutable
     # file, but predates the additive current-delivery owner.
     with store.conn:
-        store.conn.execute('DELETE FROM metadata_native_delivery_heads')
+        store.conn.execute('UPDATE rec_musical_sources SET accepted_run=NULL,accepted_at=NULL,accepted_hash=NULL')
     record(store, track, [observation(.1)], 'late', 5)
     assert inputs(store)['mood_party']['value'] == .8
     record(store, track, [observation()], 'newest', 30)

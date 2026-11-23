@@ -13,7 +13,7 @@ def _client(store, provider):
 
 
 def test_track_like_toggles_liked_music(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)        # the master account
+    iid = store.accounts.upsert_account("main", None, True)        # the master account
     store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)   # so local `liked` can reflect it
     pl = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "Song", "X", None, None, 1)
@@ -37,7 +37,7 @@ def test_track_like_toggles_liked_music(store):
 
 
 def test_liked_music_playlist_uses_header_heart_not_per_row(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "Song", "X", None, None, 1)
     store.playlists.set_playlist_tracks(lm, [t])
@@ -48,7 +48,7 @@ def test_liked_music_playlist_uses_header_heart_not_per_row(store):
 
 
 def test_merge_with_liked_only_offers_keep_liked_or_all(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 1, "h", 1.0)
     pl = store.playlists.upsert_playlist(iid, "PLA", "Road Trip", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "Song", "X", None, None, 1)
@@ -67,7 +67,7 @@ def test_add_tracks_to_liked_music_likes_each_song(store):
     """Adding an alternate version (or 'complete this playlist' pick) while viewing Liked Music must
     *like* the song. YouTube rejects directly-added tracks on the system-managed LM playlist, so the
     add is shimmed into a like, which is the only thing that actually lands a song in Liked Music."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1.0)
     client = FakeClient()
     c = _client(store, lambda: {iid: client})
@@ -83,7 +83,7 @@ def test_add_tracks_to_liked_music_likes_each_song(store):
 
 
 def test_track_like_without_master_returns_toast(store):
-    iid = store.accounts.upsert_account("alt", "cred", None, False)       # no main configured
+    iid = store.accounts.upsert_account("alt", None, False)       # no main configured
     other_account = FakeClient()
     c = _client(store, lambda: {iid: other_account})
     r = c.post("/track/like", data={"video_id": "v1", "on": "1"})
@@ -96,7 +96,7 @@ def test_track_like_without_master_returns_toast(store):
 def test_confirmed_rating_drives_both_hearts_and_survives_stale_player(store, status, synced_likes):
     from yt_playlist.library import live_plays, player_events
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if synced_likes:
         store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1)
     pl = store.playlists.upsert_playlist(iid, "Mix", "Mix", 1, "h", 1)
@@ -136,8 +136,8 @@ def test_confirmed_rating_drives_both_hearts_and_survives_stale_player(store, st
 
 
 def test_now_playing_rating_does_not_fall_back_to_another_account(store):
-    main = store.accounts.upsert_account("main", "cred", None, True)
-    other = store.accounts.upsert_account("other", "cred", "brand", False)
+    main = store.accounts.upsert_account("main", None, True)
+    other = store.accounts.upsert_account("other", "brand", False)
     remote = FakeClient()
     c = _client(store, lambda: {other: remote})
     result = c.post("/now-playing/rate", json={"action": "like", "videoId": "v1", "likeStatus": "LIKE"})
@@ -150,7 +150,7 @@ def test_now_playing_rating_does_not_fall_back_to_another_account(store):
 def test_failed_api_rating_preserves_previous_local_rating(store, monkeypatch):
     from yt_playlist.library import ratings
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "LM", "Liked Music", 0, "h", 1)
     store.tracks.upsert_track("v1", "Song", "Artist", None, 200, 1)
     client = FakeClient()

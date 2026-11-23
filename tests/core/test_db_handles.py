@@ -1,4 +1,4 @@
-"""Callback failures cannot strand SQLite or its replacement lifetime lease."""
+"""Callback failures must still close the SQLite connection and its cursors."""
 import sqlite3
 
 import pytest
@@ -7,8 +7,7 @@ from yt_playlist.core import db_handles
 
 
 def test_close_finishes_all_lifetimes_before_reporting_a_callback_error(tmp_path):
-    path = tmp_path / 'library.db'
-    connection = db_handles.connect(path)
+    connection = db_handles.connect(tmp_path / 'library.db')
     cursor = connection.execute('SELECT 1')
     calls = []
 
@@ -23,7 +22,6 @@ def test_close_finishes_all_lifetimes_before_reporting_a_callback_error(tmp_path
 
     def file_cleanup():
         assert connection._handle_closed
-        assert connection._handle_lease is None
         calls.append('file')
 
     connection._before_close_callbacks.extend([failed_reader, other_reader])
@@ -31,10 +29,8 @@ def test_close_finishes_all_lifetimes_before_reporting_a_callback_error(tmp_path
     with pytest.raises(RuntimeError, match='controlled retirement failure'):
         connection.close()
     assert calls == ['failed reader', 'other reader', 'file']
-    assert connection._handle_closed and connection._handle_lease is None
+    assert connection._handle_closed
     assert not connection._before_close_callbacks and not connection._close_callbacks
     with pytest.raises(sqlite3.ProgrammingError, match='closed'):
         cursor.fetchone()
-    with db_handles.lease(path, exclusive=True, timeout=0):
-        pass
     connection.close()

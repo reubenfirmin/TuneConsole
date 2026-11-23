@@ -36,14 +36,18 @@ def test_native_file_interruption_preserves_head_and_recovers_after_restart(runt
                 run_id=str(revision), now=now + revision)
 
     publish(store, 1)
-    selected = tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone())
+    selected_receipts = ("SELECT file_address FROM collection_file_writes "
+                         "WHERE kind='runtime-metadata' AND selected=1")
+    status_receipts = ("SELECT file_address FROM collection_file_writes "
+                       "WHERE kind='runtime-metadata' AND file_status=?")
+    selected = tuple(store.conn.execute(selected_receipts).fetchone())
     observed = []
 
     @contextmanager
     def interrupted(path, *args, **kwargs):
         assert not store.conn.in_transaction
         with closing(sqlite3.connect(store._db_path)) as observer:
-            pending = observer.execute("SELECT id FROM metadata_file_writes WHERE file_status='pending' ORDER BY id DESC").fetchone()[0]
+            pending = observer.execute(status_receipts + ' ORDER BY file_address DESC', ('pending',)).fetchone()[0]
         assert record_path(files.directory(store.conn), pending) == path
         observed.append(pending)
         raise OSError('file publication interrupted')
@@ -53,15 +57,16 @@ def test_native_file_interruption_preserves_head_and_recovers_after_restart(runt
         patch.setattr(fao, 'prepare', interrupted)
         with pytest.raises(OSError, match='file publication interrupted'):
             publish(store, 2)
-    assert tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
+    assert tuple(store.conn.execute(selected_receipts).fetchone()) == selected
     assert not record_path(files.directory(store.conn), observed[0]).exists()
-    store.conn.execute("CREATE TEMP TRIGGER fail_metadata_completion BEFORE UPDATE OF file_status ON metadata_file_writes "
-                       "WHEN NEW.file_status='ready' BEGIN SELECT RAISE(ABORT,'head interrupted'); END")
+    store.conn.execute("CREATE TEMP TRIGGER fail_metadata_completion BEFORE UPDATE OF file_status ON collection_file_writes "
+                       "WHEN NEW.kind='runtime-metadata' AND NEW.file_status='ready' "
+                       "BEGIN SELECT RAISE(ABORT,'head interrupted'); END")
     with pytest.raises(sqlite3.IntegrityError, match='head interrupted'):
         publish(store, 3)
     store.conn.execute('DROP TRIGGER fail_metadata_completion')
-    assert tuple(store.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
-    pending = [row[0] for row in store.conn.execute("SELECT id FROM metadata_file_writes WHERE file_status='pending' ORDER BY id")]
+    assert tuple(store.conn.execute(selected_receipts).fetchone()) == selected
+    pending = [row[0] for row in store.conn.execute(status_receipts + ' ORDER BY file_address', ('pending',))]
     assert len(pending) == 2
     assert record_path(files.directory(store.conn), pending[-1]).is_file()
     path = store._db_path
@@ -69,9 +74,9 @@ def test_native_file_interruption_preserves_head_and_recovers_after_restart(runt
     reopened = Store(path)
     try:
         reopened.init_schema()
-        assert tuple(reopened.conn.execute('SELECT file_id FROM metadata_file_references').fetchone()) == selected
+        assert tuple(reopened.conn.execute(selected_receipts).fetchone()) == selected
         publish(reopened, 4)
-        latest = reopened.conn.execute('SELECT max(id) FROM metadata_file_writes WHERE file_status=\'ready\'').fetchone()[0]
+        latest = reopened.conn.execute(status_receipts + ' ORDER BY file_address DESC', ('ready',)).fetchone()[0]
         assert latest > max(pending)
         assert record_path(files.directory(reopened.conn), latest).is_file()
         assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -84,7 +89,6 @@ def runtime_store(file_backed_store):
     store = file_backed_store
     with store.conn:
         store.conn.execute('BEGIN IMMEDIATE')
-        runtime.install(store.conn)
         runtime.activate(store.conn)
     return store
 
@@ -109,10 +113,11 @@ def test_repeated_provider_results_keep_current_facts_without_delivery_history(r
             run_id=str(number), delivery_id=captured, now=at+number)
     assert store.conn.execute('SELECT bpm,genre FROM catalog_tracks WHERE id=?', (track,)).fetchone()[:] == (129, 'Jazz')
     assert store.conn.execute('SELECT count(*) FROM enrichment_provider_state').fetchone()[0] == 1
-    assert store.conn.execute('SELECT count(*) FROM metadata_runtime_recording_sources').fetchone()[0] == 2
+    assert store.conn.execute('SELECT count(*) FROM recording_field_sources').fetchone()[0] == 2
     assert store.conn.execute('SELECT count(*) FROM recording_identifiers').fetchone()[0] == 1
-    for table in ('metadata_deliveries', 'metadata_observations', 'provider_attempts', 'provider_state_fields'):
+    for table in ('metadata_deliveries', 'metadata_observations', 'provider_attempts'):
         assert store.conn.execute('SELECT count(*) FROM '+table).fetchone()[0] == 0
+    assert store.conn.execute('SELECT field_links FROM enrichment_provider_state').fetchone()[0] == '{}'
     assert store.enrichment_state.enrichment_provider_state(recording)['a']['fields']['bpm'] == 129
     assert store.enrichment_reports.genre_provenance(track)['options'] == [{'value': 'Jazz', 'providers': ['a']}]
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
@@ -140,6 +145,9 @@ def test_manual_null_blank_reset_and_rollback_orphan(runtime_store):
     decisions = metadata_provenance(store, track)['decisions']
     assert [json.loads(row['value_json']) for row in decisions] == [None, '', None]
     assert decisions[-1]['withdrawn']
+    assert [tuple(row) for row in store.conn.execute("SELECT operation,value FROM recording_metadata_history "
+        "WHERE entry_id=? AND field='bpm' ORDER BY id", (track,))] == [
+        ('select', 120), ('edit', None), ('select', 135), ('edit', ''), ('reset', 135)]
 
 
 def test_expiry_preserves_completion_selected_values_and_model_inputs(runtime_store):
@@ -329,7 +337,7 @@ def test_file_integrity_failure_and_backup_reader_fence(runtime_store, tmp_path)
         assert runtime.alternatives(store.conn, recording, 'a', now=at)['fields']['genre'] == 'Jazz'
     with store.conn:
         catalog.choose_field(store.conn, track, 'genre', 'Jazz')
-    head = store.conn.execute('SELECT id,revision FROM metadata_runtime_choices').fetchone()
+    head = store.conn.execute('SELECT id,revision FROM current_runtime_choices').fetchone()
     path = files.directory(store.conn)/files.relative('choices', (head['id'],), head['revision'])
     path.write_text('{}')
     with pytest.raises(ValueError, match='checksum'):
@@ -489,43 +497,26 @@ def test_worker_retry_reopens_without_repeating_successful_providers(runtime_sto
         reopened.conn.close()
 
 
-def test_recovery_and_compaction_include_derived_metadata_files(runtime_store, tmp_path):
-    from yt_playlist.core.db_rebuild import job
-    from tests import file_custody_support as custody
-    store = runtime_store
-    track, _ = entry(store)
-    with store.conn:
-        catalog.choose_field(store.conn, track, 'genre', 'Jazz')
-    with store.conn:
-        store.conn.execute('BEGIN')
-        manifests = custody.export_files(store.conn, tmp_path/'backup.db')
-        owned = job._owned_files(store.conn)
-    assert 'runtime_metadata' in manifests
-    assert owned['files'] >= 1
-    restored = Store(tmp_path/'restored.db')
-    try:
-        store.conn.backup(restored.conn)
-        custody.restore_files(restored.conn, manifests)
-        restored.init_schema()
-        assert metadata_provenance(restored, track)['decisions'][0]['source'] == 'user'
-    finally:
-        restored.conn.close()
 
 
 def test_model_input_guards_ignore_collection_progress_but_keep_manual_choices(runtime_store):
     store = runtime_store
-    track, _ = entry(store)
+    track, recording = entry(store)
     with store.conn:
         catalog.choose_field(store.conn, track, 'bpm', 130)
+        catalog.choose_field(store.conn, track, 'genre', 'Jazz')
+    _, choices, _ = store.musical_profiles.recording_inputs(['song|artist'])['song|artist']
+    assert choices == {'bpm': 130, 'genre': 'Jazz'}
     with store.read_snapshot() as snapshot:
         assert runtime.active(snapshot.store.conn)
-        with store.conn:
-            store.conn.execute('UPDATE metadata_runtime_state SET gc_cursor=gc_cursor+1 WHERE id=1')
+        store.enrichment_state.repository.store_expiry_cursor(1, 10)
         assert snapshot.publish(lambda: None)
     with store.read_snapshot() as snapshot:
         pending = snapshot.store.prepared_content.pending()
         assert snapshot.store.prepared_content.capture(pending)
-        assert ('metadata_runtime_choices', 'key:'+str(track)) in snapshot.store._snapshot_reads.dependencies
+        dependencies = snapshot.store._snapshot_reads.dependencies
+        assert ('track_sources', f'key:{recording}') in dependencies
+        assert ('recordings', 'key:song|artist') in dependencies
         with store.conn:
             catalog.choose_field(store.conn, track, 'bpm', 140)
         assert not snapshot.publish(lambda: pytest.fail('Published stale manual input'))

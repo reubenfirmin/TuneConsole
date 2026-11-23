@@ -1,8 +1,8 @@
 # Radio stream planning
 
 Each of the four streams is a hypothesis about how to continue the current
-playlist. Its anchor, preferred styles and evolving proposed history describe
-a musical trajectory. Streams may share styles; their continuations should
+playlist. Its anchor, preferred track groups and proposed song sequence describe
+a musical trajectory. Streams may share track groups and still
 offer meaningful alternatives. Discovery/Comfort, Eclectic/Themed and
 Chill/Full On steer all four hypotheses.
 
@@ -23,7 +23,7 @@ These bounds limit retained data; they do not truncate the
 search for eligible candidates beyond rejected pages.
 
 Each stream chooses its next song using its own anchor and proposed prefix.
-History, artist spacing, genre constraints, feedback, style preference and
+History, artist spacing, genre constraints, feedback, track group preferences and
 exclusions remain part of that decision. Reusing candidate facts must not reuse
 a final ranking across different hypotheses or sequence prefixes. Candidate
 buffers refill when exclusions consume their useful contents; a rejected first

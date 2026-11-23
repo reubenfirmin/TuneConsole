@@ -1,8 +1,7 @@
-import json
-
 import pytest
 
 from yt_playlist.core import albums
+from yt_playlist.core.album_queries import TRACK_LINKS
 
 
 def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
@@ -14,7 +13,7 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
     assert first != second
     assert {r[0] for r in store.conn.execute('SELECT album_id FROM album_tracks WHERE entry_id=?', (entry,))} == {first,second}
     assert store.conn.execute('SELECT COUNT(*) FROM saved_album_memberships WHERE album_id=?', (first,)).fetchone()[0] == 1
-    assert store.conn.execute('SELECT COUNT(*) FROM album_discovery_memberships WHERE album_id=?', (second,)).fetchone()[0] == 1
+    assert store.conn.execute('SELECT discovery_found_at FROM albums WHERE id=?', (second,)).fetchone()[0] == 1
     store.conn.execute('DELETE FROM discovered_albums WHERE browse_id=\'second\'')
     assert albums.lookup(store.conn,'second') == second
     assert store.conn.execute('SELECT COUNT(*) FROM album_tracks WHERE album_id=?', (second,)).fetchone()[0] == 1
@@ -23,14 +22,19 @@ def test_releases_keep_equal_titles_separate_and_multiple_release_links(store):
 def test_full_fetch_retains_order_repeats_and_disc_numbers(store):
     a = store.tracks.upsert_track('a','First','Artist',None,10)
     b = store.tracks.upsert_track('b','Second','Artist',None,10)
-    with store.conn:
-        aid = albums.cache_full(store.conn,'release','Album','Artist',None,[],entries=[
-            {'entry_id':b,'disc_number':1,'track_number':1},
-            {'entry_id':a,'disc_number':2,'track_number':1},
-            {'entry_id':b,'disc_number':2,'track_number':2}],now=50)
+    store.collection.cache_album_tracklist('release', 'Album', 'Artist', None, [], entries=[
+        {'entry_id':b,'disc_number':1,'track_number':1},
+        {'entry_id':a,'disc_number':2,'track_number':1},
+        {'entry_id':b,'disc_number':2,'track_number':2}])
+    aid = albums.lookup(store.conn, 'release')
     assert list(map(tuple,store.conn.execute('SELECT entry_id,position,disc_number,track_number FROM album_tracks WHERE album_id=? ORDER BY position', (aid,)))) == [(b,0,1,1),(a,1,2,1),(b,2,2,2)]
-    assert store.conn.execute('SELECT fetched_at,complete,expected_track_count FROM album_fetch_state').fetchone()[:] == (50,1,3)
-    assert json.loads(store.conn.execute('SELECT track_keys FROM album_tracklist_keys').fetchone()[0]) == ['second|artist','first|artist','second|artist']
+    assert store.conn.execute('SELECT fetched_at IS NOT NULL,status,expected_count FROM album_tracklists '
+                              'WHERE id=(SELECT current_tracklist_id FROM albums WHERE id=?)', (aid,)).fetchone()[:] == (
+                                  1, 'complete', 3)
+    assert [row[0] for row in store.conn.execute(
+        'SELECT r.identity_key FROM albums a JOIN album_track_occurrences o ON o.tracklist_id=a.current_tracklist_id '
+        'JOIN recordings r ON r.id=o.recording_id WHERE a.id=? ORDER BY o.position', (aid,))] == [
+            'second|artist', 'first|artist', 'second|artist']
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
@@ -38,7 +42,7 @@ def test_release_consumers_keep_same_title_releases_and_previous_associations(st
     from random import Random
     from yt_playlist.rec.discover import _scan_artist_albums
 
-    iid = store.accounts.upsert_account('me','c',None,True)
+    iid = store.accounts.upsert_account('me',None,True)
     pid = store.playlists.upsert_playlist(iid,'P','Mix',1,'h',0)
     entry = store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='first',artist_browse_id='UC_artist')
     store.tracks.upsert_track('v','Song','Artist','Same',10,album_browse_id='second',artist_browse_id='UC_artist')
@@ -54,7 +58,7 @@ def test_release_consumers_keep_same_title_releases_and_previous_associations(st
     assert set(store.charts.album_browse_ids().values())=={'first','second'}
     assert store.collection.playback_source(video_id='v') is None
     assert store.collection.playback_source(video_id='v',album_browse_id='first')['browse']=='first'
-    assert not store.collection.cached_album_tracklist_ids()
+    assert not any(store.collection.has_published_album_tracklist(browse) for browse in ('first', 'second'))
 
     _scan_artist_albums(store,'Artist',{'albums':[{'browse_id':b,'title':'Same'} for b in ('first','second','third')]},
                         store.rec_query.owned_albums(),store.collection.saved_album_ids(),None,100,5,Random(0))
@@ -82,9 +86,8 @@ def test_full_fetch_round_trip_order_coverage_and_conflicts_follow_all_releases(
         assert store.enrichment_reports.conflict_count_for_album(bid)==1
         assert store.enrichment_reports.unresolved_conflicts_for_album(bid)[0]['track_id']==a
     assert store.conn.execute("SELECT year FROM albums WHERE id=?", (store.collection.album_id('release'),)).fetchone()[0]=='2001'
-    store.conn.execute('DELETE FROM library_memberships WHERE entry_id=?', (b,))
+    store.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE id=?', (b,))
     store.conn.commit()
-    assert store.collection.cached_album_tracklist_ids()=={'release'}
     assert store.collection.complete_album_tracklist_ids()==set()
     # Library membership is independent of the complete provider publication.
     assert store.collection.has_published_album_tracklist('release')
@@ -97,7 +100,8 @@ def test_recording_reassociation_preserves_release_relationships(store):
     b = store.tracks.upsert_track('b','Alternate title','Artist','Album',10,album_browse_id='second')
     subject = store.tracks.catalog_subject(a)
     store.tracks.associate_youtube_item('b',subject['recording_id'],source='verified',evidence={'same_recording':True},now=1)
-    assert {r[0] for r in store.conn.execute('SELECT browse_id FROM album_track_links WHERE recording_id=?', (subject['recording_id'],))}=={'first','second'}
+    assert {r[0] for r in store.conn.execute(f'SELECT browse_id FROM {TRACK_LINKS} WHERE recording_id=?',
+                                            (subject['recording_id'],))} == {'first', 'second'}
     assert {t['track_id'] for t in store.charts.album_tracks_detail('second')}=={b}
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
@@ -105,7 +109,7 @@ def test_recording_reassociation_preserves_release_relationships(store):
 def test_recap_uses_all_release_relationships_without_inventing_playback_context(store):
     from yt_playlist.rec.recap_metrics import month_bounds,profile
 
-    iid = store.accounts.upsert_account('me','c',None,True)
+    iid = store.accounts.upsert_account('me',None,True)
     keys = []
     for i in range(3):
         entry = store.tracks.upsert_track(str(i),f'Song {i}','Artist','Album',10,album_browse_id='release')

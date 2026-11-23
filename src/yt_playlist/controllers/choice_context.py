@@ -2,6 +2,7 @@
 from yt_playlist.core.choice_checkpoints import checkpoint
 from yt_playlist.core.evidence_ledger import canonical
 from yt_playlist.core.choice_contexts import component_ids, correction_context, resolve_context
+from yt_playlist.core.mix_choice_policy import context as mix_context
 
 
 class ChoiceContexts:
@@ -32,3 +33,12 @@ class ChoiceContexts:
         manifest = self.manifest(context) if context and 'artifact' in context else context
         components = {identity: self.ledger.get('artifact', identity) for identity in component_ids(manifest)}
         return resolve_context(manifest, components)
+
+    def mix(self, context):
+        # Project inline context before sharing large fields. Capturing the
+        # displayed mix does not need the underlying hierarchy or allocations.
+        if isinstance(context.get('mix_display'), dict):
+            return self.manifest(mix_context(context['mix_display'], mixes=True))
+        if 'artifact' in context:
+            return mix_context(self.manifest(context), mixes=True)
+        return self.manifest(mix_context(context, mixes=True))

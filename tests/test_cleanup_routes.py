@@ -10,7 +10,7 @@ from tests.conftest import FakeClient, _track
 from tests.web_support import _client
 from tests.web_consumer_support import install_routes, route_schema, route_store
 def test_dupe_detail_renders(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "B", 1, "h", 1.0)
     t = store.tracks.upsert_track("v1", "Shared", "X", None, None)
@@ -23,13 +23,13 @@ def test_dupe_detail_renders(store):
     assert "Where should the result go" in r.text and "Keep" in r.text
 
 def test_dupe_detail_unknown_id_404(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1.0)
     c = TestClient(app)
     assert c.get("/dupe/999/998").status_code == 404
 
 def test_overlap_suppress_and_unsuppress(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 2, "h", 1.0)
     sml = store.playlists.upsert_playlist(iid, "PLSML", "Little Mix", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "A", "X", None, 1); t2 = store.tracks.upsert_track("v2", "B", "X", None, 1)
@@ -46,7 +46,7 @@ def test_overlap_suppress_and_unsuppress(store):
 
 def test_overlaps_suppress_many(store):
     import json
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
     p1 = store.playlists.upsert_playlist(iid, "PL1", "One", 2, "h", 1.0)
     p2 = store.playlists.upsert_playlist(iid, "PL2", "Two", 1, "h", 1.0)
@@ -75,7 +75,7 @@ def test_overlaps_suppress_many_ignores_malformed_input(store, pairs):
 def test_inline_dupe_delete_refuses_survivor(store, monkeypatch, tmp_path):
     # Foot-gun guard: after one copy is gone, deleting the other must be refused (kept copy missing).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
     survivor = store.playlists.upsert_playlist(iid, "SURV", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(survivor, [t])
     gone = store.playlists.upsert_playlist(iid, "GONE", "Storm", 1, "h", 1.0); store.playlists.set_playlist_tracks(gone, [t])
@@ -90,7 +90,7 @@ def test_inline_dupe_delete_refuses_survivor(store, monkeypatch, tmp_path):
 
 def test_dupe_keep_one_deletes_whole_cluster(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
     # three identical copies
     ids = []
@@ -111,7 +111,7 @@ def test_inline_dupe_delete_refreshes_cached_cleanup_summary(store, monkeypatch,
     # /dupe/delete returns JSON without a page reload, so it must refresh the cached cleanup
     # summary itself or the home card keeps showing the deleted playlist as pending (issue #73).
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, 1) for i in range(4)]
     tr = [_track(f"v{i}", f"S{i}", "X") for i in range(4)]
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Storm", 4, "h", 1.0); store.playlists.set_playlist_tracks(keep, t)
@@ -129,7 +129,7 @@ def test_inline_dupe_delete_refreshes_cached_cleanup_summary(store, monkeypatch,
 def test_delete_empty_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_path):
     # /playlist/delete-empty just removes the row (no reload), so it must refresh the cache too.
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     empty = store.playlists.upsert_playlist(iid, "PLempty", "jazz 2", 0, "h", 1.0)
     actions.refresh_cleanup(store, 1.0)
     assert store.rec_proposals.get_proposals(CLEANUP_SURFACE)["count"] == 1      # the empty playlist
@@ -144,7 +144,7 @@ def test_delete_empty_refreshes_cached_cleanup_summary(store, monkeypatch, tmp_p
 
 def test_delete_empty_refuses_if_not_empty(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pl = store.playlists.upsert_playlist(iid, "PLfull", "actually full", 1, "h", 1.0)
     client = FakeClient(tracks={"PLfull": [_track("v1", "S", "X")]})          # has a track remotely
     c = _client(store, lambda: {iid: client})
@@ -158,7 +158,7 @@ def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypat
     from yt_playlist.library import executor
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda fn: fn())
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     empty = store.playlists.upsert_playlist(iid, "PLempty", "Empty at last sync", 0, "h", 1.0)
     client = FakeClient(tracks={"PLempty": [_track("new", "Added elsewhere", "X")]})
 
@@ -181,7 +181,7 @@ def test_delete_empty_failed_read_keeps_row_and_cleanup_summary(store, monkeypat
 def test_overlap_ignore_excludes_playlist(route_store, monkeypatch):
     store = route_store
     install_routes(monkeypatch, 'cleanup')
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fav = store.playlists.upsert_playlist(iid, "PLFAV", "Big Mixtape", 3, "h", 1.0)
     a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLb", "B", 1, "h", 1.0)
@@ -201,7 +201,7 @@ def test_overlap_ignore_excludes_playlist(route_store, monkeypatch):
 
 def test_system_playlist_excluded_from_overlaps(store):
     from yt_playlist.library.analysis import find_overlaps, prepare_cleanup
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     lm = store.playlists.upsert_playlist(iid, "LM", "Liked Music", 2, "h", 1.0)   # system
     a = store.playlists.upsert_playlist(iid, "PLa", "A", 1, "h", 1.0)
     t1 = store.tracks.upsert_track("v1", "S1", "X", None, 1); t2 = store.tracks.upsert_track("v2", "S2", "X", None, 1)
@@ -211,7 +211,7 @@ def test_system_playlist_excluded_from_overlaps(store):
 
 def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "X", None, 1)
     keep = store.playlists.upsert_playlist(iid, "KEEP", "Mix", 1, "h", 1.0); store.playlists.set_playlist_tracks(keep, [t])
     dele = store.playlists.upsert_playlist(iid, "DEL", "Mix", 1, "h", 1.0); store.playlists.set_playlist_tracks(dele, [t])
@@ -227,7 +227,7 @@ def test_undo_via_dupe_delete(store, monkeypatch, tmp_path):
 
 
 def test_overlap_keep_only_mutes_others(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fav = store.playlists.upsert_playlist(iid, "PLFAV", "Favorite Songs", 3, "h", 1.0)
     other = store.playlists.upsert_playlist(iid, "PLB", "Favorite Songs 2", 2, "h", 1.0)
     noise = store.playlists.upsert_playlist(iid, "PLn", "Little Mix", 1, "h", 1.0)
@@ -245,7 +245,7 @@ def test_overlap_keep_only_mutes_others(store):
 
 
 def test_unhide_overlap_restores_to_overlaps_section(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.playlists.upsert_playlist(iid, "PLA", "Alpha", 3, "h", 1.0)
     b = store.playlists.upsert_playlist(iid, "PLB", "Beta", 3, "h", 1.0)
     t = [store.tracks.upsert_track(f"v{i}", f"S{i}", "X", None, None, 1) for i in range(4)]

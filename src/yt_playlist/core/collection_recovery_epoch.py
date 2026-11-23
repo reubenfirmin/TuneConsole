@@ -1,32 +1,93 @@
 """Cross-connection changes to collection file ownership, without history scans."""
 from .schema_contract import MigrationError, tokens
+from .action_backup_inventory import COLUMN as BACKUP_INVENTORY
 
 TABLE = 'collection_recovery_epoch'
 
 
-def definitions(conn):
-    from .collection_recovery import OWNERS
+def _owners():
+    from .collection_owners import OWNERS, OWNER_KEYS, PLAYLIST_DOCUMENTS
 
-    yield TABLE, (f'CREATE TABLE {TABLE} ('
-                  'id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL)')
-    for table, filename in [*((table, 'recovery_filename') for table in OWNERS),
-                            ('action_backups', 'retained_filename')]:
+    # The migration runner still validates earlier installed layouts.
+    for table in (*OWNERS, 'sync_attempts', 'action_drafts', 'road_trip_drafts', 'playlist_gc_attempts'):
+        yield table, table, 'recovery_filename', OWNER_KEYS.get(table)
+    yield 'artists', 'artists', 'discovery_recovery_filename', None
+    yield 'action_backups', 'action_backups', 'retained_filename', None
+    yield 'action_backup_inventory', 'actions', BACKUP_INVENTORY, None
+    for prefix in PLAYLIST_DOCUMENTS.values():
+        yield f'playlist_{prefix}', 'playlist_scopes', f'{prefix}_recovery_filename', f'{prefix}_id'
+
+
+def _columns(conn, table):
+    if conn.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?", (table,)).fetchone():
+        return list(conn.execute(f'PRAGMA main.table_info({table})'))
+    return ()
+
+
+def _slot(conn):
+    if any(row[1] == 'ownership_revision' for row in _columns(conn, 'collection_file_writes')):
+        return 'collection_file_writes', 'ownership_revision', 0
+    return TABLE, 'revision', 1
+
+
+def revision(conn):
+    row = conn.execute('SELECT ownership_revision FROM main.collection_file_writes WHERE id=0').fetchone()
+    if row is None:
+        raise ValueError('Missing collection recovery ownership revision')
+    return row[0]
+
+
+def definitions(conn):
+    from .collection_owners import TASTE_CONTROLS
+    from .spotify_records import ARCHIVE_PREFIXES
+
+    target, revision_column, slot = _slot(conn)
+    if target == TABLE:
+        yield TABLE, (f'CREATE TABLE {TABLE} ('
+                      'id INTEGER PRIMARY KEY CHECK(id=1),revision INTEGER NOT NULL)')
+    for owner, table, filename, _ in _owners():
         # Supported installed layouts can precede individual file owners.
-        if not any(row[1] == filename for row in conn.execute(f'PRAGMA main.table_info({table})')):
+        if not any(row[1] == filename for row in _columns(conn, table)):
             continue
+        present = "<> '[]'" if filename == BACKUP_INVENTORY else 'IS NOT NULL'
         for event, condition in (
-            ('INSERT', f'NEW.{filename} IS NOT NULL'),
-            ('DELETE', f'OLD.{filename} IS NOT NULL'),
+            ('INSERT', f'NEW.{filename} {present}'),
+            ('DELETE', f'OLD.{filename} {present}'),
             (f'UPDATE OF {filename}', f'OLD.{filename} IS NOT NEW.{filename}'),
         ):
-            name = f'collection_recovery_changed_{table}_{event.split()[0].lower()}'
+            name = f'collection_recovery_changed_{owner}_{event.split()[0].lower()}'
             yield name, (f'CREATE TRIGGER {name} AFTER {event} ON {table} WHEN {condition} BEGIN '
-                         f'UPDATE {TABLE} SET revision=revision+1 WHERE id=1; END')
+                         f'UPDATE {target} SET {revision_column}={revision_column}+1 WHERE id={slot}; END')
+    setting_owners = {}
+    if target != TABLE and not any(_columns(conn, table) for table in TASTE_CONTROLS):
+        setting_owners['taste'] = TASTE_CONTROLS.values()
+    if target != TABLE and any(row[1] == 'sync_progress' for row in _columns(conn, 'accounts')):
+        from .sync_state import ATTEMPT
+        setting_owners['sync'] = (ATTEMPT,)
+    for owner, owner_keys in setting_owners.items():
+        keys = ','.join(f"'{key}'" for key in owner_keys)
+        yield from _setting_definitions(owner, f'IN ({keys})', target, revision_column, slot)
+    if target != TABLE and not any(_columns(conn, table) for table in ARCHIVE_PREFIXES):
+        yield from _setting_definitions('spotify', "GLOB 'spotify_*_record:*'", target, revision_column, slot)
+
+
+def _setting_definitions(owner, condition, target, revision_column, slot):
+    old = f"CASE WHEN OLD.key {condition} THEN OLD.value->>'recovery_filename' END"
+    new = f"CASE WHEN NEW.key {condition} THEN NEW.value->>'recovery_filename' END"
+    for event, changed in (
+        ('INSERT', f'({new}) IS NOT NULL'),
+        ('DELETE', f'({old}) IS NOT NULL'),
+        ('UPDATE OF key,value', f'({old}) IS NOT ({new})'),
+    ):
+        name = f'collection_recovery_changed_{owner}_settings_{event.split()[0].lower()}'
+        yield name, (f'CREATE TRIGGER {name} AFTER {event} ON settings WHEN {changed} BEGIN '
+                     f'UPDATE {target} SET {revision_column}={revision_column}+1 WHERE id={slot}; END')
 
 
 def validate(conn):
     _validate(conn, definitions(conn))
-    row = conn.execute(f'SELECT revision FROM {TABLE} WHERE id=1').fetchone()
+    table, column, slot = _slot(conn)
+    row = conn.execute(f'SELECT {column} FROM {table} WHERE id={slot}').fetchone()
     if row is None or type(row[0]) is not int:
         raise MigrationError('Missing collection recovery ownership revision')
 
@@ -56,21 +117,22 @@ def _install(conn, declarations):
 
 
 def key_definitions(conn):
-    from .collection_recovery import OWNERS
-
-    for table, filename in [*((table, 'recovery_filename') for table in OWNERS),
-                            ('action_backups', 'retained_filename')]:
-        columns = list(conn.execute(f'PRAGMA main.table_info({table})'))
+    target, revision_column, slot = _slot(conn)
+    for owner, table, filename, owner_key in _owners():
+        columns = _columns(conn, table)
         if not any(row[1] == filename for row in columns):
             continue
         keys = [row[1] for row in sorted(columns, key=lambda row: row[5]) if row[5]]
         if not keys:
             raise MigrationError('Collection owner requires a primary key: ' + table)
+        if owner_key and owner_key not in keys:
+            keys.append(owner_key)
         changed = ' OR '.join(f'OLD.{key} IS NOT NEW.{key}' for key in keys)
-        name = f'collection_recovery_changed_{table}_key'
+        present = "<> '[]'" if filename == BACKUP_INVENTORY else 'IS NOT NULL'
+        name = f'collection_recovery_changed_{owner}_key'
         yield name, (f'CREATE TRIGGER {name} AFTER UPDATE OF {",".join(keys)} ON {table} '
-                     f'WHEN ({changed}) AND (OLD.{filename} IS NOT NULL OR NEW.{filename} IS NOT NULL) '
-                     f'BEGIN UPDATE {TABLE} SET revision=revision+1 WHERE id=1; END')
+                     f'WHEN ({changed}) AND (OLD.{filename} {present} OR NEW.{filename} {present}) '
+                     f'BEGIN UPDATE {target} SET {revision_column}={revision_column}+1 WHERE id={slot}; END')
 
 
 def install_keys(conn, context=None):

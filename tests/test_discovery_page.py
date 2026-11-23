@@ -17,7 +17,7 @@ from tests.store_fixture_support import (
 
 
 def _client(store, *, background_work=True):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fake = FakeClient()
     return fake, TestClient(create_app(store, lambda: {iid: fake}, now_fn=lambda: 1000.0,
                                       background_work=background_work),
@@ -73,7 +73,7 @@ def test_discovery_add_failed_rating_keeps_row_and_collection_unchanged(store, m
     response = client.post('/discovery/add', data={'kind': 'track', 'id': 'a|x'})
     assert response.status_code == 502 and response.text
     assert store.tracks.item_rating(owner, 'v1') is None
-    assert store.conn.execute("SELECT 1 FROM tracks WHERE video_id='v1'").fetchone() is None
+    assert not store.conn.execute("SELECT 1 FROM track_sources WHERE video_id='v1' AND library_origin IS NOT NULL").fetchone()
     assert lm not in store.playlists.playlist_ids_for_video('v1')
     assert store.rec_model.recent_liked_keys() == []
     assert saves == [] and refreshed == []
@@ -159,7 +159,7 @@ def test_discovery_add_failed_acquisition_retains_confirmed_rating_and_can_retry
     from yt_playlist.library import ratings
     assert ratings.main_rating(store, 'v1')['status'] == 'LIKE'
     assert playback_feedback.inbox(store).pending() == 1
-    assert store.conn.execute("SELECT 1 FROM tracks WHERE video_id='v1'").fetchone() is None
+    assert not store.conn.execute("SELECT 1 FROM track_sources WHERE video_id='v1' AND library_origin IS NOT NULL").fetchone()
     assert saves == []
     assert playback_feedback.drain(store) == 1
     assert store.tracks.item_rating(owner, 'v1')['status'] == 'LIKE'
@@ -180,13 +180,13 @@ def fragment_library(tmp_path, monkeypatch, native_sql_calls):
 def discovery_fragment_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, discovery, home_discovery
+    from yt_playlist.web.routes import app_update, audio_vibes, discovery, home_discovery
     from yt_playlist.web.routes.home_views import HomeViews
 
     # Retain actual fragment admission/rendering and the pool page. Unrelated
     # transport routes and metadata-provider wiring are below these requests.
     def build(ctx):
-        return [app_update.build(ctx), audio_preview.build(ctx), discovery.build(ctx),
+        return [app_update.build(ctx), audio_vibes.build(ctx), discovery.build(ctx),
                 home_discovery.build(ctx, HomeViews(ctx))]
 
     monkeypatch.setattr(webapp, 'build_all', build)
@@ -232,8 +232,9 @@ def test_saved_metadata_is_visible_without_queue_or_provider_details(store):
     store.enrichment_state.record_enrichment_attempt("cold", "acousticbrainz", {}, retry=True, now=202)
     _, client = _client(store)
     page = client.get("/discovery").text
-    for text in ("House", "2020", "128.0 BPM", "Energy 0.8", "Danceability 0.7"):
+    for text in ("House", "2020", "128.0 BPM", "Danceability 0.7"):
         assert text in page
+    assert "Energy 0.8" not in page
     assert "Queued for enrichment" not in page and "Provider details" not in page
 
 

@@ -3,8 +3,11 @@ from contextlib import closing
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.home_fixture_support import home_page_bytecode, home_pages_only, publish_menu, without_metadata_providers
-from tests.recommendation_support import seed_publication_subjects
+from tests.home_fixture_support import (
+    home_page_bytecode, home_pages_only, publish_menu, returning_listener, without_metadata_providers,
+)
+from tests.onboarding_support import publish_live_mix_inputs
+from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, reuse_reporting_reader,
 )
@@ -42,7 +45,7 @@ def store(request, tmp_path, home_page_schema, monkeypatch):
 
 
 def _client(store, now=1000.0, *, prepare=True):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     if prepare:
         # Page consumers start with completed worker output. Ranking and Home
         # preparation have their own owners in test_home_prepared.
@@ -51,41 +54,116 @@ def _client(store, now=1000.0, *, prepare=True):
     return TestClient(app, base_url="http://127.0.0.1")
 
 
-def _publish_existing_listener_mix(store, *, prefix='prepared'):
-    from yt_playlist.rec import taste_analysis, transient
+def _publish_existing_listener_mix(store):
+    from yt_playlist.rec import taste_analysis
 
-    # Publish the complete menu as the ordinary worker baseline; this fixture
-    # has no held tuning window that should supersede later history updates.
-    with store.read_view() as reader:
-        facets = reader.rec_query.play_weighted_facets(reader.rec_query.play_counts())
-        fingerprint = {'breadth': taste_analysis.taste_breadth(reader,genre_plays=facets['genres']),
-                       'eras': taste_analysis.era_distribution(reader,era_plays=facets['eras']),
-                       'genre_plays': facets['genres'],
-                       'transient': transient.prepared_facet_leans(reader,1000)}
-    publish_menu(store,prefix=prefix,surface='home_tuned',tracks_per_card=1)
-    payload = store.rec_proposals.get_proposals('home_tuned')
-    store.rec_proposals.put_proposals('home_prepared', {**payload,'fingerprint':fingerprint}, 1000)
-    store.rec_proposals.put_proposals('home_tuned', {}, 1000)
-    # Controlled worker output for a returning listener. These tests exercise
-    # fingerprint rendering after earned access, without mocking the journey.
-    store.rec_proposals.put_proposals('listening_choices', {
-        'home_format': {'episodes': {'mixes': 1}}}, 1000)
+    returning_listener(store, 'mixes', now=1000)
+    publish_live_mix_inputs(store)
+    taste_analysis.prepare_library_summary(store, 1000)
+
+
+@pytest.mark.parametrize('route', ['/?panel=mixes', '/home/cards'])
+def test_live_fresh_uses_published_genre_and_era_summary(store, monkeypatch, route):
+    import re
+
+    from yt_playlist.rec import recipes, taste_analysis
+
+    client = _client(store, prepare=False)
+    returning_listener(store, 'mixes', now=1000)
+    tracks = publish_live_mix_inputs(store, tracks_per_lane=12)
+    account = store.accounts.get_master_account().id
+    store.history.record_history_plays(account, 900, [tracks[0]['key']], source_timezone='UTC')
+    summary = taste_analysis.prepare_library_summary(store, 1000)
+    assert summary['breadth']['families']
+
+    def reread_history(*args, **kwargs):
+        pytest.fail('Home already loaded the published genre and era summary')
+
+    monkeypatch.setattr(recipes, 'taste_breadth', reread_history)
+    monkeypatch.setattr(recipes, 'era_distribution', reread_history)
+    response = client.get(route)
+    assert response.status_code == 200
+    cards = dict(re.findall(r'<section[^>]+id="gen-([\w-]+)"[^>]*>(.*?)</section>', response.text, re.S))
+    assert set(cards) == {'wheelhouse', 'explore', 'fresh', 'comfort'}
+    videos = {lane: re.findall(r'data-vid="([^"]+)"', card) for lane, card in cards.items()}
+    assert all(len(items) == 12 for items in videos.values())
+    assert len({video for items in videos.values() for video in items}) == 48
+    assert set(videos['fresh']) == {track['video_id'] for track in tracks if track['video_id'].startswith('live-fresh-')}
 
 
 def test_home_visit_ticks_card_rotation_but_previews_dont(store):
-    """A genuine Home visit advances each card's rotation counter once; steer/breadth previews and the
+    """A Home visit advances the visible cards once; steer/breadth previews and the
     feed fragment re-render the same epoch without ticking, so tuning your taste never churns cards."""
+    returning_listener(store, 'mixes', now=1000)
     c = _client(store)
     dao = store.rec_ledger
     assert dao.card_views("wheelhouse") == 0
     c.get("/")
     c.get("/")
-    assert dao.card_views("wheelhouse") == 2 and dao.card_views("new_artists") == 2   # all cards tick
+    assert dao.card_views("wheelhouse") == 2 and dao.card_views("new_artists") == 0
     c.post("/home/breadth", data={"breadth_bias": "0.5"})  # previews must not advance rotation
     c.post("/home/steer", data={"axis": "genre:Rock", "weight": "1.5"})
     c.get("/home/feed")
     c.get("/home/fresh")                                   # lazy re-fetch (e.g. from a steer), read-only
     assert dao.card_views("wheelhouse") == 2 and dao.card_views("fresh") == 2
+
+
+@pytest.mark.parametrize('newer_menu', [False, True])
+def test_home_sends_cards_while_menu_persistence_is_blocked(store, monkeypatch, newer_menu):
+    import re
+    import socket
+    from threading import Event
+    from urllib.request import urlopen
+
+    import uvicorn
+
+    from tests.live_server import LiveServer
+    from yt_playlist.rec import choice_evidence
+
+    returning_listener(store, 'mixes', now=1000)
+    publish_live_mix_inputs(store)
+    app = _client(store, prepare=False).app
+    surface = 'choice_window:mixes'
+    newer = {'opportunity_id': 'newer-offer', 'window': '2'}
+    started, release, completed = Event(), Event(), Event()
+    save = store.rec_proposals.put_proposals
+
+    def hold_save(name, value, now):
+        if name != surface:
+            return save(name, value, now)
+        started.set()
+        assert release.wait(10)
+        save(name, value, now)
+        completed.set()
+
+    monkeypatch.setattr(store.rec_proposals, 'put_proposals', hold_save)
+    with socket.create_server(('127.0.0.1', 0)) as listener:
+        port = listener.getsockname()[1]
+        config = uvicorn.Config(app, log_config=None, lifespan='off', ws='none', http='h11')
+        with LiveServer(uvicorn.Server(config), sockets=[listener]):
+            try:
+                with urlopen(f'http://127.0.0.1:{port}/', timeout=5) as response:
+                    assert response.status == 200
+                    page = response.read()
+                    assert b'id="home-mode-cards"' in page
+                    assert page.count(b'class="gen-card card"') == 4
+                    offers = re.findall(rb'data-choice-opportunity="([^"]+)"', page)
+                    assert len(offers) == 4 and len(set(offers)) == 1
+                    displayed = offers[0].decode()
+                assert started.wait(5)
+                assert store.rec_ledger.card_views('cards') == 0
+                assert store.rec_proposals.get_proposals(surface) is None
+                if newer_menu:
+                    save(surface, newer, 1001)
+            finally:
+                release.set()
+            assert completed.wait(5)
+
+    assert store.rec_proposals.get_proposals(surface) == (
+        newer if newer_menu else {'opportunity_id': displayed, 'window': '0'})
+    offer = choice_evidence.opportunity(store, displayed)
+    assert offer['format'] == 'mixes' and len(offer['options']) == 4
+    assert store.rec_ledger.card_views('cards') == 1
 
 
 def test_home_is_default_route(store):
@@ -126,7 +204,7 @@ def test_next_home_visit_expires_a_day_old_theme_menu(store):
     dao.bump_card_view("cards", 1000.0)
     store.modes.log_impressions(0, [("wheelhouse", 1)], 1000.0)
     clock = [1000.0 + MENU_MAX_AGE_S - 1]
-    iid = store.accounts.upsert_account('main', 'cred', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     publish_menu(store, clock[0], tracks_per_card=1)
     client = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: clock[0]),
                         base_url='http://127.0.0.1')
@@ -161,13 +239,13 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     from tests.onboarding_support import publish_personal_mix
     from yt_playlist.rec import home_prepared
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "quiet-list", "Quiet mix", 9, None, 1000)
     seed_publication_subjects(store, [{'key': f'song {i}|artist', 'video_id': f'v{9-i}',
         'title': f'Song {i}', 'artist': 'Artist'} for i in range(8)])
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET thumbnail='/static/icon.png'")
-    tracks = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+        store.conn.execute("UPDATE track_sources SET thumbnail='/static/icon.png'")
+    tracks = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
     from tests.conftest import seed_catalog_track
     tracks.append(seed_catalog_track(store, "offline|artist", "Offline song", "Artist"))
     store.playlists.set_playlist_tracks(pid, tracks)
@@ -186,12 +264,13 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
     assert not client.get('/home/growth').json()['ready_areas']['rediscover']
     assert 'id="onboarding-feed"' in client.get('/').text
     publish_personal_mix(store)
-    from tests.home_fixture_support import returning_listener
     returning_listener(store, 'mixes', now=1000)
     assert client.get('/home/growth').json()['ready_areas']['rediscover']
     assert client.get('/home/onboard/status').json()['setup']['complete']
-    html = client.get('/').text
-    assert 'x-show="areaAccessible(\'rediscover\')"' in html
+    assert '<section id="rediscover">' not in client.get('/').text
+    revisit = client.get('/?panel=rediscover&fragment=1')
+    assert revisit.status_code == 200
+    html = revisit.text
     section = html.split('<section id="rediscover">', 1)[1].split('</section>', 1)[0]
     table = re.search(r'<table class="track-table redis-tracks" aria-label="Quiet mix tracks".*?</table>',
                       section, re.S).group()
@@ -208,35 +287,21 @@ def test_revisit_shows_full_current_playlist_in_saved_order(store):
 
 def test_home_renders_for_you_and_no_sync_elsewhere(store):
     # Complete cards are available both inline and through the fragment endpoint.
-    import numpy as np
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    store.tracks.upsert_track("v1", "Gem", "X", None, None)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 200 * day
+    wheelhouse = [
+        {'key': 'gem|x', 'video_id': 'v1', 'title': 'Gem', 'artist': 'X', 'genre': 'house'},
+        *({'key': f'song {i}|artist {i}', 'video_id': f'v{i}', 'title': f'Song {i}',
+           'artist': f'Artist {i}', 'genre': 'house'} for i in range(2, 6)),
+    ]
+    seed_publication_subjects(store, wheelhouse)
     store.history.record_history_plays(iid, now - 120 * day, ["gem|x"], source_timezone="UTC")
     store.history.record_history_plays(iid, now - 110 * day, ["gem|x"], source_timezone="UTC")
-    store.settings.set_setting("last_sync_at", str(now - day))   # synced user -> rec feed renders (not the placeholder)
-    # The page consumes completed Home output; preparation has separate owners.
-    store.modes.replace_modes([
-        {"mode_id": 1, "label": "a", "families": [["house", 1]],
-         "centroid": np.array([1.0, 0.0], dtype=np.float32), "size": 80, "rep_keys": []},
-    ], retired_ids=[], now=now)
-    payload = publish_menu(store, now, prefix='gem', tracks_per_card=8, mode_ids=(1, 1, 1, 1))
-    for menu in payload['menus']:
-        for proto in menu['protos']:
-            if proto['lane'] == 'wheelhouse':
-                proto['label'] = 'More in your wheelhouse'
-                proto['tracks'][0] = {**proto['tracks'][0], 'key': 'gem|x', 'video_id': 'v1',
-                                      'title': 'Gem', 'artist': 'X'}
-        for slot in menu['slots']:
-            if slot['proto'] is not None and slot['proto']['lane'] == 'wheelhouse':
-                slot['proto']['tracks'][0] = {**slot['proto']['tracks'][0], 'key': 'gem|x',
-                                              'video_id': 'v1', 'title': 'Gem', 'artist': 'X'}
-    store.rec_proposals.put_proposals('home_prepared', payload, now)
-    store.rec_proposals.put_proposals('listening_choices', {
-        'home_format': {'episodes': {'mixes': 1}}}, now)
-    app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now)
-    c = TestClient(app, base_url="http://127.0.0.1")
+    store.settings.set_setting("last_sync_at", str(now - day))
+    returning_listener(store, 'mixes', now=now)
+    publish_bundles(store, {'all': {'wheelhouse': wheelhouse}}, now, retain_payload=False)
+    c = _client(store, now=now, prepare=False)
 
     cards = c.get("/home/cards").text
     assert "More in your wheelhouse" in cards    # the wheelhouse card heading
@@ -244,6 +309,7 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
     assert 'data-key="gem|x"' in cards
 
     home = c.get("/").text
+    assert 'data-key="gem|x"' in home
     assert 'class="home-status card card--status is-live global-now-playing"' in home
 
     # Now Playing belongs to the shared layout, not Home, so it follows the user across the app.
@@ -254,16 +320,20 @@ def test_home_renders_for_you_and_no_sync_elsewhere(store):
 
 
 def test_steering_panel_hidden_until_genres_exist(store):
-    """The wheelhouse steering panel (genre/era sliders) is empty-state until the library has genres."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    """A library genre summary can expose tuning while the mixes are still preparing."""
+    from yt_playlist.rec import taste_analysis
+
+    iid = store.accounts.upsert_account("main", None, True)
+    returning_listener(store, 'mixes', now=1000)
     c = _client(store, prepare=False)
-    _publish_existing_listener_mix(store)
-    assert 'id="fingerprint"' not in c.get("/home/feed").text     # no genres yet -> panel hidden
+    response = c.get("/home/feed")
+    assert response.status_code == 200 and 'id="home-feed"' in response.text
+    assert 'id="fingerprint"' not in response.text
 
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
-    _publish_existing_listener_mix(store,prefix='updated')
+    taste_analysis.prepare_library_summary(store, 1000)
     response = c.get("/home/feed")
     assert response.status_code == 200
     assert 'id="fingerprint"' in response.text
@@ -271,7 +341,7 @@ def test_steering_panel_hidden_until_genres_exist(store):
 
 
 def test_home_page_has_steering_and_fingerprint(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.tracks.set_track_year(t, "1999")
@@ -281,16 +351,25 @@ def test_home_page_has_steering_and_fingerprint(store):
     _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
-    html = c.get("/").text
-    assert 'id="fingerprint"' in html                    # fingerprint header present
-    assert 'type="range"' in html                        # draggable bars, not +/- buttons
-    assert "/home/steer" in html                         # dragging a bar steers + re-ranks
-    assert "/home/breadth" in html                       # the breadth bar steers focused<->eclectic
-    assert "/taste" in html                              # "Tune your taste model" affordance
+    response = c.get("/")
+    assert response.status_code == 200
+    html = response.text
+    assert 'id="fingerprint"' in html
+    assert 'aria-label="Tune these mixes"' in html
+    assert 'aria-controls="fp-dialog"' in html
+    assert 'id="fp-genre-bars"' not in html
+    assert '/home/steer' not in html
+    dialog = c.get('/home/fingerprint?dialog=true')
+    assert dialog.status_code == 200
+    assert 'id="fp-genre-bars"' in dialog.text
+    assert 'type="range"' in dialog.text
+    assert '/home/steer' in dialog.text
+    assert '/home/breadth' in dialog.text
+    assert '/taste' in html
 
 
 def test_home_steer_writes_lean_not_permanent_weight(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -305,7 +384,7 @@ def test_home_steer_writes_lean_not_permanent_weight(store):
 
 def test_presync_shows_recs_placeholder_not_feed(store):
     """The festival guides arrival until useful offers exist, across a full sync."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Gem", "X", None, None)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
@@ -332,7 +411,7 @@ def test_enrich_nudge_is_gone(store):
 
 
 def test_fingerprint_bar_shows_effective_multiplier(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -343,8 +422,10 @@ def test_fingerprint_bar_shows_effective_multiplier(store):
     _publish_existing_listener_mix(store)
     app = create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
-    html = c.get("/").text
-    assert 'value="1.5"' in html                       # bar shows effective, not permanent 1.0
+    dialog = c.get('/home/fingerprint?dialog=true')
+    assert dialog.status_code == 200
+    assert f'"axis":"genre:{fam}"' in dialog.text
+    assert 'value="1.5"' in dialog.text
 
 
 def test_taste_fingerprint_marks_transient(store):
@@ -352,7 +433,7 @@ def test_taste_fingerprint_marks_transient(store):
     # held-steer thumb (which stays at `effective`). The two mood signals no longer share one position.
     from yt_playlist.rec import taste_analysis
     from yt_playlist.util.matching import identity_key
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     keys = [identity_key(f'song{i}', 'band') for i in range(10)]
     seed_publication_subjects(store, [{'key': key, 'video_id': f'v{i}', 'title': f'song{i}',
         'artist': 'band', 'genre': 'Techno'} for i, key in enumerate(keys)])
@@ -371,7 +452,7 @@ def test_taste_fingerprint_marker_inert_when_stale(store):
     # A stale sync relaxes the transient to ~0, so no bar claims a live marker (families still present).
     from yt_playlist.rec import taste_analysis
     from yt_playlist.util.matching import identity_key
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     keys = [identity_key(f'song{i}', 'band') for i in range(5)]
     seed_publication_subjects(store, [{'key': key, 'video_id': f'v{i}', 'title': f'song{i}',
         'artist': 'band', 'genre': 'Techno'} for i, key in enumerate(keys)])
@@ -389,7 +470,7 @@ def test_fingerprint_subgenres_attached_and_deduped(store):
     family token itself is excluded (no self-duplicate), and a subgenre with a lean is promoted to its
     own top bar instead of appearing under the family."""
     from yt_playlist.rec import taste_analysis
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
@@ -447,17 +528,22 @@ def test_home_breadth_bar_is_interactive(store):
     """#7: the Breadth bar steers the feed. It posts to /home/breadth bound to the breadth_bias param,
     and a post persists the bias and re-renders only the four-card board."""
     from yt_playlist.rec import rec_params
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")
     c = _client(store, prepare=False)
     _publish_existing_listener_mix(store)
-    html = c.get("/home/feed").text
-    assert "/home/breadth" in html                       # the breadth bar is now a steering control
-    assert 'name="breadth_bias"' in html                 # ...bound to the breadth_bias param
+    feed = c.get("/")
+    assert feed.status_code == 200 and 'aria-controls="fp-dialog"' in feed.text
+    assert 'name="breadth_bias"' not in feed.text
+    dialog = c.get('/home/fingerprint?dialog=true')
+    assert dialog.status_code == 200
+    assert 'hx-post="/home/breadth"' in dialog.text
+    assert 'name="breadth_bias"' in dialog.text
     r = c.post("/home/breadth", data={"breadth_bias": "0.5"})
     assert r.status_code == 200 and 'id="home-mode-cards"' in r.text
+    assert r.text.count('class="gen-card card"') == 4
     assert 'id="home-feed"' not in r.text
     assert rec_params.get_param(store, "breadth_bias") == 0.5
     c.post("/home/breadth", data={"breadth_bias": "9"})
@@ -466,7 +552,7 @@ def test_home_breadth_bar_is_interactive(store):
 
 def test_home_has_no_stance_toggle(store):
     """#7: the noisy wheelhouse/explore toggle is gone (route, container, and its unique label)."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     t = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(t, "Techno")
     store.history.record_history_plays(iid, 1.0, ["song|band"], source_timezone="UTC")

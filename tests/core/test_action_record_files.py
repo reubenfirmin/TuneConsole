@@ -23,7 +23,7 @@ def disable_periodic_library_sync():
 def test_interrupted_action_and_step_leave_only_pending_records_until_retry(
         file_consumer_store, monkeypatch, failure):
     store = file_consumer_store
-    account = store.accounts.upsert_account('Owner', 'owner.json', None, True)
+    account = store.accounts.upsert_account('Owner', None, True)
     membership = store.playlists.upsert_playlist(account, 'REMOTE', 'Playlist', 0, '', 1)
     plan = json.dumps(dict(playlist_id=membership, video_ids=['one', 'one']))
     files, repo = store.actions.files, store.actions.repository
@@ -51,7 +51,7 @@ def test_interrupted_action_and_step_leave_only_pending_records_until_retry(
             store.actions.record_action('add_tracks', '{}', plan, 'pending', '{}', 1, idempotency_key='intent')
     assert store.actions.get_actions() == []
     assert not store.conn.in_transaction
-    rows = store.conn.execute('SELECT * FROM collection_file_writes ORDER BY id').fetchall()
+    rows = store.conn.execute('SELECT * FROM collection_file_writes WHERE id>0 ORDER BY id').fetchall()
     assert [row['kind'] for row in rows] == ['action', 'action-step']
     assert all(row['file_status'] == 'pending' for row in rows)
     for row in rows:
@@ -59,7 +59,7 @@ def test_interrupted_action_and_step_leave_only_pending_records_until_retry(
 
     restarted = Store(store._db_path)
     try:
-        restarted.init_schema(defer_metadata=True)
+        restarted.init_schema()
         assert restarted.actions.get_actions() == []
         identity = restarted.actions.record_action('add_tracks', '{}', plan, 'pending', '{}', 2, idempotency_key='intent')
         assert identity > rows[-1]['id']
@@ -78,7 +78,7 @@ def test_concurrent_update_during_action_file_write_cannot_replace_the_winning_r
     publish = store.actions.files.publish_reserved
     winner = Store(store._db_path)
     try:
-        winner.init_schema(defer_metadata=True)
+        winner.init_schema()
         def race(*args, **kwargs):
             assert not store.conn.in_transaction
             reference = publish(*args, **kwargs)
@@ -90,7 +90,7 @@ def test_concurrent_update_during_action_file_write_cannot_replace_the_winning_r
             with pytest.raises(ValueError, match='updated by another worker'):
                 store.actions.update_action(identity, 'executed', 2, undo_json='{"marker":"stale"}')
         assert json.loads(store.actions.get_action(identity).undo_json) == {'marker': 'winner'}
-        assert [row[0] for row in store.conn.execute('SELECT file_status FROM collection_file_writes ORDER BY id')] == [
+        assert [row[0] for row in store.conn.execute('SELECT file_status FROM collection_file_writes WHERE id>0 ORDER BY id')] == [
             'ready', 'pending', 'ready']
         assert not store.conn.in_transaction
     finally:
@@ -106,7 +106,7 @@ def test_interrupted_backup_copy_keeps_the_prior_action_and_can_retry_after_rest
     encoded = b'{"snapshot_version":2,"ytm_playlist_id":"REMOTE","tracks":[]}'
     fao.write(source, encoded)
     undo = json.dumps({'backups': [str(source)]})
-    target, method = ((store.actions.backups, 'retain_reserved') if failure == 'file'
+    target, method = ((store.actions.backups, 'retain') if failure == 'file'
                       else (store.actions.repository, 'store_backup'))
 
     def interrupted(*args, **kwargs):
@@ -118,26 +118,21 @@ def test_interrupted_backup_copy_keeps_the_prior_action_and_can_retry_after_rest
             store.actions.update_action(identity, 'executed', 2, undo_json=undo)
     assert json.loads(store.actions.get_action(identity).undo_json) == {}
     assert not store.conn.in_transaction
-    with closing(sqlite3.connect(store._db_path)) as observer:
-        row = observer.execute('SELECT id,action_id,position,file_status FROM action_backup_writes').fetchone()
-    assert row[1:] == (identity, 0, 'pending')
-    path = action_backup_files.record_path(store.actions.backups.root, row[0])
-    assert path.exists() is (failure == 'status')
-    assert not store.conn.execute('SELECT 1 FROM action_backups').fetchone()
+    assert len(list(store.actions.backups.root.glob('backups/*/*.json'))) == (1 if failure == 'status' else 0)
+    assert not store.actions.repository.backups(identity)
 
     restarted = Store(store._db_path)
     try:
-        restarted.init_schema(defer_metadata=True)
+        restarted.init_schema()
         assert json.loads(restarted.actions.get_action(identity).undo_json) == {}
         restarted.actions.update_action(identity, 'executed', 3, undo_json=undo)
         source.unlink()
-        row = restarted.conn.execute('SELECT * FROM action_backups').fetchone()
+        row, = restarted.actions.repository.backups(identity)
         retained = row['retained_filename']
         assert action_backup_files.record_id(retained) is not None
         assert fao.read(retained).bytes == encoded
         assert json.loads(restarted.actions.get_action(identity).undo_json)['backups'] == [retained]
-        assert [row[0] for row in restarted.conn.execute(
-            'SELECT file_status FROM action_backup_writes ORDER BY id')] == ['pending', 'ready']
+        assert len(restarted.actions.repository.backups(identity)) == 1
         assert not restarted.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         restarted.conn.close()

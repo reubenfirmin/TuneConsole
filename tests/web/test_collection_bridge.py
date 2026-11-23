@@ -64,7 +64,7 @@ def _request_frame(ws, pending, timeout=5):
 @pytest.mark.parametrize('failure', [None, 'lookup', 'rating', 'dispatch'],
                          ids=['success', 'lookup-error', 'rating-error', 'early-http-error'])
 def test_album_operation_round_trips_through_live_bridge_without_blocking_loop(store, monkeypatch, saved, failure):
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     if not saved:
         store.collection.add_saved_album({'browse': 'MPREb_x', 'title': 'The Album'},account_id=iid)
     before = store.collection.get_saved_albums()

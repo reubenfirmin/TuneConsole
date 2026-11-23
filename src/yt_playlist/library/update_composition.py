@@ -3,11 +3,10 @@ from yt_playlist.controllers.updates import UpdateCommands
 from yt_playlist.core import updatecheck
 from yt_playlist.core.activity import activity_for
 from yt_playlist.core.update_lifecycle import PendingRestart, acquire_restart_locks
-from yt_playlist.integrations.base import AccessState
 
 
 def checks(store):
-    return updatecheck.checks(store.settings, AccessState.for_store(store))
+    return updatecheck.checks(store)
 
 
 def desktop(ctx, stop_server):

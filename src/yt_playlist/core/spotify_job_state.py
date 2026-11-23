@@ -2,7 +2,7 @@
 import json
 import uuid
 
-from . import collection_recovery
+from . import collection_recovery, spotify_records, worker_settings
 
 KEY = 'spotify_library_import_job'
 KEYS = frozenset({KEY})
@@ -10,15 +10,17 @@ FIELDS = ('phase','started_at','finished_at','identity_label','report_schema','d
           'playlists_found','track_entries','albums_found','lookup_count','estimate_label')
 OPAQUE = frozenset({'report','preview_token'})
 TOKEN = '_job_revision'
+CURRENT = 'spotify_import_current'
 
 
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='spotify_import_jobs'").fetchone() is not None
+def current(conn):
+    identity = worker_settings.read(conn, CURRENT)
+    return spotify_records.read(conn, spotify_records.IMPORT + identity) if identity else None
 
 
 @collection_recovery.pinned_read
 def load(conn,*,token=False):
-    row = conn.execute('SELECT j.* FROM spotify_import_job_head h JOIN spotify_import_jobs j ON j.id=h.job_id WHERE h.id=1').fetchone()
+    row = current(conn)
     if row is None:
         return None
     value = collection_recovery.read(row['recovery_filename'],row['recovery_digest'],row['recovery_bytes'],
@@ -41,7 +43,7 @@ def save(conn,value,*,legacy=False):
     """An absent token starts a job; a token admits only its current revision."""
     from . import entity_names
     value = entity_names.account_document(value)
-    conn.execute('UPDATE spotify_import_job_head SET job_id=job_id WHERE 0')
+    conn.execute('UPDATE settings SET value=value WHERE 0')
     prepared = prepare(value, capture(conn, value.get('account_id') if isinstance(value, dict) else None), legacy=legacy)
     reference = collection_recovery.publish(conn,'spotify-import',prepared['identity'],
                                             {key:value[key] for key in OPAQUE if key in value})
@@ -49,10 +51,10 @@ def save(conn,value,*,legacy=False):
 
 
 def capture(conn, account):
-    head = conn.execute('SELECT j.* FROM spotify_import_job_head h JOIN spotify_import_jobs j ON j.id=h.job_id').fetchone()
+    head = current(conn)
     known = conn.execute('SELECT id FROM accounts WHERE id=?', (account,)).fetchone() if account is not None else None
     return {'head': dict(head) if head else None, 'known': known[0] if known else None,
-            'next_id': conn.execute('SELECT COALESCE(MAX(id),0)+1 FROM spotify_import_jobs').fetchone()[0]}
+            'next_id': spotify_records.next_identity(conn, spotify_records.IMPORT)}
 
 
 def prepare(value, facts, *, legacy=False):
@@ -85,24 +87,23 @@ def prepare(value, facts, *, legacy=False):
 def register(conn, prepared, reference):
     value, identity, known = prepared['value'], prepared['identity'], prepared['known']
     expected = value.get(TOKEN)
-    if expected is not None:
-        current = conn.execute('SELECT j.id,j.revision FROM spotify_import_job_head h '
-            'JOIN spotify_import_jobs j ON j.id=h.job_id').fetchone()
-        if current is None or current['id'] != identity or current['revision'] != expected:
-            raise ValueError('Spotify import job was replaced or updated')
     revision = prepared['revision']
-    fields = [value.get(field) for field in FIELDS]
-    mask = sum(1<<index for index,field in enumerate(FIELDS) if field in value)
-    columns = ','.join(FIELDS)
-    update = (' ON CONFLICT(id) DO UPDATE SET '
-                 'revision=excluded.revision,field_mask=excluded.field_mask,status=excluded.status,'+
-                 ','.join(f'{field}=excluded.{field}' for field in (*FIELDS,'recovery_filename','recovery_digest','recovery_bytes'))) if expected is not None else ''
-    account = value.get('account_id')
-    conn.execute(f'INSERT INTO spotify_import_jobs(id,revision,account_id,unresolved_account_id,account_present,field_mask,status,{columns},recovery_filename,recovery_digest,recovery_bytes) '
-                 f'VALUES ({",".join("?" for _ in range(22))})'+update,
-                 (identity,revision,known,None if known else account,int('account_id' in value),mask,
-                  value['status'],*fields,*reference))
-    conn.execute('INSERT INTO spotify_import_job_head VALUES (1,?) ON CONFLICT(id) DO UPDATE SET job_id=excluded.job_id',(identity,))
+    mask = sum(1 << index for index, field in enumerate(FIELDS) if field in value)
+    columns = ('revision', 'field_mask', 'status', *FIELDS, 'recovery_filename', 'recovery_digest', 'recovery_bytes')
+    data = (revision, mask, value['status'], *(value.get(field) for field in FIELDS), *reference)
+    key = spotify_records.IMPORT + str(identity)
+    if expected is not None:
+        row = current(conn)
+        if row is None or row['id'] != identity or row['revision'] != expected:
+            raise ValueError('Spotify import job was replaced or updated')
+    else:
+        if identity < spotify_records.next_identity(conn, spotify_records.IMPORT):
+            raise ValueError('Spotify import job identity was already used')
+        row = dict(id=identity, account_id=known, unresolved_account_id=None if known else value.get('account_id'),
+                   account_present=int('account_id' in value))
+        spotify_records.note_identity(conn, spotify_records.IMPORT, identity)
+        worker_settings.save(conn, CURRENT, str(identity))
+    spotify_records.save(conn, key, {**row, **dict(zip(columns, data))})
     return revision
 
 
@@ -117,5 +118,10 @@ def put(conn,values,*,legacy=False):
     if raw:
         save(conn,json.loads(raw),legacy=legacy)
     else:
-        conn.execute('DELETE FROM spotify_import_job_head')
-        conn.execute('DELETE FROM spotify_import_jobs')
+        clear(conn)
+
+
+def clear(conn):
+    worker_settings.save(conn, CURRENT, None)
+    conn.execute('DELETE FROM settings WHERE key GLOB ?',
+                 (spotify_records.IMPORT + '[0-9]*',))

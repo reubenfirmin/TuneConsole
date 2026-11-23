@@ -12,8 +12,8 @@ from tests import file_custody_support as custody
 from tests import paid_request_support as album_description_requests
 from tests.schema.actual_library import copy_readonly_library
 from tests.store_fixture_support import consumer_schema, native_sql_calls, without_query_timing
-from yt_playlist.core import (albums, audio_annotation_files, audio_annotations,
-    album_description_files, evidence_ledger, fao, schema_inspection)
+from yt_playlist.core import (albums, audio_annotations,
+    evidence_ledger, fao, schema_inspection)
 from yt_playlist.core.store import Store
 
 
@@ -27,7 +27,7 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def _pristine_current_schema():
-    # Export owns SQL and paid/annotation files, without any genre vocabulary.
+    # Export owns SQL and paid description files, without any genre vocabulary.
     # All three recovered Stores below still perform their actual admission.
     with consumer_schema(entries=(), snapshot_guards=False) as template:
         yield template
@@ -40,8 +40,8 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
     version = 'audio-session-targets-1'
     with store.conn:
         store.conn.execute("INSERT INTO recordings(id,identity_key) VALUES (1,'recording')")
-        store.conn.execute("INSERT INTO youtube_items(video_id,recording_id) VALUES ('video',1)")
-        store.conn.execute("INSERT INTO audio_vibe_runs VALUES ('run','video','Title','Artist',1)")
+        store.conn.execute("INSERT INTO track_sources(video_id,recording_id) VALUES ('video',1)")
+        store.audio_vibes.save_playback('run', 'video', 'Title', 'Artist', 1)
         first = audio_annotations.save(store.conn, 'run', [], ['relax'], version, {'opaque': ['saved output']}, 2)
         audio_annotations.save(store.conn, 'run', [], [], version, None, 3, state='withdrawn')
         album = albums.observe(store.conn, 'paid-album', title='Paid album', artist='Artist')
@@ -53,11 +53,11 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
     paid = {'status': 'ready', 'description': 'Original paid prose. é', 'model': 'deepseek-flash',
             'usage': {'prompt_tokens': 11, 'completion_tokens': 7, 'total_tokens': 18}}
     assert album_description_requests.finish(store.conn, claim['request_id'], claim['token'], paid, 6)
-    original_paid = {row[0]: album_description_files.read(row[1], row[2]) for row in store.conn.execute(
-        'SELECT id,filename,content_digest FROM album_descriptions')}
-    usage = list(map(tuple, store.conn.execute('SELECT * FROM provider_usage ORDER BY id')))
-    originals = {row[0]: audio_annotation_files.read(row[1]) for row in store.conn.execute(
-        'SELECT id,model_output_filename FROM audio_annotations')}
+    original_paid = dict(store.conn.execute(
+        "SELECT id,outcome_json FROM album_description_requests WHERE status='ready'"))
+    usage_sql = 'SELECT * FROM album_description_requests WHERE usage_id IS NOT NULL ORDER BY usage_id'
+    usage = list(map(tuple, store.conn.execute(usage_sql)))
+    originals = audio_annotations.export_snapshot(store.conn)
     dump = list(store.conn.iterdump())
     store.conn.close()
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
@@ -74,10 +74,10 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
     manifests = snapshot['manifests']
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash
     assert set(manifests) == {
-        'annotations', 'policies', 'descriptions', 'groups', 'recommendations', 'metadata', 'archives',
+        'policies', 'descriptions', 'groups', 'recommendations', 'metadata',
         'actions', 'collections', 'samples', 'choice_evidence', 'served',
-        'vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'}
-    for domain in ('vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'legacy-journals', 'policy-history'):
+        'vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'policy-history'}
+    for domain in ('vibe-provenance', 'vibe-models', 'profiles', 'embeddings', 'policy-history'):
         assert json.loads(fao.read(manifests[domain]).bytes) == {'format': 'fao-backup-1', 'files': []}
     assert json.loads(fao.read(manifests['choice_evidence']).bytes) == {
         'format': 'choice-evidence-1', 'pages': []}
@@ -87,8 +87,7 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
     with closing(sqlite3.connect(snapshot['snapshot'])) as backup, closing(sqlite3.connect(separate)) as target:
         assert list(backup.iterdump()) == dump
         backup.backup(target)
-    for domain in ('annotations', 'policies', 'descriptions'):
-        shutil.rmtree(source.with_name(source.name + '.' + domain))
+    shutil.rmtree(source.with_name(source.name + '.policies'))
     for database in (Path(snapshot['restored']), separate, readonly_copy):
         candidate = Store(database)
         try:
@@ -97,20 +96,16 @@ def test_export_restores_all_annotation_revisions_and_paid_results_independently
                 custody.restore_files(candidate.conn, manifests)
             with schema_inspection.reuse_tables(candidate.conn):
                 candidate.init_schema()
-            actual = {row[0]: audio_annotation_files.read(row[1]) for row in candidate.conn.execute(
-                'SELECT id,model_output_filename FROM audio_annotations')}
-            assert actual == originals
+            assert audio_annotations.export_snapshot(candidate.conn) == originals
+            assert candidate.audio_vibes.playback('run') == dict(video_id='video', title='Title', artist='Artist')
             assert candidate.rec_ledger.policy_configuration('paid-policy') == configuration
-            assert {row[0]: album_description_files.read(row[1], row[2]) for row in candidate.conn.execute(
-                'SELECT id,filename,content_digest FROM album_descriptions')} == original_paid
+            assert dict(candidate.conn.execute(
+                "SELECT id,outcome_json FROM album_description_requests WHERE status='ready'")) == original_paid
             assert album_description_requests.result(candidate.conn, claim['request_id']) == paid
-            assert list(map(tuple, candidate.conn.execute('SELECT * FROM provider_usage ORDER BY id'))) == usage
+            assert list(map(tuple, candidate.conn.execute(usage_sql))) == usage
             latest = audio_annotations.latest(candidate.conn, 'run', kind='session', taxonomy_version=version)
-            assert audio_annotations.read(candidate.conn, latest)['state'] == 'withdrawn'
-            assert candidate.conn.execute('SELECT vibe FROM audio_annotation_vibes WHERE annotation_id=?',
-                                          (first,)).fetchone()[0] == 'relax'
-            for row in candidate.conn.execute('SELECT model_output_filename FROM audio_annotations'):
-                assert Path(row[0]).is_relative_to(audio_annotation_files.directory(candidate.conn))
+            assert latest['state'] == 'withdrawn'
+            assert audio_annotations.read(candidate.conn, first)['vibes'] == ['relax']
             assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchall()
         finally:
             candidate.conn.close()
@@ -123,7 +118,7 @@ def test_export_failure_preserves_source_and_propagates_the_failure(tmp_path, mo
     original_hash = hashlib.sha256(source.read_bytes()).hexdigest()
     def interrupted(*_args, **_kwargs):
         raise OSError('controlled backup publication failure')
-    monkeypatch.setattr(audio_annotation_files, 'publish', interrupted)
+    monkeypatch.setattr(custody.PolicyFiles, 'export', interrupted)
     with pytest.raises(OSError, match='controlled backup publication failure'):
         custody.snapshot_library(source, tmp_path / 'failed')
     assert hashlib.sha256(source.read_bytes()).hexdigest() == original_hash

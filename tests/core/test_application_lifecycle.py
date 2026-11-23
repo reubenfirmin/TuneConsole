@@ -29,16 +29,26 @@ def test_retained_owner_failure_releases_already_admitted_lifetimes(monkeypatch,
         return retained('registered')
 
     monkeypatch.setattr(lifecycle.file_owners, 'readers', roots)
-    for owner, name in ((lifecycle.policy_documents, 'policy'),
-                        (lifecycle.evidence_ledger, 'evidence'),
-                        (lifecycle.served_facts, 'served')):
+    owners = ((lifecycle.policy_documents, 'policy'),
+              (lifecycle.evidence_ledger, 'evidence'),
+              (lifecycle.served_facts, 'served'),
+              (lifecycle.collection_recovery, 'collection'),
+              (lifecycle.group_documents, 'groups'),
+              (lifecycle.recommendation_outputs, 'recommendations'),
+              (lifecycle.metadata_delivery_files, 'metadata delivery'),
+              (lifecycle.metadata_runtime_files, 'runtime metadata'),
+              (lifecycle.legacy_evidence, 'legacy evidence'))
+    for owner, name in owners:
         monkeypatch.setattr(owner, 'root_for_database', lambda path, key, name=name: name)
     monkeypatch.setattr(lifecycle.policy_documents, 'retained_reader', retained)
     session = SimpleNamespace(_db_path='library.db', _evidence_key='reader-key')
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match='owner unavailable' if failure == 'admission' else 'consumer failed'):
         with lifecycle.ApplicationLifecycle.readers(session):
-            assert events == [('enter', name) for name in ('registered', 'policy', 'evidence', 'served')]
             raise ValueError('consumer failed')
-    exits = [name for phase, name in events if phase == 'exit']
-    assert exits == (['policy', 'registered'] if failure == 'admission' else
-                     ['served', 'evidence', 'policy', 'registered'])
+    if failure == 'admission':
+        assert events == [('enter', 'registered'), ('enter', 'policy'), ('enter', 'evidence'),
+                          ('exit', 'policy'), ('exit', 'registered')]
+    else:
+        names = ('registered', *(name for _, name in owners))
+        assert events == ([('enter', name) for name in names] +
+                          [('exit', name) for name in reversed(names)])

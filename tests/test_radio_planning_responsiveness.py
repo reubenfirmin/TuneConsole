@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from tests.radio_session_support import poc, play
+from yt_playlist.core.activity import check_cancellable_work
 from yt_playlist.rec.radio_directions import RadioDirections
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes.bridge import build as bridge_routes
@@ -127,6 +128,37 @@ def test_late_direction_plan_preserves_published_state_and_newer_actions(poc, mo
     assert session.requested_direction is requested
     if change == 'feedback':
         assert session.feedback_dirty and songs[10]['video_id'] in original.blocked
+
+
+def test_apply_cancels_the_observers_unpublished_plan(poc, monkeypatch):
+    controller, _, frames, *_ = poc
+    assert controller.start()['ok']
+    session = controller.session
+    play(controller, 'v2')
+    started, release = threading.Event(), threading.Event()
+    update = controller.policy.update_directions
+
+    def hold_observer(*args, **kwargs):
+        if not started.is_set():
+            started.set()
+            while not release.wait(.02):
+                check_cancellable_work()
+        return update(*args, **kwargs)
+
+    monkeypatch.setattr(controller.policy, 'update_directions', hold_observer)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        session.wake.set()
+        monitor = pool.submit(controller._monitor, session)
+        try:
+            assert started.wait(timeout=3)
+            result = pool.submit(controller.tune, {**session.candidates.tuning, 'energy': .23}).result(timeout=3)
+            assert result['ok'] and result['tuning']['energy'] == .23
+            assert controller.session is session and session.observed_video == 'v2'
+            assert not session.stop.is_set() and len(frames) == 1
+        finally:
+            release.set()
+            controller.suspend()
+            monitor.result(timeout=5)
 
 
 def test_live_radio_projection_needs_no_reader_slot(poc):

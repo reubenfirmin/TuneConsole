@@ -4,7 +4,8 @@ import json
 
 import pytest
 
-from tests.audio_vibe_fixture_support import disable_periodic_library_sync, specialist_store
+from tests.audio_vibe_fixture_support import (
+    assert_only_playback_annotations, disable_periodic_library_sync, qualify_related_predictions, specialist_store)
 from tests.rec.test_vibe_prediction import catalog_track as track, drain, fits
 from tests.test_audio_vibe_cruise import samples
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
@@ -53,11 +54,11 @@ def controlled(tmp_path, values=(.8, 1.)):
 
 
 @pytest.mark.parametrize('count', [1, 2, 3])
-def test_focus_preserves_five_specialists_and_shared_classification(count, monkeypatch):
+def test_focus_preserves_the_other_five_specialists(count, monkeypatch):
     rows = samples()[:count]
     original = deepcopy(rows)
     before, after = baseline(rows, monkeypatch), predictor.predict(rows, require_complete=False)
-    assert after['arc'] == before['arc']
+    assert after['sample_count'] == before['sample_count'] == count
     assert set(after['individual_models']) == set(shared.LABELS)
     for vibe in shared.LABELS:
         if vibe != focus.VIBE:
@@ -175,21 +176,24 @@ def test_missing_metadata_uses_direct_measured_focus(store):
 
 def test_refresh_partial_captures_propagation_continuing_updates_and_rollback(specialist_store, tmp_path, monkeypatch):
     store = specialist_store
+    qualify_related_predictions(monkeypatch, focus.VIBE)
     _tid, own = track(store, 'observed_song')
     _tid, neighbour = track(store, 'neighbour')
+    _tid, unrelated = track(store, 'unrelated', artist='Another artist')
     rows = samples()
     monkeypatch.setenv(focus.MODE_KEY, 'off')
     drain(store, batch=1).close()
     for now, row in enumerate(rows[:2], 1):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
-    assert fits(store, own)[focus.VIBE]['source'] == 'heuristic'
+    assert focus.VIBE not in fits(store, own)
     store.audio_vibes.save_sample(rows[2], 3)
     store.audio_vibes.save_feedback(rows[0]['run_id'], [], [focus.VIBE], predictor.TAXONOMY_VERSION, None, 4)
     feedback = store.audio_vibes.feedback(rows[0]['run_id'])
     drain(store, batch=1).close()
-    keys = [own, neighbour]
+    keys = [own, neighbour, unrelated]
     before = {key: fits(store, key) for key in keys}
+    assert all(focus.VIBE not in values for values in before.values())
     profiles = musical_character.load(store, keys)
     monkeypatch.setenv(focus.ENVIRONMENT_KEY, str(controlled(tmp_path)))
     monkeypatch.setenv(focus.MODE_KEY, 'active')
@@ -197,33 +201,47 @@ def test_refresh_partial_captures_propagation_continuing_updates_and_rollback(sp
     store.conn.set_trace_callback(statements.append)
     drain(store, batch=1).close()
     active = musical_character.load(store, keys)
+    active_stamp = vibe_preparation.version()
     assert fits(store, own)[focus.VIBE]['score'] == pytest.approx(.9)
-    assert fits(store, neighbour)[focus.VIBE]['recordings'] == 1
-    assert fits(store, neighbour)[focus.VIBE]['score'] > before[neighbour][focus.VIBE]['score']
+    assert fits(store, own)[focus.VIBE]['source'] == 'audio_measurement'
+    assert fits(store, own)[focus.VIBE]['support'] == 1
+    estimate = fits(store, neighbour)[focus.VIBE]
+    assert estimate['source'] == 'artist_genre' and estimate['recordings'] == 1
+    assert estimate['score'] > .5
+    assert focus.VIBE not in fits(store, unrelated)
+    assert active[own]['vibes']['inputs_version'] == active_stamp
+    assert active_stamp != profiles[own]['vibes']['inputs_version']
     for key in keys:
         after = fits(store, key)
-        assert set(after) == set(shared.LABELS)
-        assert active[key]['vibes']['intensity_fits'] == profiles[key]['vibes']['intensity_fits']
-        for vibe in shared.LABELS:
-            if vibe != focus.VIBE:
-                assert after[vibe] == before[key][vibe]
-        assert home_vibe.affinity({'key': key}, focus.VIBE, active) == after[focus.VIBE]['score']
-    active_stamp = vibe_preparation.version()
+        assert {vibe: fit for vibe, fit in after.items() if vibe != focus.VIBE} == before[key]
+        current = active[key].get('vibes', {}).get('intensity_fits', {})
+        previous = profiles[key].get('vibes', {}).get('intensity_fits', {})
+        # Focus changes the preparation identity while leaving both intensity
+        # channels' evidence unchanged.
+        assert current.keys() == previous.keys()
+        for channel, fit in current.items():
+            assert {k: v for k, v in fit.items() if k != 'inputs_version'} == {
+                k: v for k, v in previous[channel].items() if k != 'inputs_version'}
+        assert home_vibe.affinity({'key': key}, focus.VIBE, active) == after.get(focus.VIBE, {}).get('score', .5)
     controlled(tmp_path, (.2, .4))
     assert vibe_preparation.version() != active_stamp
     drain(store, batch=1).close()
     assert fits(store, own)[focus.VIBE]['score'] == pytest.approx(.3)
+    assert fits(store, neighbour)[focus.VIBE]['score'] < estimate['score']
     for now, row in enumerate(samples(), 10):
         store.audio_vibes.save_sample(row, now)
     drain(store, batch=1).close()
     assert fits(store, neighbour)[focus.VIBE]['recordings'] == 1
+    assert focus.VIBE not in fits(store, unrelated)
     history = {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
     monkeypatch.setenv(focus.MODE_KEY, 'off')
     drain(store, batch=1).close()
     assert history <= {r[0] for r in store.conn.execute('SELECT id FROM measurements')}
+    restored = musical_character.load(store, keys)
     for key in keys:
         assert fits(store, key) == before[key]
+        assert home_vibe.affinity({'key': key}, focus.VIBE, restored) == .5
     store.conn.set_trace_callback(None)
     assert store.audio_vibes.feedback(rows[0]['run_id']) == feedback
-    assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
+    assert_only_playback_annotations(statements)
     assert not list(store.conn.execute('PRAGMA foreign_key_check'))

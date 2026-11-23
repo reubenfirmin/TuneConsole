@@ -1,15 +1,18 @@
 """Radio selects the same live lookahead before expanding musical evidence."""
 from copy import deepcopy
+from dataclasses import replace
 from itertools import zip_longest
 import json
 
 import pytest
 
 from tests.conftest import seed_catalog_track
+from tests.group_support import publish, recordings
 from tests.recommendation_support import publish_bundles
 from tests.test_radio_catalog import catalog_track, seed  # noqa: F401 - real prepared-mode fixture
 from yt_playlist.core import json_cache
-from yt_playlist.rec import embedding_vectors, musical_character, musical_profiles, radio_candidates, radio_tuning
+from yt_playlist.rec import (embedding_vectors, musical_character, musical_profiles, radio_candidate_inputs,
+                             radio_candidates, radio_tuning)
 from yt_playlist.rec.stored_radio import PreparedRadio
 from yt_playlist.repos.recommendation_publications import RecommendationPublicationsRepo
 from yt_playlist.core.proposal_codec import encode_proposals
@@ -77,14 +80,16 @@ def test_projected_lookahead_matches_original_order_quota_and_profiles(monkeypat
         return restore(value, profiles)
 
     monkeypatch.setattr(json_cache, '_restore_profiles', observed)
-    decoded = json_cache.decode(encoded, project=lambda value: radio_candidates._initial_projection(
+    decoded = json_cache.decode(encoded, project=lambda value: radio_candidate_inputs.initial_projection(
         value, {'1': {}, '2': {}}, 'space', 'basis', blocked, muted, comfort))
     assert {mid: decoded[mid]['_radio_pool'] for mid in ('1', '2')} == expected
-    assert 'all' not in decoded
+    fresh = [track for track in original['all']['fresh'] if track['video_id']
+             and track['key'] not in blocked and track['artist'].casefold() not in muted]
+    assert decoded['all'] == {'fresh': fresh[:radio_candidates.CLUSTER_POOL_LIMIT]}
     for key in ('_meta', '_ppr', '_radio'):
         assert decoded[key] == original[key]
     if format == 'v2':
-        assert len(restored) == sum(map(len, expected.values()))
+        assert len(restored) == sum(map(len, expected.values())) + len(decoded['all']['fresh'])
     decoded['1']['_radio_pool'][0]['musical']['provenance'][1]['recording'] = 'changed'
     assert decoded['2']['_radio_pool'] == expected['2']
     assert bundles == original
@@ -103,33 +108,52 @@ def test_empty_mode_keeps_indexed_refill_or_the_complete_cold_fallback(catalog):
     elif catalog == 'missing':
         bundles.pop('_radio')
     decoded = json_cache.decode(encode_proposals('mode_bundles', bundles),
-        project=lambda value: radio_candidates._initial_projection(
+        project=lambda value: radio_candidate_inputs.initial_projection(
             value, {'1': {}}, 'space', 'basis', set(), set(), .5))
     assert decoded['1']['_radio_pool'] == []
     if catalog == 'matching':
-        assert 'all' not in decoded
+        assert decoded['all'] == {'fresh': [track for track in bundles['all']['fresh'] if track['video_id']][
+            :radio_candidates.CLUSTER_POOL_LIMIT]}
         assert decoded['_radio']['members'] == bundles['_radio']['members']
     else:
         assert decoded['all'] == bundles['all']
 
 
-@pytest.mark.parametrize('comfort', [0, .5, 1])
-def test_real_constructor_preserves_full_session_state_and_stored_pools(store, seed, monkeypatch, comfort):
+@pytest.mark.parametrize('comfort,spaces', [(0, 'match'), (.5, 'match'), (1, 'match'),
+                                           (.5, 'retained'), (.5, 'changed'), (.5, 'home-only')])
+def test_typed_reserves_load_on_demand_in_original_order(store, monkeypatch, comfort, spaces):
     bundles = _bundles()
     tracks = {track['key']: track for bucket in bundles.values() if isinstance(bucket, dict)
               for items in bucket.values() if isinstance(items, list)
               for track in items if isinstance(track, dict)}
-    for track in tracks.values():
+    corpus = recordings([('Downtempo', 100, .1), ('Jungle', 100, .9)])
+    for track, recording in zip(tracks.values(), corpus):
         track['title'] = track['key']
+        track['genre'] = recording.genre
         track.pop('description')
-        seed_catalog_track(store, track['key'], track['title'], track['artist'], video_id=track['video_id'])
-    profile = musical_character.compact(musical_profiles.resolve([], overrides={'energy': .7}))
+        seed_catalog_track(store, track['key'], track['title'], track['artist'], video_id=track['video_id'],
+                           genre=track['genre'])
+    head = publish(store, [replace(recording, key=key) for key, recording in zip(tracks, corpus)])
+    membership = store.taste_groups.leaf_members(head['generation'])
+    modes = sorted(set(membership.values()))
+    assert len(modes) == 2
+    del bundles['1'], bundles['2']
+    for mode in modes:
+        bundles[mode] = {lane: [track for track in items if membership[track['key']] == mode]
+                         for lane, items in bundles['all'].items()}
+    bundles['_ppr'] = {mode: [key for key in tracks if membership[key] == mode] for mode in modes}
+    bundles['_radio']['members'] = {} if spaces == 'home-only' else bundles['_ppr']
+    profile = musical_character.compact(musical_profiles.resolve([], overrides={'intensity': .7}))
     for track in bundles['all']['wheelhouse']:
         track['musical'] = profile
-    bundles['_radio'].update(space=embedding_vectors.content_space_id(store),
-                              generation=store.settings.get_setting('rec_content_generation'))
+    published_space = embedding_vectors.content_space_id(store) if spaces == 'match' else 'published-space'
+    bundles['_radio'].update(space=published_space,
+                              generation=store.rec_model.recording_state().generation)
     publish_bundles(store, bundles, 1000)
+    if spaces == 'changed':
+        monkeypatch.setattr(embedding_vectors, 'content_space_id', lambda *args, **kwargs: 'different-space')
     head = store.recommendations.head('home')
+    assert json.loads(head['evidence_roots']) == []
     ranks = list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank')))
     tuning = {**radio_tuning.DEFAULTS, 'comfort': comfort}
     batches, candidate_rows = [], RecommendationPublicationsRepo.candidate_rows
@@ -139,12 +163,11 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
         return candidate_rows(self, surface, selections, **kwargs)
 
     monkeypatch.setattr(RecommendationPublicationsRepo, 'candidate_rows', observed_pages)
-    projected = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
-    assert batches and all(len(batch) <= 16 for batch in batches)
-    assert len(batches) < sum(len(batch) for batch in batches), 'Initial lanes must share catalog hydration'
     capture = PreparedRadio.capture_inputs
 
-    def unprojected(self, reader, modes, space, generation, blocked, muted, comfort):
+    def unprojected(self, reader, modes, space, generation, blocked, muted, comfort, *, adaptive=False):
+        if spaces in ('retained', 'changed'):
+            space = published_space
         result, _displays, _pools = capture(self, reader, modes, space, generation, blocked, muted, comfort)
         for mode in modes:
             bucket = {}
@@ -163,31 +186,49 @@ def test_real_constructor_preserves_full_session_state_and_stored_pools(store, s
         # reader, rather than the bounded pools selected by the production capture.
         return result, [], []
 
-    monkeypatch.setattr(PreparedRadio, 'capture_inputs', unprojected)
+    projected = radio_candidates.RadioCandidates(store, 1000, tuning)
     original = None
     try:
-        original = radio_candidates.RadioCandidates(store, 1000, tuning, comparison=False)
-        for field in ('pools', 'prior', 'by_key', 'by_video', 'membership', 'energies',
-                      'fingerprint', 'cluster_members', 'now_posterior', 'now_gain'):
+        assert not batches and not any(projected.pools.values())
+        assert set(projected.cluster_members) == (set() if spaces == 'home-only' else set(modes))
+        projected._initial_track_group_pool(modes[0])
+        assert batches and all(len(batch) <= 16 for batch in batches)
+        assert len(batches) < sum(len(batch) for batch in batches), 'Initial lanes must share catalog hydration'
+        assert {selection[0] for batch in batches for selection in batch} == {modes[0]}
+        assert not projected.pools[modes[1]]
+        projected._initial_track_group_pool(modes[1])
+        monkeypatch.setattr(PreparedRadio, 'capture_inputs', unprojected)
+        original = radio_candidates.RadioCandidates(store, 1000, tuning)
+        for field in ('pools', 'prior', 'cluster_members'):
             assert getattr(projected, field) == getattr(original, field), field
-        assert projected.pools['1']
-        assert store.recommendations.head('home') == head
+        assert set(projected.pools) == set(modes) and all(projected.pools.values())
+        if spaces == 'home-only':
+            seed = projected.pools[modes[0]][0]
+            with projected.prepared.planning_read():
+                assert projected.next_track([seed])
+                assert projected.direction_anchor([seed], [])
+        open_head = store.recommendations.head('home')
+        leases = json.loads(open_head['evidence_roots'])
+        assert len(leases) == 2 and leases[0] != leases[1]
+        assert all(kind == 'pending' and key for kind, key in leases)
+        assert {**open_head, 'evidence_roots': head['evidence_roots']} == head
         assert list(map(tuple, store.conn.execute('SELECT * FROM recommendation_candidates ORDER BY pool_id,rank'))) == ranks
     finally:
         projected.close()
         if original is not None:
             original.close()
+    assert store.recommendations.head('home') == head
 
 
 @pytest.mark.parametrize('value', [None, {}, []])
 def test_missing_prepared_values_still_reach_the_real_catalog_fallback(store, value):
     assert json_cache.decode(encode_proposals('mode_bundles', value)) == value
     seed, entry = catalog_track(store, 'seed')
-    account = store.accounts.upsert_account('Main', 'credential', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     playlist = store.playlists.upsert_playlist(account, 'LIBRARY', 'Library', 1, 'hash', 1)
     store.playlists.set_playlist_tracks(playlist, [entry])
     assert store.recommendations.head('home') is None
-    candidates = radio_candidates.RadioCandidates(store, 1000, comparison=False)
+    candidates = radio_candidates.RadioCandidates(store, 1000)
     try:
         assert candidates.pools['local']
         assert seed['video_id'] in candidates.by_video
@@ -201,7 +242,7 @@ def test_input_reuse_reprojects_current_exclusions_and_refreshes_on_publication(
     cache = json_cache.DecodeCache()
 
     def inputs(blocked):
-        return cache.decode(encoded, project=lambda value: radio_candidates._initial_projection(
+        return cache.decode(encoded, project=lambda value: radio_candidate_inputs.initial_projection(
             value, {'1': {}}, 'space', 'basis', blocked, set(), .5))
 
     first = inputs(set())
@@ -215,14 +256,14 @@ def test_input_reuse_reprojects_current_exclusions_and_refreshes_on_publication(
     assert inputs(set())['_meta']['musical_generation'] == 'replacement'
 
 
-def test_owned_transaction_does_not_wait_for_a_shared_input_decode(store, seed, monkeypatch):
-    def forbidden(_store):
-        pytest.fail('A serving-lock owner must not wait for a shared decoder')
+def test_owned_transaction_uses_the_already_locked_writer(store, seed, monkeypatch):
+    def forbidden(**kwargs):
+        pytest.fail('A serving-lock owner must use its own connection')
 
-    monkeypatch.setattr(radio_candidates, '_input_cache', forbidden)
+    monkeypatch.setattr(store, 'read_view', forbidden)
     prepared = PreparedRadio(store, 1000)
     try:
         with store._lock:
-            assert radio_candidates._prepared_inputs(store, prepared=prepared)[-1]
+            assert radio_candidate_inputs.prepared_inputs(store, prepared=prepared)[-1]
     finally:
         prepared.close()

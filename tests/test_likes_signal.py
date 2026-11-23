@@ -1,6 +1,6 @@
 # tests/test_likes_signal.py
 from tests.retained_rating_support import apply_model_ratings, observe_rating
-from yt_playlist.rec import rec_params
+from yt_playlist.rec import rec_params, transient
 from yt_playlist.util import genre_map
 
 
@@ -19,29 +19,29 @@ def test_retained_likes_preserve_first_seen_order_limit_and_neutral_removal(stor
     assert s.rec_model.recent_liked_keys() == []
 
 
-def test_combined_ratings_graduate_sync_likes_at_low_weight(store):
+def test_combined_sync_like_is_retained_without_recent_or_permanent_influence(store):
     s = store
-    rec_params.set_param(s, "source_w_like_synced", .2)
     tid = s.tracks.upsert_track("v1", "song", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
-    # a sync-discovered like (default provenance) feeds the ledger at the LOW sync-like weight:
-    # a single one must not cross theme_threshold (1.2) on its own
     apply_model_ratings(s, {"song|band": "LIKE"}, 1000.0)
-    fam = genre_map.family("Techno")
-    assert s.rec_model.recent_liked_keys() == ["song|band"]                 # captured
-    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == .2
-    assert rec_params.get_param(s, "source_w_like_synced") < rec_params.get_param(s, "theme_threshold")
+    axis = f"genre:{genre_map.family('Techno')}"
+    assert s.rec_model.recent_liked_keys() == ["song|band"]
     assert s.rec_model.like_provenance("song|band") == "sync"
+    assert s.rec_model.recent_liked_with_ts() == []
+    assert axis not in transient.facet_leans(s, 1000.0)
+    assert axis not in s.rec_model.baseline_weights(now=1000.0)
 
 
-def test_combined_ratings_graduate_action_likes_at_normal_weight(store):
+def test_combined_action_like_contributes_its_configured_recent_weight(store):
     s = store
     tid = s.tracks.upsert_track("v1", "song", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
     apply_model_ratings(s, {"song|band": "LIKE"}, 1000.0, provenance="action")
-    fam = genre_map.family("Techno")
-    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.get_param(s, "source_w_like")
+    axis = f"genre:{genre_map.family('Techno')}"
     assert s.rec_model.like_provenance("song|band") == "action"
+    assert s.rec_model.recent_liked_with_ts() == [("song|band", 1000.0)]
+    assert transient.facet_leans(s, 1000.0)[axis] == rec_params.get_param(s, "like_transient_w")
+    assert axis not in s.rec_model.baseline_weights(now=1000.0)
 
 
 def test_combined_likes_idempotent_on_resync(store):
@@ -49,28 +49,32 @@ def test_combined_likes_idempotent_on_resync(store):
     tid = s.tracks.upsert_track("v1", "song", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
     apply_model_ratings(s, {"song|band": "LIKE"}, 1000.0)
-    apply_model_ratings(s, {"song|band": "LIKE"}, 1001.0)    # re-sync
-    fam = genre_map.family("Techno")
-    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.get_param(s, "source_w_like_synced")  # fed once
+    original = s.rec_model.repository.rating_rows(["song|band"])
+    assert len(original) == 1 and original[0]['created_at'] == 1000.0
+    apply_model_ratings(s, {"song|band": "LIKE"}, 1001.0)
+    assert s.rec_model.repository.rating_rows(["song|band"]) == original
+    assert s.rec_model.recent_liked_with_ts() == []
 
 
-def test_provenance_upgrade_wins_and_does_not_regraduate(store):
+def test_provenance_upgrade_adds_one_recent_like_and_survives_resync(store):
     s = store
     tid = s.tracks.upsert_track("v1", "song", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
-    fam = genre_map.family("Techno")
-    apply_model_ratings(s, {"song|band": "LIKE"}, 1000.0)                       # sync first
+    key = "song|band"
+    axis = f"genre:{genre_map.family('Techno')}"
+    apply_model_ratings(s, {key: "LIKE"}, 1000.0)
     assert s.rec_model.like_provenance("song|band") == "sync"
-    apply_model_ratings(s, {"song|band": "LIKE"}, 1001.0, provenance="action")  # re-observed live
-    assert s.rec_model.like_provenance("song|band") == "action"            # upgraded
-    assert abs(s.rec_signals.get_theme(f"genre:{fam}")) == rec_params.get_param(s, "source_w_like_synced")  # not replayed
-    # and never downgraded back to sync by a later library sync
-    apply_model_ratings(s, {"song|band": "LIKE"}, 1002.0)
-    assert s.rec_model.like_provenance("song|band") == "action"
-
-
-# --- Likes and the transient model: only action-provenance likes feed it ---
-from yt_playlist.rec import transient
+    assert s.rec_model.recent_liked_with_ts() == []
+    apply_model_ratings(s, {key: "LIKE"}, 1001.0, provenance="action")
+    assert s.rec_model.like_provenance(key) == "action"
+    assert s.rec_model.recent_liked_with_ts() == [(key, 1000.0)]
+    lean = transient.facet_leans(s, 1002.0)[axis]
+    assert lean > 0.0
+    apply_model_ratings(s, {key: "LIKE"}, 1002.0)
+    assert s.rec_model.like_provenance(key) == "action"
+    assert s.rec_model.recent_liked_with_ts() == [(key, 1000.0)]
+    assert transient.facet_leans(s, 1002.0)[axis] == lean
+    assert axis not in s.rec_model.baseline_weights(now=1002.0)
 
 
 def test_action_like_lifts_facet_lean(store):
@@ -96,12 +100,13 @@ def test_sync_like_produces_no_transient_lean(store):
     assert s.rec_model.recent_liked_keys() == ["song|band"]  # but the like itself is on record
 
 
-def test_dislike_still_suppresses_and_leans_negative(store):
+def test_combined_dislike_suppresses_the_recording_without_a_genre_penalty(store):
     s = store
     tid = s.tracks.upsert_track("v1", "song", "band", None, None)
     s.tracks.set_track_genre(tid, "Techno")
-    s.settings.set_setting("last_sync_at", "1000")
     apply_model_ratings(s, {"song|band": "DISLIKE"}, 1000.0)
-    fam = genre_map.family("Techno")
-    assert "song|band" in s.rec_model.suppressed_keys("for_you", 1000.0)   # actioned suppression unchanged
-    assert transient.facet_leans(s, 1000.0).get(f"genre:{fam}", 0.0) < 0.0
+    axis = f"genre:{genre_map.family('Techno')}"
+    assert s.rec_model.disliked_with_ts() == [("song|band", 1000.0)]
+    assert s.rec_model.suppressed_keys("for_you", 1000.0) == {"song|band"}
+    assert axis not in transient.facet_leans(s, 1000.0)
+    assert axis not in s.rec_model.baseline_weights(now=1000.0)

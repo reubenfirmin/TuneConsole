@@ -1,10 +1,10 @@
 import tomllib
 from dataclasses import dataclass
 
+
 @dataclass
 class AccountConfig:
     label: str
-    credential_ref: str
     brand_account_id: str | None
     is_master: bool
     account_id: int | None = None
@@ -22,8 +22,10 @@ def validate_accounts(identities) -> None:
     if not identities:
         raise ValueError("add at least one identity")
     for row in identities:
+        if not isinstance(row, dict):
+            raise ValueError('every identity must be a table')
         account_flag(row.get('is_master', False))
-        for field in ("label", "credential_ref", "brand_account_id"):
+        for field in ("label", "brand_account_id"):
             value = row.get(field)
             if value is not None and not isinstance(value, str):
                 raise ValueError(f"{field} must be text")
@@ -50,15 +52,13 @@ def load_accounts(path) -> list[AccountConfig]:
 
 
 def parse_accounts(content) -> list[AccountConfig]:
-    data = tomllib.loads(content)
-    entries = data.get("identity", [])
-    out = [AccountConfig(
-        label=e["label"], credential_ref=e["credential_ref"],
-        brand_account_id=e.get("brand_account_id"),
-        is_master=e.get("is_master", False), account_id=e.get("id")) for e in entries]
-    validate_accounts([{"label": c.label, "credential_ref": c.credential_ref,
-                          "brand_account_id": c.brand_account_id, "is_master": c.is_master,
-                          "id": c.account_id} for c in out])
-    for config in out:
-        config.is_master = bool(config.is_master)
-    return out
+    entries = tomllib.loads(content).get('identity', [])
+    if not isinstance(entries, list):
+        raise ValueError('identity must be an array of tables')
+    return account_configs(entries) if entries else []
+
+
+def account_configs(entries) -> list[AccountConfig]:
+    validate_accounts(entries)
+    return [AccountConfig(row['label'].strip(), (row.get('brand_account_id') or '').strip() or None,
+                          bool(row.get('is_master')), row.get('id')) for row in entries]

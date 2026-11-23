@@ -6,7 +6,7 @@ import math
 from .evidence_ledger import canonical
 
 FORMAT = 'native-metadata-observations-1'
-FIELDS = frozenset(('tags', 'bpm', 'energy', 'danceability', 'mood_party', 'mood_aggressive',
+FIELDS = frozenset(('tags', 'bpm', 'danceability', 'mood_party', 'mood_aggressive',
                     'music_key', 'music_scale', 'mood_happy', 'mood_sad', 'mood_relaxed',
                     'mood_acoustic', 'instrumental', 'loudness', 'dynamic_complexity'))
 MAX_OBSERVATIONS = 64

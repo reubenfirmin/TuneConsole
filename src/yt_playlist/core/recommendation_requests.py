@@ -1,9 +1,16 @@
 """Typed Home demand and held listening windows, separate from prepared output."""
-from . import album_note_requests, genre_identity
+import json
+
+from . import album_note_requests, evidence_maintenance, worker_settings
+from .album_tuning_state import REFRESH
 from .recommendation_work import finite
 
 FORMATS = ('albums', 'mixes', 'radio')
-SURFACES = ('album_menu_refresh', 'home_genre_request', *(f'choice_window:{format}' for format in FORMATS))
+HOME_GENRE = 'home_genre_request'
+HOME_VIBE = 'home_vibe_request'
+VIBE_PHASES = ('pending', 'waiting', 'ready', 'failed')
+SETTINGS = (REFRESH, HOME_GENRE)
+SURFACES = (*SETTINGS, *(f'choice_window:{format}' for format in FORMATS))
 
 
 def _integer(value):
@@ -33,7 +40,7 @@ def parse(surface, value, at):
         if (len(value['opportunity_id'].encode()) > 64 or not isinstance(value['window'], str)
                 or len(value['window'].encode()) > 1024):
             raise ValueError('Invalid listening window identity')
-    elif surface == 'album_menu_refresh':
+    elif surface == REFRESH:
         if set(value) != {'epoch', 'exclude'}:
             raise ValueError('Unclassified album refresh fields')
         _integer(value['epoch'])
@@ -55,69 +62,30 @@ def write(conn, surface, value, at):
     album_note_requests._transaction(conn)
     parse(surface, value, at)
     if surface.startswith('choice_window:'):
-        format = surface.split(':', 1)[1]
-        conn.execute('DELETE FROM listening_choice_windows WHERE format=?', (format,))
-        if value:
-            conn.execute('INSERT INTO listening_choice_windows VALUES (?,?,?,?)',
-                         (format, value['opportunity_id'], value['window'], at))
-    elif surface == 'album_menu_refresh':
-        conn.execute('DELETE FROM album_menu_refresh_exclusions')
-        conn.execute('DELETE FROM album_menu_refresh_state')
-        conn.execute('INSERT INTO album_menu_refresh_state VALUES (1,?,?)', (value.get('epoch'), at))
-        for position, browse in enumerate(value.get('exclude', [])):
-            reference, reason = album_note_requests._reference(conn, browse)
-            conn.execute('INSERT INTO album_menu_refresh_exclusions VALUES (1,?,?,\'youtube\',?,?)',
-                         (position, browse, reference, reason))
+        evidence_maintenance.write_window(conn, surface.split(':')[1], value, at)
+    elif surface == HOME_GENRE and not value and at is None:
+        worker_settings.save(conn, surface, None)
     else:
-        conn.execute('DELETE FROM home_genre_request_items')
-        conn.execute('DELETE FROM home_genre_requests')
-        conn.execute('INSERT INTO home_genre_requests VALUES (1,?,?,?,?,?,?)',
-                     (value.get('epoch'), int('include_genres' in value), int('avoid_genres' in value),
-                      int(value['held_by_vibe']) if 'held_by_vibe' in value else None,
-                      int(value['suspended_by_vibe']) if 'suspended_by_vibe' in value else None, at))
-        for field, kind in (('include_genres', 'include'), ('avoid_genres', 'avoid')):
-            for position, raw in enumerate(value.get(field, [])):
-                family = conn.execute('SELECT key FROM genre_family WHERE key=?', (raw,)).fetchone()
-                genre, reason = (None, None) if family else genre_identity.resolve(conn, raw.removeprefix('other:'))
-                conn.execute('INSERT INTO home_genre_request_items VALUES (1,?,?,?,?,?,?)',
-                             (kind, position, raw, family[0] if family else None, genre,
-                              reason if reason else None))
+        worker_settings.save(conn, surface, json.dumps({**value, 'updated_at': at}))
 
 
 def present(conn, surface):
-    if surface.startswith('choice_window:'):
-        return conn.execute('SELECT 1 FROM listening_choice_windows WHERE format=?',
-                            (surface.split(':', 1)[1],)).fetchone() is not None
-    if surface == 'album_menu_refresh':
-        return conn.execute('SELECT 1 FROM album_menu_refresh_state WHERE id=1 AND epoch IS NOT NULL').fetchone() is not None
-    if surface != 'home_genre_request':
-        raise ValueError('Unknown recommendation demand owner')
-    return conn.execute('SELECT 1 FROM home_genre_requests WHERE id=1 AND '
-        '(epoch IS NOT NULL OR has_includes OR has_avoids OR held_by_vibe IS NOT NULL '
-        'OR suspended_by_vibe IS NOT NULL)').fetchone() is not None
+    if surface in SURFACES and surface.startswith('choice_window:'):
+        return evidence_maintenance.window(conn, surface.split(':')[1]) is not None
+    if surface in SETTINGS:
+        return conn.execute("SELECT 1 FROM settings WHERE key=? AND json_type(value,'$.epoch')='integer'",
+                            (surface,)).fetchone() is not None
+    raise ValueError('Unknown recommendation demand owner')
 
 
 def read(conn, surface):
-    if surface.startswith('choice_window:'):
-        row = conn.execute('SELECT opportunity_key,window_text FROM listening_choice_windows WHERE format=?',
-                            (surface.split(':', 1)[1],)).fetchone()
-        return {'opportunity_id': row[0], 'window': row[1]} if row else None
-    if surface == 'album_menu_refresh':
-        row = conn.execute('SELECT epoch FROM album_menu_refresh_state WHERE id=1').fetchone()
-        return ({'epoch': row[0], 'exclude': [item[0] for item in conn.execute(
-            'SELECT browse_id FROM album_menu_refresh_exclusions ORDER BY position')]} if row and row[0] is not None
-                else {} if row else None)
-    if surface != 'home_genre_request':
-        raise ValueError('Unknown recommendation demand owner')
-    row = conn.execute('SELECT * FROM home_genre_requests WHERE id=1').fetchone()
-    if row is None:
-        return None
-    result = {'epoch': row['epoch']} if row['epoch'] is not None else {}
-    for field, flag, kind in (('include_genres', 'has_includes', 'include'), ('avoid_genres', 'has_avoids', 'avoid')):
-        if row[flag]:
-            result[field] = [item[0] for item in conn.execute(
-                'SELECT raw_key FROM home_genre_request_items WHERE kind=? ORDER BY position', (kind,))]
-    for field in ('held_by_vibe', 'suspended_by_vibe'):
-        if row[field] is not None:
-            result[field] = bool(row[field])
-    return result
+    if surface in SURFACES and surface.startswith('choice_window:'):
+        return evidence_maintenance.window(conn, surface.split(':')[1])
+    if surface in SETTINGS:
+        raw = worker_settings.read(conn, surface)
+        if raw is None:
+            return None
+        value = json.loads(raw)
+        value.pop('updated_at')
+        return value
+    raise ValueError('Unknown recommendation demand owner')

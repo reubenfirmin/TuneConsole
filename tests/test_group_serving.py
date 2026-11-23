@@ -6,6 +6,7 @@ from tests.recommendation_support import publish_bundles, seed_publication_subje
 from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema, native_sql_calls, reuse_reporting_reader,
 )
+from yt_playlist.core import content_work
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.rec import group_serving
 from yt_playlist.web.app import create_app
@@ -123,7 +124,7 @@ def pools(store, tracks, *, one_album=False):
     pool = catalog_inputs(tracks, one_album=one_album)
     seed_missing(store, pool)
     with atomic_write(store):
-        store.conn.executemany('UPDATE youtube_items SET album=? WHERE video_id=?',
+        store.conn.executemany('UPDATE track_sources SET album=? WHERE video_id=?',
                                [(item['album'], item['video_id']) for item in pool])
     publish_bundles(store, {'all': {'wheelhouse': pool, 'fresh': pool}})
 
@@ -192,6 +193,51 @@ def test_prepared_preview_has_exact_versions_and_never_creates_shadow_offers(sto
     assert not group_serving.view(store)['updating']
 
 
+def test_library_membership_invalidates_unfinished_preview_and_retains_completed_preview(store, monkeypatch):
+    from yt_playlist.core.activity import WorkBudgetExceeded
+
+    tracks = recordings([('House', 20, .4)])
+    head = publish(store, tracks)
+    pools(store, tracks)
+    account = store.accounts.upsert_account('Listener', None, True)
+    album = {'browse': 'saved-album', 'title': 'Saved Album'}
+    source_id, recording_id = store.conn.execute(
+        "SELECT id,recording_id FROM track_sources WHERE video_id='v0'").fetchone()
+    store.collection.add_saved_album(album, account_id=account)
+    store.collection.cache_album_tracklist(album['browse'], album['title'], '', None, [],
+                                           entries=[{'entry_id': source_id}])
+    membership = 'SELECT in_collection_album FROM recordings WHERE id=?'
+    assert store.conn.execute(membership, (recording_id,)).fetchone()[0] == 1
+    previous = group_serving.prepare(store, 1100)
+    assert previous['generation'] == head['generation']
+
+    replacement = publish(store, tracks, 1200, head)
+    prepare_candidates = group_serving.prepare_candidates
+
+    def pause_after_candidates(*args, **kwargs):
+        prepare_candidates(*args, **kwargs)
+        raise WorkBudgetExceeded('pause after reading Library-dependent candidates')
+
+    with monkeypatch.context() as patch:
+        patch.setattr(group_serving, 'prepare_candidates', pause_after_candidates)
+        assert group_serving.prepare(store, 1300) is None
+    pending = group_serving._preparation(store).pending
+    assert pending.progress['frames'] and pending.current(1300)
+    assert any(table == 'recordings' for table, _ in pending.guard.store._snapshot_reads.dependencies)
+
+    store.collection.remove_saved_album(album['browse'], account_id=account)
+    assert store.conn.execute(membership, (recording_id,)).fetchone()[0] == 0
+    assert not pending.current(1300)
+    assert store.rec_proposals.get_proposals(group_serving.SURFACE) == previous
+    retained = group_serving.view(store)
+    assert retained['updating'] and retained['generation'] == previous['generation']
+
+    updated = group_serving.Preparation(store).step(1400, 10)
+    assert updated['generation'] == replacement['generation']
+    published = group_serving.view(store)
+    assert published['generation'] == updated['generation'] and not published['updating']
+
+
 def test_taste_preview_uses_prepared_names_without_loading_or_fitting_membership(store, monkeypatch):
     tracks = recordings([('House', 20, .1), ('House', 20, .95)])
     publish(store, tracks)
@@ -210,7 +256,7 @@ def test_taste_preview_uses_prepared_names_without_loading_or_fitting_membership
 def test_progress_separates_recordings_from_source_jobs_and_explains_failures(store):
     from yt_playlist.rec import group_preparation
     with store.conn:
-        store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('pending')")
+        content_work.enqueue(store.conn, ('pending',))
         store.conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id,revision) '
                            "VALUES ('source','test','artist','artist',1)")
     group_preparation.report(store, 'failed', 1000, reason='preparation-failed')

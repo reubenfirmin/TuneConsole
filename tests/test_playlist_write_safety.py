@@ -21,8 +21,8 @@ def transfer(store, monkeypatch, tmp_path):
     capture = partial(undo_capture.capture_post, sleep=capture_delays.append)
     monkeypatch.setattr(undo_capture, 'capture_post', capture)
     monkeypatch.setattr(executor, '_capture_post', capture)
-    source_identity = store.accounts.upsert_account("Source", "bridge", None, True)
-    target_identity = store.accounts.upsert_account("Target", "bridge", None, False)
+    source_identity = store.accounts.upsert_account("Source", None, True)
+    target_identity = store.accounts.upsert_account("Target", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(source_identity, "SOURCE", "Original", 2, "", 1)

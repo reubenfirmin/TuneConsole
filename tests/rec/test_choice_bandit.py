@@ -16,7 +16,7 @@ def _pristine_current_schema():
 def test_bandit_input_keeps_empty_evidence_and_real_guards(_pristine_current_schema):
     assert _pristine_current_schema.execute('PRAGMA query_only').fetchone()[0] == 1
     assert _pristine_current_schema._revision_script
-    assert not _pristine_current_schema.execute('SELECT 1 FROM choice_mode_estimates').fetchone()
+    assert not _pristine_current_schema.execute("SELECT 1 FROM settings WHERE key GLOB 'choice_learned:*'").fetchone()
     assert not _pristine_current_schema.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -136,8 +136,8 @@ def test_interrupted_findings_retain_completed_publications_and_retry_withdrawal
     old_interests = store.rec_proposals.get_proposals('choice_interests')
     assert old['bandit']['rows'] and old_interests['contexts']
     choices.respond(store, oid, 'withdraw', 104, details={'action_id': 'menu:choice:one'})
-    store.conn.execute("CREATE TEMP TRIGGER fail_choice_publication BEFORE UPDATE ON choice_learning_heads "
-                       "WHEN NEW.surface='choice_interests' BEGIN SELECT RAISE(ABORT,'interrupted'); END")
+    store.conn.execute("CREATE TEMP TRIGGER fail_choice_publication BEFORE INSERT ON settings "
+                       "WHEN NEW.key='choice_learned:choice_interests' BEGIN SELECT RAISE(ABORT,'interrupted'); END")
     try:
         with pytest.raises(sqlite3.IntegrityError, match='interrupted'):
             choices.compile_report(store, 105)

@@ -30,11 +30,17 @@ class PlaybackFeedback:
             if admitted:
                 self.queue.replaying.release()
 
-    def apply_observation(self, row, project):
+    def apply_observation(self, row, prepare, project):
         with self.repository.try_access() as available:
             if not available or self.store.activity_paused:
-                return False
-            if not self.repository.has_receipt(row['capture_id']):
-                result = project(self.store, row)
-                self.repository.record_receipt(row, bool(result))
-        return True
+                return None
+            result = self.repository.receipt_result(row['capture_id'])
+            if result is not None:
+                return result
+            row = prepare(self.store, row)
+            with self.repository.projection():
+                result = self.repository.receipt_result(row['capture_id'])
+                if result is None:
+                    result = bool(project(self.store, row))
+                    self.repository.record_receipt(row, result)
+        return result

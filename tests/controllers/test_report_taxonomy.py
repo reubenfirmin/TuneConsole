@@ -37,11 +37,11 @@ def test_energy_uses_explicit_family_priors_unknown_default_and_acoustic_blend(d
     meta = {'one': ('A', 'House'), 'two': ('B', 'Unknown')}
     axes = {'House': ('techno', None), 'Unknown': ('other:unknown', None)}
     plays = {'one': 1, 'two': 1}
-    value, source = recap_story.energy_axis(plays, {}, meta, genre_axes=axes)
-    assert value == pytest.approx(.65) and source == 'genre'
-    value, source = recap_story.energy_axis(plays, {'one': {'energy': .2}}, meta, genre_axes=axes)
-    assert value == pytest.approx(.425) and source == 'genre'
-    assert recap_story.energy_axis({}, {}, {}, genre_axes={}) == (.5, 'genre')
+    value, covered, total = recap_story.energy_axis(plays, {}, meta, genre_axes=axes)
+    assert value == pytest.approx(.65) and (covered, total) == (0, 2)
+    value, covered, total = recap_story.energy_axis(plays, {'one': {'energy': .2}}, meta, genre_axes=axes)
+    assert value == pytest.approx(.425) and (covered, total) == (1, 2)
+    assert recap_story.energy_axis({}, {}, {}, genre_axes={}) == (.5, 0, 0)
 
 
 def test_profile_uses_supplied_family_even_when_null_and_requires_uncaptured_metadata(detached):
@@ -70,7 +70,7 @@ def test_preparation_passes_captured_family_distances_to_actual_month_calculatio
     genres = Mock(spec_set=['feature_axes'])
     genres.feature_axes.return_value = {'House': ('house', None), 'Ambient': ('ambient', None)}
     source = NS(trends=trends, genres=genres, family_adjacency={'house': {'ambient': .6}})
-    monkeypatch.setattr(trend_preparation, 'assemble', lambda s, now, counts, meta, months: months)
+    monkeypatch.setattr(trend_preparation, 'assemble', lambda s, now, counts, meta, months, *, artist_first: months)
     assert trend_preparation.calculate(source, 1000)[0]['diversity'] == pytest.approx(.3)
 
 
@@ -87,7 +87,7 @@ def test_captured_adjacency_and_energy_preserve_installed_taxonomy_without_later
         assert stats.family_distance(a, b, adjacency) == distance
     for label, energy in energies.items():
         assert recap_story.energy_axis({'one': 1}, {}, {'one': ('A', label)},
-                                      genre_axes=axes) == (energy, 'genre')
+                                      genre_axes=axes) == (energy, 0, 1)
     with pytest.raises(TypeError):
         adjacency['new'] = {}
     family = next(iter(adjacency))

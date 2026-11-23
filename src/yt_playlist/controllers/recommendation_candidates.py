@@ -17,6 +17,9 @@ class RecommendationCandidates:
             comfort_criteria(now, min_plays, recency_full_days), keys=keys,
             maximum_duration=self.eligibility.maximum_duration(), order=COMFORT_ORDER, limit=limit)
 
+    def comfort_facts(self, keys):
+        return self.repository.comfort_facts(keys=keys, maximum_duration=self.eligibility.maximum_duration())
+
     def more_like_rotation(self, seed_limit=40, limit=40):
         return self.repository.more_like_rotation(
             seed_limit=seed_limit, limit=limit, maximum_plays=1, order=ROTATION_ORDER,

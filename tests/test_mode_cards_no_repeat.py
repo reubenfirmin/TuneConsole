@@ -43,9 +43,9 @@ def _bundle(store, keys):
 
 def _generated_playlist(store, keys):
     """Put `keys` into a playlist tagged as generated, the way create_generated_playlist does."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PLGEN", "More in your wheelhouse - #1", len(keys), "h", 1.0)
-    tids = [store.conn.execute('SELECT e.id FROM catalog_entries e JOIN recordings r '
+    tids = [store.conn.execute('SELECT e.id FROM track_sources e JOIN recordings r '
                               'ON r.id=e.recording_id WHERE r.identity_key=?', (key,)).fetchone()[0]
             for key in keys]
     store.playlists.set_playlist_tracks(pid, tids)

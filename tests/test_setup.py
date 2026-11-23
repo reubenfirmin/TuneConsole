@@ -1,6 +1,5 @@
 import pytest
-from yt_playlist.core import setup as setup_mod
-from yt_playlist.core.config import load_accounts, validate_accounts
+from yt_playlist.core.config import account_configs, validate_accounts
 
 
 def test_validate_identities_rules():
@@ -19,57 +18,8 @@ def test_validate_identities_rules():
         validate_accounts([{"label": "a", "is_master": True}, {"label": "b", "is_master": True}])
 
 
-def test_write_config_roundtrips(tmp_path):
-    identities = [
-        {"label": "main", "credential_ref": "browser.json", "brand_account_id": None, "is_master": True},
-        {"label": "brand", "credential_ref": "browser.json", "brand_account_id": "UC123", "is_master": False},
-    ]
-    path = tmp_path / "config.toml"
-    setup_mod.write_config(identities, path)
-    cfgs = load_accounts(path)
-    assert [c.label for c in cfgs] == ["main", "brand"]
-    assert sum(c.is_master for c in cfgs) == 1
-    main = next(c for c in cfgs if c.label == "main")
-    brand = next(c for c in cfgs if c.label == "brand")
-    assert main.brand_account_id is None and main.is_master
-    assert brand.brand_account_id == "UC123" and not brand.is_master
-
-
-def test_write_config_escapes_quotes(tmp_path):
-    identities = [{"label": 'we"ird', "credential_ref": "browser.json",
-                   "brand_account_id": None, "is_master": True}]
-    path = tmp_path / "config.toml"
-    setup_mod.write_config(identities, path)
-    cfgs = load_accounts(path)
-    assert cfgs[0].label == 'we"ird'
-
-
-def test_write_config_rejects_no_master(tmp_path):
-    with pytest.raises(ValueError, match="exactly one"):
-        setup_mod.write_config(
-            [{"label": "a", "credential_ref": "browser.json", "brand_account_id": None, "is_master": False}],
-            tmp_path / "config.toml")
-
-
 @pytest.mark.parametrize("value", ['line\nnext', 'tab\tstop', 'carriage\rreturn',
     'null\x00byte', 'bell\x07byte', 'delete\x7fbyte', 'quote"slash\\', 'music 🎵'])
-def test_accepted_text_roundtrips_all_toml_controls(tmp_path, value):
-    path = tmp_path / "config.toml"
-    setup_mod.write_config([{"label": value, "credential_ref": value,
-                            "brand_account_id": value, "is_master": True}], path)
-    cfg = load_accounts(path)[0]
-    assert cfg.label == cfg.credential_ref == cfg.brand_account_id == value
-
-
-def test_failed_flush_preserves_complete_previous_file(tmp_path, monkeypatch):
-    path = tmp_path / "config.toml"
-    rows = [{"label": "main", "credential_ref": "browser.json", "is_master": True}]
-    setup_mod.write_config(rows, path)
-    previous = path.read_bytes()
-    def fail(fd):
-        raise OSError("disk write failed")
-    monkeypatch.setattr('yt_playlist.core.config_files.os.fsync', fail)
-    with pytest.raises(OSError, match="disk write"):
-        setup_mod.write_config([{**rows[0], "label": "new"}], path)
-    assert path.read_bytes() == previous
-    assert list(tmp_path.iterdir()) == [path]
+def test_account_setup_preserves_supported_text(value):
+    cfg, = account_configs([{"label": value, "brand_account_id": value, "is_master": True}])
+    assert cfg.label == cfg.brand_account_id == value

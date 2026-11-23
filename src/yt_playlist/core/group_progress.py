@@ -1,14 +1,12 @@
-"""Bounded progress owner extending the frozen v94 grouping phase domain.
-
-The historical table still owns its fit/generation checkpoint. Its original
-progress fields remain retained after this independently recorded replacement.
-"""
+"""Grouping progress and the installed schema that previously owned it."""
 import json
 import math
 
 from .schema_contract import MigrationError
+from .worker_settings import read as read_setting, save
 
 TABLE = 'group_preparation_progress'
+SETTING = 'group_worker_progress'
 PHASES = ('preparing', 'ready', 'deferred', 'failed')
 SQL = f'''CREATE TABLE {TABLE} (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
@@ -64,8 +62,7 @@ def install(conn):
 
 
 def read(conn, default=None):
-    row = conn.execute(f'SELECT phase,reported_at,reason FROM {TABLE} WHERE singleton=1').fetchone()
-    return json.dumps({'phase': row[0], 'at': row[1], 'reason': row[2]}) if row and row[0] else default
+    return read_setting(conn, SETTING, default)
 
 
 def write(conn, value):
@@ -79,6 +76,5 @@ def write(conn, value):
     if not ((phase is None and at is None and reason is None)
             or (isinstance(phase, str) and phase in PHASES and at is not None)):
         raise ValueError('Grouping progress requires its phase and recorded time; original retained')
-    conn.execute(f'INSERT INTO {TABLE} VALUES (1,?,?,?) ON CONFLICT(singleton) DO UPDATE SET '
-                 'phase=excluded.phase,reported_at=excluded.reported_at,reason=excluded.reason',
-                 (phase, at, reason))
+    raw = json.dumps({'phase': phase, 'at': at, 'reason': reason}, allow_nan=False) if phase else None
+    save(conn, SETTING, raw)

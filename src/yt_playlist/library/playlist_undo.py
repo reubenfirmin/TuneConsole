@@ -208,7 +208,7 @@ def _delete_copy(store, clients, step, save, now, files):
             raise ValueError('The prior copy deletion outcome is unknown. The playlist still appears present; '
                              'it was preserved and no deletion was replayed. Recheck this same Undo later.')
         require_unchanged_copy(step.get("post"), playlist_state(detail))
-        if store.actions.has_durable_targets() and not step.get('deletion_backup'):
+        if not step.get('deletion_backup'):
             from yt_playlist.library.playlist_backups import backup_remote_playlist
             step['deletion_backup'] = backup_remote_playlist(
                 store,step['identity'],step['ytm'],detail.get('title'),now,detail,files=files)

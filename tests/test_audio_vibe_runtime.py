@@ -96,7 +96,7 @@ def test_one_specialist_failure_preserves_other_five(module, vibe, error_type, m
     monkeypatch.setattr(module, 'load', fail)
     after = predictor.predict(rows)
     assert set(after['individual_models']) == set(VIBES) - {vibe}
-    assert after['arc'] == before['arc']
+    assert after['sample_count'] == before['sample_count']
     for other in set(VIBES) - {vibe}:
         assert after['individual_models'][other] == before['individual_models'][other]
         assert after['suitability'][other] == before['suitability'][other]

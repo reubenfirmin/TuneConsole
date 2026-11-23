@@ -1,19 +1,19 @@
 """Catalog rekeys preserve exact draft decisions and fence earlier workers."""
-from yt_playlist.core import catalog, road_trip_draft_storage
+from yt_playlist.core import catalog
 
 
 def test_draft_admission_retains_labels_without_replacing_existing_corrections(store):
-    store.accounts.upsert_account('Account', 'account.json', None, True)
+    store.accounts.upsert_account('Account', None, True)
     recipe = store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 60, 1)
     known = store.tracks.upsert_track('known', 'Provider title', 'Provider artist', None, 100)
     with store.conn:
         catalog.choose_field(store.conn, known, 'title', 'My corrected title')
         catalog.choose_field(store.conn, known, 'artist', 'My corrected artist')
-        road_trip_draft_storage.save(store.conn, recipe, {
-            'revision': 'selected', 'picks': ['known', 'passenger'], 'banned': [],
-            'pool': [{'video_id': 'known', 'title': 'Provider title', 'artist': 'Provider artist'},
-                     {'video_id': 'passenger', 'title': 'Passenger title', 'artist': 'Passenger artist'}],
-        }, 10)
+    store.road_trip.save_road_trip_draft(recipe, {
+        'revision': 'selected', 'picks': ['known', 'passenger'], 'banned': [],
+        'pool': [{'video_id': 'known', 'title': 'Provider title', 'artist': 'Provider artist'},
+                 {'video_id': 'passenger', 'title': 'Passenger title', 'artist': 'Passenger artist'}],
+    }, 10)
     assert [tuple(row) for row in store.conn.execute(
         'SELECT video_id,title,artist FROM catalog_tracks ORDER BY video_id')] == [
             ('known', 'My corrected title', 'My corrected artist'),
@@ -29,7 +29,7 @@ def test_draft_admission_retains_labels_without_replacing_existing_corrections(s
 
 
 def test_rekey_draft_changes_only_declared_keys_and_fences_stale_completion(store):
-    store.accounts.upsert_account('Account', 'account.json', None, True)
+    store.accounts.upsert_account('Account', None, True)
     recipe = store.road_trip.save_road_trip_recipe(None, 'Trip', 50, [], [], 60, 1)
     first = store.tracks.upsert_track('one', 'One', 'Artist', None, 100)
     second = store.tracks.upsert_track('two', 'Two', 'Artist', None, 100)
@@ -38,13 +38,10 @@ def test_rekey_draft_changes_only_declared_keys_and_fences_stale_completion(stor
     state = {'revision': 'worker-input', 'keys': [old, old], 'label': old,
              'pool': [{'key': old, 'identity_key': old, 'video_id': 'one', 'label': old}],
              'picks': ['two', 'one', 'two'], 'banned': ['one'], 'building': True}
-    with store.conn:
-        road_trip_draft_storage.save(store.conn, recipe, state, 10)
-    before = dict(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone())
-    selections = [tuple(row) for row in store.conn.execute(
-        'SELECT * FROM road_trip_draft_entries ORDER BY selection_state,position')]
+    store.road_trip.save_road_trip_draft(recipe, state, 10)
+    before = dict(store.conn.execute('SELECT * FROM road_trip_recipes').fetchone())
     store.recording_keys.add_alias(old, target['recording_id'], 'test')
-    revised = road_trip_draft_storage.get(store.conn, recipe)
+    revised = store.road_trip.get_road_trip_draft(recipe)
     current_key = store.tracks.catalog_subject(first)['identity_key']
     assert current_key != old
     assert revised['keys'] == [current_key, current_key]
@@ -53,31 +50,23 @@ def test_rekey_draft_changes_only_declared_keys_and_fences_stale_completion(stor
     assert revised['label'] == revised['pool'][0]['label'] == old
     assert revised['picks'] == state['picks'] and revised['banned'] == state['banned']
     assert revised['revision'] != state['revision']
-    after = dict(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone())
-    for field in ('id', 'recipe_id', 'account_id', 'state', 'updated_at'):
+    after = dict(store.conn.execute('SELECT * FROM road_trip_recipes').fetchone())
+    for field in ('id', 'draft_id', 'draft_account_id', 'draft_state', 'draft_updated_at', 'draft_selections'):
         assert after[field] == before[field]
-    # Account reconciliation may update recording references; it cannot reorder
-    # or substitute the exact upload decisions.
-    assert [tuple(row) for row in store.conn.execute(
-        'SELECT draft_id,selection_state,position,entry_id,video_id FROM road_trip_draft_entries '
-        'ORDER BY selection_state,position')] == [tuple(row[index] for index in (0, 1, 2, 4, 5)) for row in selections]
-    with store.conn:
-        assert not road_trip_draft_storage.save(store.conn, recipe, state, 20,
-            expected_revision='worker-input', conditional=True)
-    assert road_trip_draft_storage.get(store.conn, recipe) == revised
+    assert not store.road_trip.replace_road_trip_draft(recipe, state, 20, expected_revision='worker-input')
+    assert store.road_trip.get_road_trip_draft(recipe) == revised
     with store.read_view() as reopened:
-        assert road_trip_draft_storage.get(reopened.conn, recipe) == revised
+        assert reopened.road_trip.get_road_trip_draft(recipe) == revised
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 
 def test_rekey_preserves_unknown_draft_format_verbatim(store):
-    store.accounts.upsert_account('Account', 'account.json', None, True)
+    store.accounts.upsert_account('Account', None, True)
     recipe = store.road_trip.save_road_trip_recipe(None, 'Future trip', 50, [], [], 60, 1)
     future = {'revision': 'future-worker', 'catalog_state_version': 999, 'keys': ['original'],
               'picks': ['exact-upload'], 'banned': []}
-    with store.conn:
-        road_trip_draft_storage.save(store.conn, recipe, future, 10)
-    before = tuple(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone())
+    store.road_trip.save_road_trip_draft(recipe, future, 10)
+    before = tuple(store.conn.execute('SELECT * FROM road_trip_recipes').fetchone())
     store.road_trip.rekey_recordings({'original': 'replacement'})
-    assert tuple(store.conn.execute('SELECT * FROM road_trip_drafts').fetchone()) == before
-    assert road_trip_draft_storage.get(store.conn, recipe) == future
+    assert tuple(store.conn.execute('SELECT * FROM road_trip_recipes').fetchone()) == before
+    assert store.road_trip.get_road_trip_draft(recipe) == future

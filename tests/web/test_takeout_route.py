@@ -27,7 +27,7 @@ def _entry(title, artist, vid, iso):
 
 @pytest.fixture
 def takeout_app(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("vidA", "Suave", "Danny Wabbit", "", 200)
     rec_worker = _FakeRecWorker()
     templates = web_templates(directory=_TEMPLATES_DIR)

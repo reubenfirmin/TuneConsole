@@ -6,6 +6,7 @@ import pytest
 from yt_playlist.core import fao
 from yt_playlist.core.metadata_observations import MetadataObservation
 from yt_playlist.rec import musical_preparation
+from yt_playlist.rec.vibe_score_policy import score_patterns
 
 
 def seed_source(store):
@@ -32,7 +33,7 @@ def test_profile_repository_reads_detach_references_without_files_or_begin(store
         assert facts[0][0][0] == source
         refs = repository.profile_references(['song|artist'])
         assert refs[0][1] == '' and refs[0][5] is not None
-        assert repository.readiness_rows(['song|artist'])[0][:3] == ('song|artist', 'v', digest)
+        assert repository.readiness_rows(['song|artist'], patterns=score_patterns())[0][:3] == ('song|artist', 'v', digest)
         source_digest = facts[0][0][3]
         assert repository.provenance_references('song|artist', [source_digest])[0][0] == source
     finally:
@@ -52,7 +53,8 @@ def test_profile_files_are_written_before_the_repository_transaction(store, monk
 
     monkeypatch.setattr(fao, 'prepare', outside_transaction)
     assert musical_preparation.source_step(store, 30)
-    assert not store.conn.execute('SELECT 1 FROM rec_musical_pending WHERE source_key=?', (source,)).fetchone()
+    assert not store.conn.execute('SELECT 1 FROM rec_musical_sources WHERE source_key=? AND pending_position IS NOT NULL',
+                                  (source,)).fetchone()
     body = '{"version":"v","dimensions":{}}'
     digest = hashlib.sha256(body.encode()).hexdigest()
     store.musical_profiles.publish_recordings([('song|artist', body, 'v', digest)], 31)

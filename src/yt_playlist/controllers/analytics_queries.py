@@ -99,7 +99,7 @@ class AnalyticsQueries:
             owners = reader.collection.saved_album_owners()
             identities = reader.collection.canonical_album_ids(
                 [a.get('browse') for a in collection] +
-                [a.get('browse_id') for a in (info or {}).get('albums', [])])
+                [a.get('browse_id') for a in ((info or {}).get('albums') or [])])
         return {'artist': name, 'info': info, 'songs': songs, 'collection': collection,
                 'saved_ids': saved_ids, 'saved_owners': owners, 'identities': identities}
 
@@ -112,7 +112,8 @@ class StoryQueries:
         story = (self.proposals.get_proposals('trend_rollups') or {}).get('story')
         if not story or story.get('month') != month:
             return None
-        if any('groups' in beat for beat in story['beats']):
+        if any('groups' in beat or (beat['kind'] == 'personality' and 'audio_plays' not in beat)
+               for beat in story['beats']):
             self.refresh()
         return story
 

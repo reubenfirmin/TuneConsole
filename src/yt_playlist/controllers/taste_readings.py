@@ -2,13 +2,13 @@
 import time
 
 from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core.rec_model_policy import PERMANENT_SURFACE
 from yt_playlist.rec import taste_display as display
 
 
 class TasteReadings:
-    def __init__(self, *, queries, analysis, parameter, configuration, files=False):
+    def __init__(self, *, queries, analysis, parameter, configuration):
         self.q, self.a, self.parameter, self.configuration = queries, analysis, parameter, configuration
-        self.files = files
 
     def mix_choices(self, now=None):
         if preview := self.a.group_prepared():
@@ -46,15 +46,7 @@ class TasteReadings:
         return examples
 
     def generated_playlists(self, now):
-        if self.files:
-            examples = self._stored_examples(now)
-        else:
-            bundles = self.q.proposals.get_proposals('mode_bundles') or {}
-            blocked, muted = self.q.model.suppressed_keys('for_you', now), self.q.model.muted_artists()
-            examples = {source: next((t for t in bundles.get('all', {}).get(source, [])
-                if t.get('key') not in blocked and t.get('artist') not in muted), None)
-                for source in ('wheelhouse', 'explore', 'fresh', 'comfort')}
-        return {'choices': self.mix_choices(now), 'examples': examples,
+        return {'choices': self.mix_choices(now), 'examples': self._stored_examples(now),
             'taste_rank_ready': bool(self.a.playlist_taste()),
             'catalog_content_percent': self.configuration.catalog_content_percent,
             **{key: self.parameter(name) for key, name in (
@@ -65,7 +57,8 @@ class TasteReadings:
         half = self.parameter('weight_revert_halflife_d')
         return display.source_weights(self.q.model.get_weights(now=now, revert_halflife_d=half),
             self.q.model.weight_records(), now, halflife=half,
-            lane_definitions=self.configuration.lanes, lane_default=self.configuration.lane_default)
+            lane_definitions=self.configuration.lanes, lane_default=self.configuration.lane_default,
+            session=self.q.model.get_session_weights(now))
 
     def overview(self, now, profiles=None):
         breadth = self.a.breadth()
@@ -75,11 +68,10 @@ class TasteReadings:
             n, modes = grouped['session']['n'], grouped['modes']
             current = modes
         else:
-            shares, n, current = self.a.session_mix(now)
-            modes = self.q.modes.list_modes(active_only=True)
+            shares, n, current, modes = {}, 0, [], []
         week = now - 7 * 86400
         return display.overview(breadth, modes=modes, shares=shares, n=n, current_modes=current, profiles=profiles,
-            coverage=self.q.history.listening_comparison_coverage(now - 86400, now, exclude_list_ids=self.a.radio_ids()),
+            coverage=self.a.today_coverage(now),
             ratings=self.q.model.recent_rating_inputs(week, now),
             changes=self.q.signals.recent_graduations(limit=3, since=week, until=now))
 
@@ -87,38 +79,33 @@ class TasteReadings:
         return display._artist_shares(self.q.charts.top_artists(limit=1_000_000), top)
 
     def mode_layers(self, now):
-        if preview := self.a.group_prepared():
-            return self.a.group_layers(now, preview)
-        window = self.parameter('now_window_h')
-        recent = self.a.recent(now, window_h=max(24, window))
-        now_shares, now_n, current = self.a.now_mix(now, evidence=recent)
-        session_shares, session_n, _ = self.a.session_mix(now, evidence=recent)
-        return display.mode_layers(self.q.modes.list_modes(active_only=True),
-            now_shares=now_shares, now_n=now_n, current_modes=current,
-            session_shares=session_shares, session_n=session_n, evidence=self.a.coverage(now, evidence=recent),
-            now_window=window, session_half=self.parameter('session_halflife_h'), minimum=self.parameter('now_min_events'))
+        preview = self.a.group_prepared() or {'generation': None, 'groups': []}
+        return self.a.group_layers(now, preview, observed=True)
 
     def _sources(self, now):
-        limit = self.parameter('recent_play_limit')
-        half = {source: self.parameter(source + '_halflife_d') for source in ('mood', 'play', 'like', 'dislike', 'skip')}
-        weights = {source: self.parameter(source + '_transient_w') for source in ('play', 'like', 'dislike', 'skip')}
+        half = {source: self.parameter(source + '_halflife_d') for source in ('mood', 'play', 'like', 'skip')}
+        weights = {source: self.parameter(source + '_transient_w') for source in ('play', 'like', 'skip')}
         weights['mood'] = 1.
-        return display._sources(now, mood_events=self.q.signals.recent_mood_events(), plays=self.a.evidence_plays(limit),
-            likes=self.q.model.recent_liked_with_ts(limit=limit), dislikes=self.q.model.disliked_with_ts(),
-            skips=self.q.player_events.recent_skips_with_ts(now - 4 * half['skip'] * 86400), half=half, weights=weights)
+        mood, plays, likes, skips = self.a.recent_sources(now)
+        return display._sources(now, mood_events=mood, plays=plays, likes=likes,
+                                skips=skips, half=half, weights=weights)
 
     def learning_progress(self, now):
-        return display.learning_progress(now, threshold=self.parameter('theme_threshold'), entries=self.q.signals.theme_rows(),
+        published = self.q.proposals.get_proposals(PERMANENT_SURFACE) or None
+        entries = self.q.signals.theme_rows() if published is None else [
+            {'facet': axis, **reading, 'score': reading['support'],
+             'updated_at': published['through']} for axis, reading in published['facets'].items()]
+        return display.learning_progress(now, threshold=self.parameter('theme_threshold'), entries=entries,
             sources=self._sources(now), choices=self.q.modes.choice_learning_rows(), weight_sources=self.source_weights(now),
-            changes=self.q.signals.recent_graduations(limit=50), lane_max=self.configuration.lane_max)
+            changes=self.q.signals.recent_graduations(limit=50), lane_max=self.configuration.lane_max,
+            dated=published is not None)
 
     def model_transparency(self, now):
         sources = self.source_weights(now)
-        return display.model_transparency(sources=sources,
-            weights=self.q.model.get_weights(now=now, revert_halflife_d=sources['lane_weight_halflife_days']),
-            standing=self.q.model.get_leans(), leans=self.a.facet_leans(now),
+        published = self.q.proposals.get_proposals(PERMANENT_SURFACE) or None
+        return display.model_transparency(sources=sources, **self.a.facet_breakdown(now),
             theme={r['facet']: r['score'] for r in self.q.signals.theme_rows()},
-            fparams=tuple(self.parameter(n) for n in ('facet_gain', 'facet_mult_min', 'facet_mult_max')),
+            support=None if published is None else published['facets'],
             graduation_threshold=self.parameter('theme_threshold'), bd=self.a.breadth(), era_shares=self.a.era_shares(),
             artist_shares=self._artist_shares(), modes=self.mode_layers(now), activity_sources=self._sources(now))
 

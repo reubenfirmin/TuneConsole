@@ -218,8 +218,7 @@ def test_listening_publication_is_guarded_and_uses_complete_prepared_outputs(cur
 @pytest.mark.parametrize('current,accepted', [(False, False), (True, False), (True, True)])
 def test_trend_publication_uses_final_ordered_guard(monkeypatch, current, accepted):
     order = []
-    source = NS(trends=NS(prepare_first_play=lambda: [('k', 1)]),
-        settings=NS(get_setting=lambda _: 'imported'), is_current=lambda: current)
+    source = NS(is_current=lambda: current)
     def ordered(action):
         order.append('guard')
         if accepted:
@@ -227,8 +226,8 @@ def test_trend_publication_uses_final_ordered_guard(monkeypatch, current, accept
         return accepted
     source.publish_ordered = ordered
     monkeypatch.setattr(trend_preparation, 'calculate', lambda *_: {'built_at': NOW, 'story': None})
-    def publish(first, encoded, now, imported):
-        assert order == ['guard'] and first == [('k', 1)] and imported == 'imported'
+    def publish(encoded, now):
+        assert order == ['guard'] and json.loads(encoded)['built_at'] == now == NOW
         order.append('publish')
     owner = trend_preparation.TrendPreparation(snapshot=lambda: nullcontext(source), publish=publish)
     assert (owner.build(NOW) is not None) is (current and accepted)

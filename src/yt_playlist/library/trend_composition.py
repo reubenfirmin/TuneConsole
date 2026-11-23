@@ -15,14 +15,17 @@ def capture_family_adjacency():
 
 def inputs(reader):
     return SimpleNamespace(trends=reader.trends, settings=reader.settings, genres=reader.genres,
-                           charts=reader.charts, recap=reader.recap,
+                           charts=reader.charts, recap=reader.recap, musical_profiles=reader.musical_profiles,
                            family_adjacency=capture_family_adjacency())
 
 
 def preparation(store):
     @contextmanager
     def snapshot():
-        with store.read_snapshot() as source, column_group_reads(source.store, 'recordings', 'catalog'):
+        with (store.read_snapshot() as source,
+              column_group_reads(source.store, 'recordings', 'catalog'),
+              column_group_reads(source.store, 'playlists', 'recap'),
+              column_group_reads(source.store, 'playlist_scopes', 'recap')):
             facts = inputs(source.store)
             facts.is_current, facts.publish_ordered = source.is_current, source.publish_ordered
             yield facts

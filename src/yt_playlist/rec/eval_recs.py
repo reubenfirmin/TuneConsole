@@ -6,6 +6,7 @@ track lands in the top-k. recall@k is the share of playlists where it does, a si
 that says "does the model put tracks that genuinely belong together near each other?".
 """
 import math
+from collections import Counter
 
 import numpy as np
 
@@ -78,18 +79,23 @@ def _causal_window(store, cutoff, end, k, dim, method, memory_bytes=None) -> dic
     persisted model state nor a later basket can leak into the representation. Generated-only
     outcomes are excluded while mixed and independently dated evidence remain eligible.
     """
-    baskets, coverage = store.rec_evidence.rec_baskets_as_of(cutoff)
+    evidence = store.rec_evidence
+    sessions = {(f'{account}:{day}', key) for account, key, day, _
+                in evidence.evaluation_listening(cutoff)}
+    baskets, coverage = evidence.rec_baskets_as_of(math.nextafter(cutoff, -math.inf),
+                                                   session_memberships=sessions)
     check_cancellable_work()
     if memory_bytes is not None:
         from yt_playlist.rec.model_refresh import _check_fit_memory
         _check_fit_memory(baskets, dim, memory_bytes)
+    counts = Counter(key for _, key in sessions)
     weights = None
     if store.settings.get_setting("rec_cooc_weighting") == "1":
-        weights = {key: 1.0 + math.log1p(count)
-                   for key, count in store.history.play_counts_before(cutoff).items() if count}
+        weights = training.cooc_weights(counts)
+    after = {key for _, key, _, _ in evidence.evaluation_listening(end, start=cutoff)}
+    generated = evidence.generated_only_keys_between(cutoff, end) - after
     return causal_recall(baskets=baskets, coverage=coverage, weights=weights,
-        before=store.history.history_keys_before(cutoff), after=store.history.history_keys_between(cutoff, end),
-        generated=store.rec_evidence.generated_only_keys_between(cutoff, end),
+        before=set(counts), after=after, generated=generated,
         cutoff=cutoff, end=end, k=k, dim=dim, method=method, memory_bytes=memory_bytes)
 
 
@@ -211,7 +217,7 @@ def projection_recall(store, k=20, *, inputs=None, max_targets=None) -> dict:
 
 def projection_from_inputs(inputs, *, k=20, max_targets=None):
     """Cross-validated projection over detached reference/content/audio inputs."""
-    from yt_playlist.rec.discover import ContentProjection
+    from yt_playlist.rec.content_projection import ContentProjection
     reference, content, audio = inputs
     keys, V, idx = reference
     empty_bd = {"by_family": {}, "by_era": {}, "by_coverage": {}}

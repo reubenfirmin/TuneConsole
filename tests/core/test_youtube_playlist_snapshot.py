@@ -4,10 +4,16 @@ from copy import deepcopy
 import pytest
 
 from tests.core.test_playlist_page_accounting import first as music_page, item, page, token
-from tests.test_saved_album_snapshot import _production_client
+from tests.test_saved_album_snapshot import SnapshotBridge, _production_client
 from yt_playlist.core.album_snapshot import LibrarySnapshotError
 from yt_playlist.core.youtube_playlist_report import youtube_playlist_snapshot, _layout_probe
+from yt_playlist.integrations.youtube_music_sdk import bridge_client
 from yt_playlist.library.playlist_snapshot import is_complete_playlist
+
+
+def _sdk_client(responses, *, brand_account_id=None):
+    bridge = SnapshotBridge(responses)
+    return bridge_client(brand_account_id, bridge), bridge
 
 
 def video(video_id, handle):
@@ -24,9 +30,7 @@ def first(contents, playlist_id='PL'):
 def test_scoped_reader_preserves_duplicate_songs_and_account_context():
     response = first([video('repeated', 'one'), token('next')])
     response['recommendations'] = video('unrelated', 'not-a-member')
-    client, bridge = _production_client([response, page([video('repeated', 'two')])])
-    original = deepcopy(client.context)
-    client.context['context']['user'] = {'onBehalfOfUser': 'fixture-account'}
+    client, bridge = _sdk_client([response, page([video('repeated', 'two')])], brand_account_id='fixture-account')
     expected = deepcopy(client.context)
     result = youtube_playlist_snapshot(client, 'PL')
     assert [row['setVideoId'] for row in result['tracks']] == ['one', 'two']
@@ -36,7 +40,6 @@ def test_scoped_reader_preserves_duplicate_songs_and_account_context():
         assert body['context']['client']['clientName'] == 'WEB'
         assert body['context']['user'] == {'onBehalfOfUser': 'fixture-account'}
     assert bridge.calls[0][1]['params'] == 'wgYCCAA='
-    assert original['context']['client'] == expected['context']['client']
 
 
 @pytest.mark.parametrize('last', [
@@ -46,13 +49,13 @@ def test_scoped_reader_preserves_duplicate_songs_and_account_context():
     {'responseContext': {'mainAppWebResponseContext': {'loggedOut': True}}},
 ])
 def test_missing_ambiguous_or_repeated_page_rejects_the_entire_snapshot(last):
-    client, _ = _production_client([first([video('song', 'one'), token('next')]), last])
+    client, _ = _sdk_client([first([video('song', 'one'), token('next')]), last])
     with pytest.raises(LibrarySnapshotError):
         youtube_playlist_snapshot(client, 'PL')
 
 
 def test_explicit_wrong_playlist_is_rejected():
-    client, _ = _production_client([first([video('song', 'one')], 'PLother')])
+    client, _ = _sdk_client([first([video('song', 'one')], 'PLother')])
     with pytest.raises(LibrarySnapshotError):
         youtube_playlist_snapshot(client, 'PL')
 
@@ -76,7 +79,7 @@ def test_full_production_reader_reconciles_only_verified_missing_occurrences():
 
 
 def test_raw_response_values_never_enter_snapshot_errors():
-    client, _ = _production_client([first([{
+    client, _ = _sdk_client([first([{
         'unknownRenderer': {'title': 'PRIVATE_TITLE', 'token': 'PRIVATE_TOKEN'}}])])
     with pytest.raises(LibrarySnapshotError) as error:
         youtube_playlist_snapshot(client, 'PL')
@@ -107,7 +110,7 @@ def view_token(value):
 def test_modern_continuation_controls_fetch_every_playlist_page(envelope):
     continuation = page([lockup('second'), view_token('PRIVATE_NEXT')])
     continuation[envelope] = continuation.pop('onResponseReceivedActions')
-    client, bridge = _production_client([
+    client, bridge = _sdk_client([
         modern([lockup('first'), view_token('PRIVATE_TOKEN')]),
         continuation, page([lockup('last')]),
     ])
@@ -135,7 +138,7 @@ def test_modern_continuations_never_certify_a_truncated_snapshot(problem):
     rows = [lockup('first'), continuation]
     if problem == 'middle':
         rows.reverse()
-    client, _ = _production_client([modern(rows), last])
+    client, _ = _sdk_client([modern(rows), last])
     with pytest.raises(LibrarySnapshotError) as error:
         youtube_playlist_snapshot(client, 'LM')
     assert 'PRIVATE_' not in str(error.value)
@@ -144,7 +147,7 @@ def test_modern_continuations_never_certify_a_truncated_snapshot(problem):
 def test_modern_liked_music_reads_only_selected_playlist_rows_and_all_continuations():
     response = modern([lockup('visible'), token('PRIVATE_TOKEN')])
     response['sidebar'] = modern([lockup('not-a-member')])
-    client, _ = _production_client([response, page([lockup('hidden')])])
+    client, _ = _sdk_client([response, page([lockup('hidden')])])
     result = youtube_playlist_snapshot(client, 'LM')
     assert result['tracks'] == [{'videoId': 'visible'}, {'videoId': 'hidden'}]
     assert result['playlist_id_verified'] is True
@@ -156,7 +159,7 @@ def test_modern_playlist_metadata_does_not_exhaust_the_legacy_search_budget():
     for row in rows:
         row['lockupViewModel']['metadata'] = [{'title': 'PRIVATE_TITLE'}] * 150
     response = modern(rows)
-    client, _ = _production_client([response])
+    client, _ = _sdk_client([response])
     result = youtube_playlist_snapshot(client, 'LM')
     assert len(result['tracks']) == 100
     assert result['playlist_id_verified'] is True
@@ -167,7 +170,7 @@ def test_modern_invalid_row_reports_its_stage_without_private_values():
     rows = response['contents']['twoColumnBrowseResultsRenderer']['tabs'][0]['tabRenderer'][
         'content']['sectionListRenderer']['contents'][0]['itemSectionRenderer']['contents']
     del rows[1]['lockupViewModel']['rendererContext']
-    client, _ = _production_client([response])
+    client, _ = _sdk_client([response])
     with pytest.raises(LibrarySnapshotError) as error:
         youtube_playlist_snapshot(client, 'LM')
     assert error.value.layout_probe['validation_stage'] == 'contents.video'
@@ -194,7 +197,7 @@ def test_modern_liked_music_rejects_ambiguous_membership(mutation):
             response['contents']['twoColumnBrowseResultsRenderer']['tabs'][0]))
     else:
         tab['content']['sectionListRenderer']['contents'].append({'itemSectionRenderer': {'contents': []}})
-    client, _ = _production_client([response])
+    client, _ = _sdk_client([response])
     with pytest.raises(LibrarySnapshotError) as error:
         youtube_playlist_snapshot(client, 'LM')
     assert 'PRIVATE_' not in str(error.value)

@@ -1,6 +1,7 @@
 """#85 timestamped transient-event sources: real play_events timestamps with day-model fallback."""
 import datetime
 from contextlib import ExitStack
+from time import perf_counter
 
 from tests.derived_rating_support import seed_dislike, seed_like
 from tests.store_fixture_support import initialize_consumer
@@ -17,7 +18,7 @@ def make_store(_pristine_current_schema):
             s = Store(":memory:")
             cleanup.callback(s.conn.close)
             initialize_consumer(s, _pristine_current_schema)
-            assert s.accounts.upsert_account("main", "bridge", None, True) == 1
+            assert s.accounts.upsert_account("main", None, True) == 1
             return s
         yield create
 
@@ -146,14 +147,24 @@ def test_exclusion_respects_limit_param(make_store):
 
 
 @pytest.mark.parametrize('excluded', [None, {'PLRADIO'}])
-def test_native_recent_history_keeps_subject_probes_within_serving_work(store, excluded):
-    """Resolved subject expressions must not cause a scan for every coarse day."""
-    accounts = [store.accounts.upsert_account(name, name, None, index == 0)
+def test_native_recent_history_keeps_subject_probes_within_serving_work(store, excluded, record_property):
+    """History writes and reads stay bounded when unrelated subjects share a day."""
+    accounts = [store.accounts.upsert_account(name, None, index == 0)
                 for index, name in enumerate(('first', 'second'))]
     day = datetime.date(2026, 1, 2)
     noon = datetime.datetime(2026, 1, 2, 12, tzinfo=datetime.timezone.utc).timestamp()
     expected = {}
-    with store.conn:
+    callbacks, max_callbacks = 0, 15000
+
+    def progress():
+        nonlocal callbacks
+        callbacks += 1
+        return int(callbacks > max_callbacks)
+
+    write_started = perf_counter()
+    with store.conn, ExitStack() as cleanup:
+        store.conn.set_progress_handler(progress, 1000)
+        cleanup.callback(store.conn.set_progress_handler, None, 0)
         for index in range(1200):
             key = f'subject:{index}'
             recording = None
@@ -164,11 +175,10 @@ def test_native_recent_history_keeps_subject_probes_within_serving_work(store, e
             generated, radio = index % 4 == 0, index % 3 == 0
             stamp = noon + 1000 + index
             store.conn.execute('INSERT INTO play_events(id,account_id,raw_identity_key,recording_id,'
-                'unresolved_subject_key,played_at,playlist_ytm_id,is_generated) VALUES (?,?,?,?,?,?,?,?)',
+                'unresolved_subject_key,played_at,playlist_ytm_id,is_generated,day,sources) '
+                "VALUES (?,?,?,?,?,?,?,?,?,json_array('live'))",
                 (index + 1, accounts[0], key, recording, unresolved, stamp,
-                 'PLRADIO' if radio else None, int(generated)))
-            store.conn.execute("INSERT INTO play_event_sources VALUES (?,'live')", (index + 1,))
-            store.conn.execute("INSERT INTO play_event_calendar VALUES (?,?,'UTC')", (index + 1, day.isoformat()))
+                 'PLRADIO' if radio else None, int(generated), day.isoformat()))
             observations = [(accounts[0], day, 'ytm_history'),
                             (accounts[0], day - datetime.timedelta(days=1), 'independent')]
             if index % 5 == 0:
@@ -182,14 +192,12 @@ def test_native_recent_history_keeps_subject_probes_within_serving_work(store, e
                     (account, key, recording, unresolved, observed_day.isoformat(), observed_day.isoformat(), source))
             expected[key] = (stamp if not generated and not (excluded and radio) else
                              noon if index % 5 == 0 or index % 7 == 0 else noon - 86400)
+    record_property('write_sql_progress_callbacks_per_1000_steps', callbacks)
+    record_property('write_seconds', perf_counter() - write_started)
     # Bound SQLite work instead of elapsed time, which varies under CI load.
     # The unmaterialized canonical views exceed this by repeatedly scanning
     # COALESCE(recording identity, unresolved identity) for each observation.
-    callbacks = 0
-    def progress():
-        nonlocal callbacks
-        callbacks += 1
-        return int(callbacks > 3000)
+    callbacks, max_callbacks = 0, 3000
     store.conn.set_progress_handler(progress, 1000)
     try:
         actual = store.history.recent_plays_with_ts(exclude_list_ids=excluded)

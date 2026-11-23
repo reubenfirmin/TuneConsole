@@ -14,13 +14,9 @@ class RecommendationImpressions:
         if not rows:
             return
         with self.guard():
-            if not self.repository.served_facts_active():
-                return self.repository.insert_served_impressions(rows, versions=versions)
             traces = [json.loads(row[8]) for row in rows]
             facts = [served_facts.extract(trace) for trace in traces]
             with self.files.retained():
-                # Reserve monotonic IDs in SQL, then publish files, then their owners.
-                # Interrupted attempts retain pending SQL owners and expirable files.
                 reserved = self.repository.reserve_impression_ids(rows)
                 self.files.publish_many([(identity, rows[index][9], traces[index]) for identity, index in reserved])
                 prepared = [(identity, (*rows[index][:8], served_facts.compact_provenance(rows[index][8]), rows[index][9]),
@@ -44,21 +40,16 @@ class RecommendationImpressions:
 
     def maintain(self, now, *, before):
         with self.guard():
-            if not self.repository.served_facts_available():
-                self.repository._prune_impression_batch(before)
-                self.repository._prune_response_batch(before)
-                return
             with self.files.collector() as admitted:
                 if not admitted:
                     return
-                self.repository.expire_diagnostics(now - served_facts.RETAIN_SECONDS, limit=RETENTION_BATCH_SIZE)
+                cutoff = now - served_facts.RETAIN_SECONDS
+                expired = self.repository.expire_diagnostics(cutoff, limit=RETENTION_BATCH_SIZE)
                 self.repository._prune_impression_batch(before)
                 self.repository._prune_response_batch(before)
-                retired = self.repository.diagnostic_retirements(limit=RETENTION_BATCH_SIZE)
-                removed = self.files.delete_many(retired)
-                if removed:
-                    self.repository.acknowledge_diagnostic_retirements(removed)
-                candidates = self.files.orphan_candidates(now - served_facts.RETAIN_SECONDS, limit=RETENTION_BATCH_SIZE)
+                if expired:
+                    self.files.delete_many(expired)
+                candidates = self.files.orphan_candidates(cutoff, limit=RETENTION_BATCH_SIZE)
                 if candidates:
-                    owned = self.repository.existing_impressions([identity for identity, _ in candidates])
+                    owned = self.repository.active_diagnostics([identity for identity, _ in candidates])
                     self.files.delete_orphans([(identity, expected) for identity, expected in candidates if identity not in owned])

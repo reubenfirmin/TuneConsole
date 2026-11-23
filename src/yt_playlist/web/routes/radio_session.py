@@ -1,6 +1,9 @@
 """Home Radio and saved-playlist session endpoints."""
+import asyncio
+from contextlib import ExitStack
 from functools import wraps
 import logging
+import time
 
 from fastapi import APIRouter, Body, HTTPException, Request
 
@@ -27,6 +30,12 @@ def build(ctx):
             return present(command(*args, **kwargs))
 
         return await radio.work.to_thread(run)
+
+    async def admitted_start(ownership, command, data, intent, launch):
+        # Keep the launch registered while the worker drains even if the
+        # requester disconnects after submitting it.
+        with ownership:
+            return await present_command(command, data, intent, launch)
 
     @router.get("/radio/status")
     def status():
@@ -71,8 +80,15 @@ def build(ctx):
             return {"ok": False, "reason": "Choose a playlist to start radio."}
         try:
             commands = Ctx.radio_commands(ctx)
-            with commands.admit_start(data) as (intent, cancelled):
-                return await present_command(commands.start, data, intent, cancelled)
+            with ExitStack() as ownership:
+                intent, launch = ownership.enter_context(commands.admit_start(data))
+                if launch.trace and not launch.replay:
+                    clicked = data['clicked_at_ms']
+                    if 0 < clicked < 2**53:
+                        logger.info('Radio launch timing: launch=%r stage=request clicked_at_ms=%d click_to_request_ms=%d',
+                                    launch.launch_id, clicked, time.time_ns() // 1_000_000 - clicked)
+                task = asyncio.create_task(admitted_start(ownership.pop_all(), commands.start, data, intent, launch))
+                return await asyncio.shield(task)
         except access.AccessDenied as exc:
             raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:

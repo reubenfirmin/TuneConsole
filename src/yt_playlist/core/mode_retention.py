@@ -1,6 +1,15 @@
 """Retired mode identity summaries, without obsolete vectors or track lists."""
+import json
 
 BATCH = 128
+CHECKPOINT = 'taste_mode_maintenance'
+HIGH_WATER = 'taste_mode_high_water'
+CREDIT_COLUMNS = (
+    'credit_enabled INTEGER NOT NULL DEFAULT 0 CHECK(credit_enabled IN (0,1))',
+    'credit_cursor INTEGER NOT NULL DEFAULT 0',
+    'credit_completed INTEGER NOT NULL DEFAULT 0 CHECK(credit_completed IN (0,1))',
+    'credit_next_scan_at REAL NOT NULL DEFAULT 0',
+)
 
 
 def statements():
@@ -37,7 +46,10 @@ def validate(conn):
     expected = {sql.split()[2]: sql for sql in statements()}
     actual = definitions(conn, expected)
     for name, sql in expected.items():
-        if name not in actual or _tokens(actual[name]) != _tokens(sql):
+        layouts = [sql]
+        if name == 'taste_mode_retention':
+            layouts.append(sql[:-1] + ',' + ','.join(CREDIT_COLUMNS) + ')')
+        if _tokens(actual.get(name)) not in tuple(map(_tokens, layouts)):
             raise MigrationError('Incompatible taste mode retirement owner: ' + name)
     if not conn.execute('SELECT 1 FROM taste_mode_retention WHERE id=1').fetchone():
         raise MigrationError('Missing taste mode retirement state')
@@ -48,22 +60,18 @@ def step(conn, now, *, activate=False):
         raise RuntimeError('Mode retirement requires an outer transaction')
     from .artist_credits import _clock
     _clock(now)
-    enabled, cursor, next_scan = conn.execute('SELECT enabled,cursor,next_scan_at FROM taste_mode_retention WHERE id=1').fetchone()
-    if not enabled:
-        if not activate:
-            return False
-        conn.execute('UPDATE taste_mode_retention SET enabled=1 WHERE id=1')
-    if not activate and now < next_scan:
+    row = conn.execute('SELECT value FROM settings WHERE key=?', (CHECKPOINT,)).fetchone()
+    checkpoint = json.loads(row[0])
+    if not activate and (not checkpoint['enabled'] or now < checkpoint['next_scan_at']):
         return False
-    rows = conn.execute('SELECT mode_id FROM taste_modes WHERE mode_id>? ORDER BY mode_id LIMIT ?',
-                        (cursor, BATCH)).fetchall()
-    for (identity,) in rows:
-        # Keep the identity row for all historical FKs. The writer reservation
-        # fences reactivation; existing SQL snapshots keep their old payload.
-        if conn.execute('SELECT 1 FROM taste_modes WHERE mode_id=? AND active=0', (identity,)).fetchone():
-            conn.execute('INSERT INTO taste_mode_retired_payloads VALUES (?,?) ON CONFLICT DO NOTHING', (identity, now))
-            conn.execute("UPDATE taste_modes SET centroid=X'',families='[]',rep_keys='[]' WHERE mode_id=? "
-                         "AND active=0 AND (length(centroid)>0 OR families<>'[]' OR rep_keys<>'[]')", (identity,))
-    conn.execute('UPDATE taste_mode_retention SET cursor=?,next_scan_at=? WHERE id=1',
-                 (rows[-1][0] if rows else 0, now + 86400 if not rows else 0))
+    rows = conn.execute('SELECT legacy_mode_id FROM taste_groups WHERE legacy_mode_id>? AND mode_label IS NOT NULL '
+                        'ORDER BY legacy_mode_id LIMIT ?',
+                        (checkpoint['cursor'], BATCH)).fetchall()
+    conn.executemany("UPDATE taste_groups SET mode_centroid=X'',mode_families='[]',mode_rep_keys='[]',"
+                     "mode_payload_retired_at=coalesce(mode_payload_retired_at,?) WHERE legacy_mode_id=? AND mode_active=0 "
+                     "AND (mode_payload_retired_at IS NULL OR length(mode_centroid)>0 OR mode_families<>'[]' OR mode_rep_keys<>'[]')",
+                     [(now, identity) for (identity,) in rows])
+    checkpoint.update(enabled=1, cursor=rows[-1][0] if rows else 0,
+                      next_scan_at=0 if rows else now + 86400)
+    conn.execute('UPDATE settings SET value=? WHERE key=?', (json.dumps(checkpoint), CHECKPOINT))
     return bool(rows)

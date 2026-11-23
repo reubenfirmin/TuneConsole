@@ -15,7 +15,7 @@ def disable_periodic_library_sync():
 def test_wheelhouse_excludes_play_recency_lane(store):
     """Wheelhouse is the taste/genre model, not play-recency: a high-play dormant track that isn't
     a deep cut or taste neighbour must NOT surface in for_you (it belongs to Comfort Listening)."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Gem", "X", None, None)         # key "gem|x": played a lot, then dormant
     store.tracks.upsert_track("v2", "Bench", "X", None, None)       # X's never-played track -> X's deep cut
     day = 86400.0
@@ -32,7 +32,7 @@ def test_wheelhouse_excludes_play_recency_lane(store):
 
 def test_comfort_listening_excludes_recent_favorites(store):
     """A recent favorite is ineligible even when it has as many plays as an old one."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Old Favorite", "X", None, None)
     store.tracks.upsert_track("v2", "Recent Favorite", "X", None, None)
     day = 86400.0
@@ -50,7 +50,7 @@ def test_comfort_listening_excludes_recent_favorites(store):
 
 def test_comfort_listening_excludes_never_and_barely_played(store):
     """Comfort is grounded in real rotation: never-played and below-min_plays tracks don't show."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Never", "X", None, None)       # zero plays
     store.tracks.upsert_track("v2", "Barely", "X", None, None)      # one play, below default min_plays=4
     store.tracks.upsert_track("v3", "Worn", "X", None, None)        # 5 plays
@@ -68,7 +68,7 @@ def test_comfort_listening_excludes_never_and_barely_played(store):
 
 def test_for_you_genre_suppression_reduces_that_family(store):
     """Per-genre weights re-rank for_you: muting a family yields fewer of its tracks than favoring it."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     techno = [store.tracks.upsert_track(f"t{i}", f"T{i}", "TechnoBand", None, None) for i in range(6)]
     folk = [store.tracks.upsert_track(f"f{i}", f"F{i}", "FolkBand", None, None) for i in range(6)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PT", "Techno", 6, "h", 0.0), techno)
@@ -94,7 +94,7 @@ def test_for_you_genre_suppression_reduces_that_family(store):
 
 def test_comfort_candidates_require_a_full_listening_rest(store):
     """Recent heavy rotation cannot qualify through a high play count."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Dormant", "X", None, None)        # key "dormant|x"
     store.tracks.upsert_track("v2", "HeavyRecent", "X", None, None)    # key "heavyrecent|x"
     store.tracks.upsert_track("v3", "Barely", "X", None, None)         # key "barely|x"
@@ -114,7 +114,7 @@ def test_comfort_candidates_require_a_full_listening_rest(store):
 
 
 def test_for_you_blends_real_signals_with_reasons(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # Artist you play a lot: "Hit" played, "Neglected" not -> a deep cut
     hit = store.tracks.upsert_track("v1", "Hit", "Fav", None, None)        # key "hit|fav"
     store.tracks.upsert_track("v2", "Neglected", "Fav", None, None)        # key "neglected|fav"
@@ -137,7 +137,7 @@ def test_for_you_blends_real_signals_with_reasons(store):
 
 def test_for_you_never_empty_without_history_depth(store):
     """The day-one failure that shipped empty: a normal library must still yield recs."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.tracks.upsert_track("v1", "Played", "Band", None, None)     # key "played|band"
     store.tracks.upsert_track("v2", "Bench", "Band", None, None)          # neglected by same artist
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PL", "P", 1, "h", 0.0), [a])
@@ -195,7 +195,7 @@ def test_taste_sample_is_a_rotating_slice_not_the_top_n(monkeypatch):
 
 
 def test_complete_playlist_suggests_fitting_owned_tracks(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.tracks.upsert_track("v1", "Anchor", "Band", None, None)      # in the target playlist
     b = store.tracks.upsert_track("v2", "Bonus", "Band", None, None)       # same artist, not in target
     c = store.tracks.upsert_track("v3", "Cooc", "Other", None, None)       # co-occurs with anchor elsewhere
@@ -218,7 +218,7 @@ def test_complete_playlist_suggests_fitting_owned_tracks(store):
 def test_complete_playlist_rejects_genreless_related_artist_candidate(store, monkeypatch):
     from yt_playlist.rec import artist_model
 
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     seed = store.tracks.upsert_track("v1", "Anchor", "Seed Artist", None, None)
     store.tracks.set_track_genre(seed, 'Techno')
     store.tracks.upsert_track("v2", "Candidate", "Other Artist", None, None)
@@ -236,8 +236,8 @@ def test_complete_playlist_rejects_genreless_related_artist_candidate(store, mon
                  'video_id': 'v3', 'genre': 'Techno', 'artist_score': 0.5}]
 
     monkeypatch.setattr(artist_model, 'artist_track_candidates', candidates)
-    monkeypatch.setattr(artist_model, 'related_artist_scores',
-                        lambda *args, **kwargs: {store.artists.key('Other Artist'): 0.9})
+    monkeypatch.setattr(artist_model, 'ranked_artist_neighbors', lambda *args, **kwargs: [
+        artist_model.ArtistNeighbor(store.artists.key('Other Artist'), .9, {'content': .9}, None)])
 
     items = surfaces.complete_playlist(store, target, limit=4)
 
@@ -245,8 +245,33 @@ def test_complete_playlist_rejects_genreless_related_artist_candidate(store, mon
     assert [item.key for item in items] == ['compatible|other artist']
 
 
+def test_completion_uses_provider_only_artist_evidence_and_retains_genre_eligibility(store):
+    from tests.conftest import FakeClient
+    from yt_playlist.library.suggestion_composition import suggestions
+
+    account = store.accounts.upsert_account('main', None, True)
+    entries = []
+    for video, name, channel, genre in [('seed', 'Seed', 'UCseed0000', 'Techno'),
+                                         ('peer', 'Peer', 'UCpeer0000', 'Techno'),
+                                         ('other', 'Peer', 'UCother000', 'Jazz')]:
+        entry = store.tracks.upsert_track(video, video, name, None, 200, credits=[{'name': name, 'id': channel}])
+        store.tracks.set_track_genre(entry, genre)
+        entries.append(entry)
+    library = store.playlists.upsert_playlist(account, 'ALL', 'Library', 3, '', 1)
+    target = store.playlists.upsert_playlist(account, 'SUBSET', 'Target', 1, '', 1)
+    store.playlists.set_playlist_tracks(library, entries)
+    store.playlists.set_playlist_tracks(target, entries[:1])
+    page = {'related': {'results': [{'title': 'Peer', 'browseId': channel}
+                                     for channel in ('UCother000', 'UCpeer0000')]}}
+    service = suggestions(store, None, lambda: {1: FakeClient(artists={'UCseed0000': page})})
+    result = service.completion(target, 1000)['suggestions']
+    assert [row.video_id for row in result] == ['peer']
+    channel = store.artists.provider_identity('UCpeer0000')
+    assert result[0].trace['artist_sources'][store.artists.key(channel)]['youtube'] > .7
+
+
 def test_take_action_auth_and_cleanup_no_sync(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.playlists.upsert_playlist(iid, "PLEMPTY", "Empties", 0, "h", 0.0)   # empty playlist
     actions.refresh_cleanup(store, now=1000.0)      # worker/cleanup-page materialize the cached summary
 
@@ -260,14 +285,14 @@ def test_take_action_auth_and_cleanup_no_sync(store):
 
 
 def test_take_action_empty_when_clean(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     assert actions.take_action(store, now=1000.0, auth_expired={}) == []
 
 
 def test_take_action_has_no_manual_enrich_nag(store):
     """The Take-Action triage no longer emits manual-enrichment nag cards (removed in favor of the
     background auto-enrich worker)."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     ts = [store.tracks.upsert_track(f"h{i}", f"H{i}", "HA", None, None) for i in range(6)]   # all gappy
     php = store.playlists.upsert_playlist(iid, "PH", "Hot List", 6, "h", 0.0, "http://t/hot.jpg")
     store.playlists.set_playlist_tracks(php, ts)
@@ -315,7 +340,7 @@ def test_sync_status_urgent_when_drifting(store):
 
 def _seed_two_eras(store):
     """6 nineties + 6 noughties tracks, one playlist each, model built. Returns iid."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     nineties = [store.tracks.upsert_track(f"n{i}", f"N{i}", f"NB{i}", None, None) for i in range(6)]
     noughts = [store.tracks.upsert_track(f"o{i}", f"O{i}", f"OB{i}", None, None) for i in range(6)]
     for t in nineties:
@@ -367,7 +392,7 @@ def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
     """An eclectic playlist (many artists) shouldn't get flooded by one artist's big catalog: the
     '529 repeats' bug, where a 12-track/10-artist playlist returned 9 tracks by one band."""
     from collections import Counter
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # "WL" has a big catalog; 9 other artists have a couple tracks each
     wl = [store.tracks.upsert_track(f"wl{i}", f"WL song {i}", "WL", None, None) for i in range(11)]
     others = {}
@@ -392,7 +417,7 @@ def test_complete_playlist_caps_flooding_artist_on_eclectic_playlist(store):
 
 def test_playlist_facets_groups_genres_eras_tracks(store):
     """The transient feedback panel needs the mix's facets (genres/eras/tracks) + the keys to tilt."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     a = store.tracks.upsert_track("v1", "SongA", "ArtA", None, None); store.tracks.set_track_genre(a, "Techno"); store.tracks.set_track_year(a, "1995")
     b = store.tracks.upsert_track("v2", "SongB", "ArtB", None, None); store.tracks.set_track_genre(b, "Techno"); store.tracks.set_track_year(b, "2005")
     c = store.tracks.upsert_track("v3", "SongC", "ArtC", None, None); store.tracks.set_track_genre(c, "Folk"); store.tracks.set_track_year(c, "1995")
@@ -436,7 +461,7 @@ def _seed_pl(store, iid, ytm, title, n, now, played_at=None, group=None, play_ea
 
 
 def test_rediscover_ranks_by_aggregate_track_staleness(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 300 * day
     # Every track played at the same time -> the playlist's median recency is exactly that time.
@@ -456,7 +481,7 @@ def test_rediscover_ranks_by_aggregate_track_staleness(store):
 def test_rediscover_one_fresh_track_does_not_unstale_a_cold_playlist(store):
     # The reported bug: a playlist with a single recently-played track was ranked as "played hours
     # ago". With median-of-tracks it stays cold, because most of it is cold.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 300 * day + day / 2
     # "Decoy": 7 cold tracks (180d) + 1 fresh (1d). MAX would say ~1 day; median says ~180 days.
@@ -470,7 +495,7 @@ def test_rediscover_one_fresh_track_does_not_unstale_a_cold_playlist(store):
 
 
 def test_rediscover_treats_never_played_as_coldest(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 100 * day
     _seed_pl(store, iid, "PP", "Played", 3, now, play_each_at=[now - 10 * day] * 3)
@@ -485,7 +510,7 @@ def test_rediscover_treats_never_played_as_coldest(store):
 def test_rediscover_rotates_through_cold_pool_by_epoch(store):
     # Same erosion/rotation as other Home cards: page through the ranked-by-coldness pool, one page
     # per epoch, wrapping, so you cycle through cold playlists instead of always seeing the same two.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 400 * day
     for ytm, title, age in [("PA", "A", 200), ("PB", "B", 150), ("PC", "C", 100), ("PD", "D", 50)]:
@@ -498,7 +523,7 @@ def test_rediscover_rotates_through_cold_pool_by_epoch(store):
 
 def test_rediscover_rotation_stays_within_coldest_pool(store):
     # The rotating pool is capped to the coldest N: warmer playlists never surface, even across epochs.
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 400 * day
     for ytm, title, age in [("PA", "A", 300), ("PB", "B", 250), ("PC", "C", 200),
@@ -530,7 +555,7 @@ def test_rediscover_albums_empty_when_no_saved(store):
 
 
 def test_rediscover_albums_coldest_first_and_carries_thumbnail(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 200 * day
     _seed_album(store, iid, "AOLD", "Ancient", now, played_at=now - 150 * day)
@@ -545,7 +570,7 @@ def test_rediscover_albums_coldest_first_and_carries_thumbnail(store):
 
 
 def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     day = 86400.0
     now = 400 * day
     for browse, title, age in [("A1", "A", 200), ("A2", "B", 150), ("A3", "C", 100),
@@ -558,7 +583,7 @@ def test_rediscover_albums_rotates_through_cold_pool_by_epoch(store):
 
 
 def test_graduation_ignores_removed_pause_setting(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     # Existing installations may still have the retired switch saved as disabled.
     store.settings.set_setting("rec_param:graduation_enabled", "0")
     for _ in range(10):
@@ -567,7 +592,7 @@ def test_graduation_ignores_removed_pause_setting(store):
 
 
 def test_repeated_evidence_graduates(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     for _ in range(10):
         graduation.graduate_facet(store, "genre:rock", 1.0, now=1000.0, source=1.0)
     # #85 read at the same `now` as the nudges, else read-time reversion (vs real wall-clock time)
@@ -579,7 +604,7 @@ def test_generators_exclude_dj_mixes(store):
     """#44: a DJ mix / concert (> default maximum track length of 20 min) must not surface in generated-
     playlist candidate pools, even when well-played. Short songs still come through; NULL-duration
     tracks (the common case) are kept."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     now = 1000.0 * 86400
     day = 86400
     store.tracks.upsert_track("v1", "Short Song", "X", None, 200)        # 200s real song
@@ -596,7 +621,7 @@ def test_generators_exclude_dj_mixes(store):
 
 
 def test_library_candidate_pools_follow_the_saved_duration_limit(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     titles = [("short", 200), ("boundary", 300), ("long", 301), ("unknown", None)]
     tids = [store.tracks.upsert_track(title, title, "Artist", None, duration) for title, duration in titles]
     pid = store.playlists.upsert_playlist(iid, "PL", "Songs", 4, "h", 1)

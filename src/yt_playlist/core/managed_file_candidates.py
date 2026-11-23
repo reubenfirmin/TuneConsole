@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 
-from . import fao, file_collection, metadata_file_contract, metadata_runtime_files
+from . import fao, file_collection, file_map, metadata_file_contract, metadata_runtime_files
 
 
 def metadata_owner(root, path):
@@ -43,6 +43,13 @@ class Orphans:
                 break
             if path is None:
                 continue
+            if domain == 'retired-archive-journals':
+                parts = path.relative_to(root).parts
+                try:
+                    if len(parts) != 3 or Path(*parts[1:]) != file_map.relative(path.stem):
+                        continue
+                except fao.CorruptFile:
+                    continue
             try:
                 info = fao.read(path).info
                 if info.ctime_ns / 1e9 <= now - 30 * 86400:

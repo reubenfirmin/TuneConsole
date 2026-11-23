@@ -17,6 +17,7 @@ pytestmark = pytest.mark.usefixtures('no_database')
 def collection():
     repository = create_autospec(CollectionRepo, instance=True, spec_set=True)
     repository.membership_transaction.side_effect = nullcontext
+    repository.all_active_albums_synced.return_value = False
     return Collection(repository, create_autospec(Albums, instance=True, spec_set=True),
                       create_autospec(AlbumAliases, instance=True, spec_set=True))
 
@@ -48,26 +49,24 @@ def test_share_preserves_frozen_order_and_requires_every_live_source(collection,
     assert inputs == before
 
 
-@pytest.mark.parametrize('occurrences', [True, False])
-def test_unordered_fetch_keeps_only_exact_source_links_and_preserves_unknown_keys(collection, occurrences):
+def test_unordered_fetch_keeps_only_exact_source_links_and_preserves_unknown_keys(collection):
     collection.albums.observe.return_value = 12
-    collection.repository.tracklist_inputs.return_value = {'occurrences': occurrences, 'keys': {
+    collection.repository.tracklist_inputs.return_value = {
         'known': {'recording_id': 1, 'entries': [4]},
-        'ambiguous': {'recording_id': 2, 'entries': [5, 6]}}}
+        'ambiguous': {'recording_id': 2, 'entries': [5, 6]}}
     collection.repository.unreferenced_tracklists.return_value = []
     collection.cache_album_tracklist('B', 'LP', 'Artist', None, iter(['known', 'known', 'ambiguous', 'unknown']))
     args, options = collection.repository.store_album_tracklist.call_args
-    key_field = 'raw_identity_key' if occurrences else 'legacy_track_key'
-    assert args == (12, 'B', [*([{'entry_id': 4}] * (2 if occurrences else 1)),
-        {'recording_id': 2, key_field: 'ambiguous'}, {'recording_id': None, key_field: 'unknown'}])
+    assert args == (12, 'B', [{'entry_id': 4}, {'entry_id': 4},
+        {'recording_id': 2, 'raw_identity_key': 'ambiguous'}, {'recording_id': None, 'raw_identity_key': 'unknown'}])
     assert options['ordered'] is False
     assert options['complete'] is True
-    assert options['expected_count'] == (4 if occurrences else 3)
+    assert options['expected_count'] == 4
 
 
 def test_ordered_fetch_preserves_repeated_occurrences_and_does_not_reuse_an_old_share(collection):
     collection.albums.observe.return_value = 12
-    collection.repository.tracklist_inputs.return_value = {'occurrences': True, 'keys': {}}
+    collection.repository.tracklist_inputs.return_value = {}
     collection.repository.unreferenced_tracklists.return_value = []
     entries = [{'entry_id': 7, 'position': 99}, {'entry_id': 7, 'disc_number': 2, 'track_number': 1}]
     before = deepcopy(entries)
@@ -82,7 +81,6 @@ def test_ordered_fetch_preserves_repeated_occurrences_and_does_not_reuse_an_old_
 
 
 def test_partial_fetch_cannot_select_a_complete_publication_and_retains_two_revisions_per_state(collection):
-    collection.repository.uses_occurrences.return_value = True
     collection.albums.observe.return_value = 12
     collection.repository.unreferenced_tracklists.return_value = [
         {'id': 9, 'status': 'complete'}, {'id': 8, 'status': 'complete'}, {'id': 7, 'status': 'complete'},
@@ -94,13 +92,6 @@ def test_partial_fetch_cannot_select_a_complete_publication_and_retains_two_revi
     assert options['expected_count'] == 10
     collection.repository.delete_tracklists.assert_called_once_with([7, 4])
     collection.repository.store_album_share.assert_not_called()
-
-
-def test_pre_occurrence_layout_ignores_partial_fetches(collection):
-    collection.repository.uses_occurrences.return_value = False
-    collection.cache_partial_album('B', 'LP', 'Artist', None, [{'entry_id': 7}])
-    collection.repository.membership_transaction.assert_not_called()
-    collection.albums.observe.assert_not_called()
 
 
 def test_taste_coverage_counts_recordings_once_and_keeps_memoized_inputs_unchanged(collection):
@@ -219,7 +210,6 @@ def test_sync_only_replaces_active_accounts_with_the_captured_revision(collectio
     collection.repository.snapshot_inputs.return_value = {
         1: {'active': True, 'revision': 3}, 2: {'active': False, 'revision': 3},
         3: {'active': True, 'revision': 4}, 4: {'active': True, 'revision': 0}}
-    collection.repository.legacy_cohort_inputs.return_value = {'has_legacy': True, 'count': 2, 'missing': 1}
     collection.albums.observe.return_value = 20
     snapshots = {1: [{'browse': 'A'}], 2: [{'browse': 'inactive'}], 3: [], 4: [], 99: []}
     assert collection.replace_saved_album_snapshots(snapshots, expected_revisions={1: 3, 2: 3, 3: 3}, now=100) == {1}
@@ -230,22 +220,22 @@ def test_sync_only_replaces_active_accounts_with_the_captured_revision(collectio
     collection.repository.store_snapshot_observation.assert_called_once_with(1, 100)
 
 
-@pytest.mark.parametrize('count,missing,retired', [(0, 0, False), (2, 1, False), (2, 0, True)])
-def test_legacy_retirement_requires_an_observed_nonempty_frozen_cohort(collection, count, missing, retired):
+@pytest.mark.parametrize('all_synced', [False, True])
+def test_unattributed_memberships_are_cleared_after_all_active_accounts_sync(collection, all_synced):
     collection.repository.snapshot_inputs.return_value = {1: {'active': True, 'revision': 5}}
-    collection.repository.legacy_cohort_inputs.return_value = {'has_legacy': True, 'count': count, 'missing': missing}
+    collection.repository.all_active_albums_synced.return_value = all_synced
     assert collection.replace_saved_album_snapshots({1: []}, now=100) == {1}
     assert collection.repository.delete_album_memberships.call_args_list == (
-        [((1,), {}), ((None,), {})] if retired else [((1,), {})])
+        [((1,), {}), ((None,), {})] if all_synced else [((1,), {})])
     collection.repository.store_snapshot_observation.assert_called_once_with(1, 100)
 
 
-def test_rejected_snapshot_cannot_count_as_an_observation_or_retire_legacy_membership(collection):
+def test_rejected_snapshot_cannot_count_as_an_observation_or_clear_unattributed_membership(collection):
     collection.repository.snapshot_inputs.return_value = {1: {'active': True, 'revision': 5}}
     assert collection.replace_saved_album_snapshots({1: []}, expected_revisions={1: 4}, now=100) == set()
     collection.repository.delete_album_memberships.assert_not_called()
     collection.repository.store_snapshot_observation.assert_not_called()
-    collection.repository.legacy_cohort_inputs.assert_not_called()
+    collection.repository.all_active_albums_synced.assert_not_called()
 
 
 def test_failed_album_ingestion_cannot_publish_snapshot_observation(collection):
@@ -255,33 +245,30 @@ def test_failed_album_ingestion_cannot_publish_snapshot_observation(collection):
         collection.replace_saved_album_snapshots({1: [{'browse': 'A'}]}, now=100)
     collection.repository.save_album_membership.assert_not_called()
     collection.repository.store_snapshot_observation.assert_not_called()
-    collection.repository.legacy_cohort_inputs.assert_not_called()
+    collection.repository.all_active_albums_synced.assert_not_called()
 
 
-@pytest.mark.parametrize('has_legacy', [False, True])
-def test_unattributed_addition_resets_existing_cohort_without_enrolling_later_accounts(collection, has_legacy):
-    collection.repository.legacy_cohort_inputs.return_value = {'has_legacy': has_legacy, 'count': 2, 'missing': 1}
+def test_unattributed_addition_resets_saved_album_observations(collection):
     collection.albums.observe.return_value = 20
     collection.add_saved_album({'browse': 'A'})
     collection.repository.advance_album_revision.assert_called_once_with(None)
-    collection.repository.reset_legacy_cohort.assert_called_once_with(replace=not has_legacy)
+    collection.repository.reset_saved_album_observations.assert_called_once_with()
     collection.repository.save_album_membership.assert_called_once_with(20, None)
 
 
-def test_attributed_addition_preserves_legacy_cohort(collection):
+def test_attributed_addition_preserves_saved_album_observations(collection):
     collection.albums.observe.return_value = 20
     collection.add_saved_album({'browse': 'A'}, account_id=1)
     collection.repository.advance_album_revision.assert_called_once_with(1)
-    collection.repository.reset_legacy_cohort.assert_not_called()
-    collection.repository.legacy_cohort_inputs.assert_not_called()
+    collection.repository.reset_saved_album_observations.assert_not_called()
     collection.repository.save_album_membership.assert_called_once_with(20, 1)
 
 
-def test_legacy_replacement_only_clears_unattributed_memberships_and_freezes_new_cohort(collection):
+def test_unattributed_replacement_only_clears_unattributed_memberships_and_resets_observations(collection):
     collection.albums.observe.return_value = 20
     collection.replace_saved_albums(iter([{'title': 'unknown'}, {'browse': 'A'}]))
     collection.repository.delete_album_memberships.assert_called_once_with(None)
-    collection.repository.reset_legacy_cohort.assert_called_once_with(replace=True)
+    collection.repository.reset_saved_album_observations.assert_called_once_with()
     collection.albums.observe.assert_called_once_with('A', title=None, artist=None, year=None, type=None,
                                                    thumbnail=None, credits=None, rank=2)
     collection.repository.save_album_membership.assert_called_once_with(20, None)

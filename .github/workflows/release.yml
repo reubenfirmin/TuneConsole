@@ -9,7 +9,7 @@ on:
         required: true
         type: string
       source_run:
-        description: Original tag build run with complete, unexpired candidate artifacts
+        description: Optional run ID to reuse an exact prepared candidate
         required: false
         type: string
 permissions:
@@ -17,6 +17,7 @@ permissions:
   actions: read
 jobs:
   version:
+    if: github.event_name == 'push' || github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 1
     outputs:
@@ -26,11 +27,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+          fetch-depth: 0
       - id: revision
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          git merge-base --is-ancestor HEAD refs/remotes/origin/main
           printf 'revision=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           printf 'tag=%s\n' "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
       - id: policy
@@ -38,7 +41,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: python3 packaging/release_policy.py "$RELEASE_TAG"
   preflight:
-    needs: version
+    needs: [version, candidates]
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
@@ -53,56 +56,45 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.revision }}
+          ref: ${{ github.workflow_sha }}
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Check publisher services before expensive platform work
+      - name: Check the publication services
         env:
           RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: python3 packaging/release_services.py preflight "$RELEASE_TAG" --revision "$RELEASE_REVISION"
-  prepared:
-    needs: [version, preflight]
-    if: ${{ !inputs.source_run }}
-    permissions:
-      contents: write
-      packages: write
-      actions: read
-    uses: ./.github/workflows/prepared-candidates.yml
-    secrets: inherit
-    with:
-      version: ${{ needs.version.outputs.version }}
-      tag: ${{ needs.version.outputs.tag }}
-      revision: ${{ needs.version.outputs.revision }}
   candidates:
-    needs: [version, prepared]
-    if: >-
-      ${{ !cancelled() && needs.version.result == 'success' &&
-          (needs.prepared.result == 'success' || inputs.source_run != '') }}
+    needs: version
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       artifact_ids: ${{ steps.inspect.outputs.artifact_ids }}
       source_run: ${{ steps.inspect.outputs.source_run }}
+      build_revision: ${{ steps.inspect.outputs.build_revision }}
+      build_tree: ${{ steps.inspect.outputs.build_tree }}
+      status_artifact: ${{ steps.evidence.outputs.artifact-id }}
       release_started_at: ${{ steps.inspect.outputs.release_started_at }}
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.revision }}
+          ref: ${{ github.workflow_sha }}
       - id: inspect
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          SOURCE_RUN: ${{ inputs.source_run || github.run_id }}
+          SOURCE_RUN: ${{ inputs.source_run }}
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
           RELEASE_REVISION: ${{ needs.version.outputs.revision }}
         run: python3 packaging/release_candidates.py "$SOURCE_RUN" "$RELEASE_TAG" "$RELEASE_REVISION"
       - uses: actions/upload-artifact@v4
+        id: evidence
         if: always()
         with:
           name: candidate-status-${{ github.run_attempt }}
@@ -113,7 +105,7 @@ jobs:
     if: >-
       always() && needs.version.result == 'success' &&
       needs.preflight.result == 'success' && needs.candidates.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # All tags share this owner. Do not cancel a promotion already changing channels.
     concurrency:
@@ -126,7 +118,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.version.outputs.revision }}
+          ref: ${{ github.workflow_sha }}
       - uses: actions/download-artifact@v4
         with:
           artifact-ids: ${{ needs.candidates.outputs.artifact_ids }}
@@ -137,9 +129,10 @@ jobs:
       - name: Verify immutable payload handoff before any channel changes
         env:
           RELEASE_TAG: ${{ needs.version.outputs.tag }}
-          RELEASE_REVISION: ${{ needs.version.outputs.revision }}
+          BUILD_REVISION: ${{ needs.candidates.outputs.build_revision }}
+          BUILD_TREE: ${{ needs.candidates.outputs.build_tree }}
           SOURCE_RUN: ${{ needs.candidates.outputs.source_run }}
-        run: python3 packaging/candidate_provenance.py verify candidate "$RELEASE_TAG" --revision "$RELEASE_REVISION" --source-run "$SOURCE_RUN"
+        run: python3 packaging/candidate_provenance.py verify candidate "$RELEASE_TAG" --revision "$BUILD_REVISION" --tree "$BUILD_TREE" --source-run "$SOURCE_RUN"
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
@@ -147,10 +140,16 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install publication tools within a separate setup budget
-        timeout-minutes: 3
+        timeout-minutes: 5
         run: |
-          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 -o APT::Update::Error-Mode=any update
-          sudo timeout 120 apt-get -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2 install -y flatpak ostree
+          apt_options=(-o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o Acquire::Retries=2)
+          packages=(flatpak ostree)
+          python3 packaging/ci_stage.py --timeout 70 --attempts 2 flatpak-apt-indexes -- \
+            sudo timeout --verbose --kill-after=5s 60s apt-get "${apt_options[@]}" -o APT::Update::Error-Mode=any update
+          python3 packaging/ci_stage.py --timeout 70 --attempts 2 flatpak-apt-download -- \
+            sudo timeout --verbose --kill-after=5s 60s apt-get "${apt_options[@]}" \
+              install --yes --download-only --no-install-recommends "${packages[@]}"
+          sudo apt-get install --yes --no-download --no-install-recommends "${packages[@]}"
       - name: Restore the signed repository from the release build
         timeout-minutes: 2
         run: tar -xf candidate/flatpak-repository.tar -C candidate
@@ -179,7 +178,7 @@ jobs:
           if-no-files-found: ignore
           retention-days: 90
   summary:
-    needs: [version, preflight, prepared, candidates, promote]
+    needs: [version, preflight, candidates, promote]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -187,6 +186,8 @@ jobs:
       actions: read
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.workflow_sha }}
       - uses: actions/download-artifact@v4
         continue-on-error: true
         with:
@@ -195,18 +196,18 @@ jobs:
           run-id: ${{ needs.candidates.outputs.source_run || inputs.source_run || github.run_id }}
           github-token: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/download-artifact@v4
-        continue-on-error: true
+        if: needs.candidates.outputs.status_artifact != ''
         with:
-          pattern: candidate-status-${{ github.run_attempt }}
+          artifact-ids: ${{ needs.candidates.outputs.status_artifact }}
           path: evidence/candidates
           merge-multiple: true
       - name: Record completed work and recovery action
         env:
           RESULTS: ${{ toJSON(needs) }}
           RELEASE_TAG: ${{ needs.version.outputs.tag || inputs.tag || github.ref_name }}
-          SOURCE_RUN: ${{ needs.candidates.outputs.source_run || inputs.source_run || github.run_id }}
+          SOURCE_RUN: ${{ needs.candidates.outputs.source_run || inputs.source_run }}
         run: python3 packaging/release_summary.py
-      - name: Measure release builds through verified publication
+      - name: Measure verified publication
         if: needs.candidates.outputs.release_started_at != ''
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

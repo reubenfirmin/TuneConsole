@@ -1,17 +1,15 @@
-"""Durable preview pages invalidated by writes to their consumed inputs.
-
-Page deltas avoid rewriting the growing artist/album prefix at every boundary.
-Invalidation changes one flag; the worker replaces obsolete scratch work.
-"""
-import json
-
+"""Schema for preview scratch work used by the migrations before C175."""
 from .db_revisions import (_KEY_COLUMNS, _KEY_COLUMN_EXCLUSIONS,
                           _COLUMN_GROUP_EXCLUSIONS, _COLUMN_GROUP_INCLUSIONS,
                           _identifier, _literal)
+from .domain_contracts import EARLIER_DISCOVERY_OFFERS
 from .schema_contract import MigrationError, tokens
 
-TABLES = frozenset(('group_preview_work', 'group_preview_dependencies', 'group_preview_pages'))
-SOURCES = frozenset('''accounts album_primary_provider_ids album_provider_ids artist_provider_ids
+INVALIDATE = ('UPDATE group_preparation_state SET preview_invalid=1 '
+              'WHERE singleton=1 AND preview_token IS NOT NULL AND preview_invalid=0')
+# The first checkpoint migration installs these guards. New inputs have
+# their own schema change so installed preview contracts remain valid.
+_INITIAL_SOURCES = frozenset('''accounts album_provider_ids artist_provider_ids
     catalog_entries discovery_memberships discovery_origin_tokens discovery_origins discovery_sources
     entry_artists entry_field_choices generation_groups genre_catalog genre_redirects group_generations
     group_head group_members group_publications group_version_aliases group_versions identities item_ratings
@@ -26,8 +24,17 @@ SOURCES = frozenset('''accounts album_primary_provider_ids album_provider_ids ar
     recommendation_candidates recommendation_generation_surfaces recommendation_generations recommendation_heads
     recommendation_policies recommendation_policy_bodies recommendation_pool_revalidations recommendation_pools
     recommendation_surface_pools recordings settings taste_axes taste_groups track_artists unresolved_items
-    unresolved_playlist_items youtube_items choice_learning_heads choice_learning_publications
+    unresolved_playlist_items youtube_items track_sources choice_learning_heads choice_learning_publications
     choice_learning_parameters choice_learning_exclusions choice_group_estimates choice_group_opportunities'''.split())
+_CATALOG_SCOPE_SOURCES = frozenset((
+    'account_albums', 'album_item_observations', 'album_occurrence_sources', 'album_track_occurrences',
+    'album_tracklists', 'albums', 'recording_redirects', 'unattributed_album_memberships',
+))
+_LIBRARY_READINESS_SOURCES = frozenset({'recording_library_state'})
+_PLAYLIST_SCOPE_SOURCES = frozenset({'playlist_scopes'})
+METADATA_SELECTION_SOURCES = frozenset({'enrichment_provider_config', 'recording_metadata_selections'})
+SOURCES = (_INITIAL_SOURCES | _CATALOG_SCOPE_SOURCES | _LIBRARY_READINESS_SOURCES | _PLAYLIST_SCOPE_SOURCES
+           | METADATA_SELECTION_SOURCES)
 
 
 def definitions(conn):
@@ -44,15 +51,60 @@ def definitions(conn):
     yield from guards(conn)
 
 
-def guards(conn, *, sources=SOURCES):
+def guards(conn, *, sources=_INITIAL_SOURCES, recommendation_selection=False):
+    from .recording_metadata import COLUMNS as RECORDING_METADATA_COLUMNS
+
     tables = {row[0] for row in conn.execute("SELECT name FROM main.sqlite_schema WHERE type='table'")}
+    invalidate = ('UPDATE group_preview_work SET invalid=1 WHERE singleton=1 AND invalid=0'
+                  if 'group_preview_work' in tables else INVALIDATE)
     for table in sorted(SOURCES & sources & tables):
         columns = [row[1] for row in conn.execute(f'PRAGMA main.table_info({_identifier(table)})')]
+        if table == 'track_sources' and 'library_origin' in columns:
+            # The intermediate repair appends these columns with ALTER TABLE.
+            # Keep the guard definition in the same order as the regular fold.
+            columns.remove('library_origin')
+            columns.remove('library_added_at')
+            position = columns.index('source_ref') + 1
+            columns[position:position] = ['library_origin', 'library_added_at']
+        if table == 'playlist_scopes':
+            columns = [column for column in columns if column != 'library_revisions']
+        if table == 'accounts':
+            columns = [column for column in columns if column != 'bindings_saved']
+        if table == 'genre_catalog':
+            columns = [column for column in columns if column not in ('enabled', 'preference_origin')]
+        if table in ('albums', 'recordings'):
+            # Retained Rediscover offer totals are independent of preview inputs.
+            columns = [column for column in columns if column not in EARLIER_DISCOVERY_OFFERS]
+        if table == 'albums':
+            from .album_playback_context import COLUMNS as PLAYBACK_COLUMNS
+            columns = [column for column in columns if column not in
+                       {'discovery_found_at', 'merged_at', 'merge_digest', 'unattributed_saved_at', *PLAYBACK_COLUMNS}]
+        if table == 'album_provider_ids':
+            columns = [column for column in columns if not column.startswith(('fingerprint_', 'share_', 'note_'))]
+        if table == 'group_versions':
+            columns = [column for column in columns if not column.startswith('build_')]
+        if table == 'taste_groups':
+            columns = [column for column in columns if not column.startswith('mode_')]
+        if table == 'group_generations':
+            columns = [column for column in columns if not column.startswith(('build_', 'retention_'))]
+        if table == 'group_version_aliases':
+            columns = [column for column in columns if not column.startswith('retention_')]
+        if table == 'recordings':
+            # Preview preparation consumes the source catalog facts. Mix Tape
+            # selection's derived columns do not change the saved page inputs.
+            columns = [column for column in columns if column not in RECORDING_METADATA_COLUMNS]
         groups = {group: [col for col in columns if col not in excluded]
                   for group, excluded in _COLUMN_GROUP_EXCLUSIONS.get(table, {}).items()}
         groups.update({group: [col for col in columns if col in included]
-                       for group, included in _COLUMN_GROUP_INCLUSIONS.get(table, {}).items()})
+                       for group, included in _COLUMN_GROUP_INCLUSIONS.get(table, {}).items()
+                       if included.intersection(columns)})
+        if table == 'taste_axes' and 'lean' not in columns:
+            groups.clear()
+        if recommendation_selection and table == 'recommendation_generation_surfaces':
+            groups['selection'] = ['selected']
         keys = _KEY_COLUMNS.get(table, ())
+        if table == 'choice_learning_publications' and 'document' in columns:
+            keys = 'surface'
         keys = (keys,) if isinstance(keys, str) else keys
         for event in ('INSERT', 'UPDATE', 'DELETE'):
             changed = lambda selected: ' OR '.join(
@@ -68,14 +120,18 @@ def guards(conn, *, sources=SOURCES):
                             condition = f'({condition} AND ({keyed_change}))'
                         matches.append(condition)
             for group, selected in groups.items():
+                if group == 'selection' and table == 'recommendation_generation_surfaces' and event != 'UPDATE':
+                    continue
                 condition = 'record_key=' + _literal('group:' + group)
                 if event == 'UPDATE':
                     condition = f'({condition} AND ({changed(selected)}))'
+                elif group == 'selection' and table == 'group_generations':
+                    condition = f"({condition} AND {sides[0]}.is_active=1)"
                 matches.append(condition)
             when = f' WHEN {changed(columns)}' if event == 'UPDATE' else ''
             name = f'group_preview_changed_{table}_{event.lower()}'
             yield name, (f'CREATE TRIGGER {name} AFTER {event} ON main.{_identifier(table)}{when} BEGIN '
-                'UPDATE group_preview_work SET invalid=1 WHERE singleton=1 AND invalid=0 AND EXISTS('
+                + invalidate + ' AND EXISTS('
                 'SELECT 1 FROM group_preview_dependencies WHERE table_name=' + _literal(table) +
                 ' AND (' + ' OR '.join(matches) + ')); END')
 
@@ -85,52 +141,38 @@ def install(conn, context=None):
         conn.execute(sql)
 
 
-def install_guards(conn):
-    for name, sql in guards(conn):
+def install_guards(conn, *, sources=_INITIAL_SOURCES):
+    for name, sql in guards(conn, sources=sources):
         conn.execute('DROP TRIGGER IF EXISTS ' + name)
         conn.execute(sql)
 
 
 def validate(conn):
+    _validate_definitions(conn, definitions(conn))
+
+
+def install_catalog_scope_guards(conn, context):
+    install_guards(conn, sources=_CATALOG_SCOPE_SOURCES)
+    conn.execute('UPDATE group_preview_work SET invalid=1 WHERE singleton=1 AND invalid=0')
+
+
+def validate_catalog_scope_guards(conn):
+    _validate_definitions(conn, guards(conn, sources=_CATALOG_SCOPE_SOURCES))
+
+
+def install_library_readiness_guards(conn, context):
+    install_guards(conn, sources=_LIBRARY_READINESS_SOURCES)
+    conn.execute('UPDATE group_preview_work SET invalid=1 WHERE singleton=1 AND invalid=0')
+
+
+def validate_library_readiness_guards(conn):
+    _validate_definitions(conn, guards(conn, sources=_LIBRARY_READINESS_SOURCES))
+
+
+def _validate_definitions(conn, expected):
     from .schema_inspection import definitions as read_definitions
-    expected = dict(definitions(conn))
+    expected = dict(expected)
     actual = read_definitions(conn, expected)
     for name, sql in expected.items():
         if name not in actual or tokens(actual[name]) != tokens(sql):
             raise MigrationError('Incompatible adaptive preview checkpoint: ' + name)
-
-
-def read(conn):
-    row = conn.execute('SELECT token,schema_version,started_at,expires_at,invalid '
-                       'FROM group_preview_work WHERE singleton=1').fetchone()
-    if row is None:
-        return None
-    state = dict(zip(('token', 'schema_version', 'at', 'expires_at', 'invalid'), row))
-    if not state['invalid']:
-        state['dependencies'] = list(map(tuple, conn.execute(
-            'SELECT table_name,record_key FROM group_preview_dependencies')))
-        state['pages'] = [(version, lane, json.loads(delta)) for version, lane, delta in conn.execute(
-            'SELECT group_version,lane,delta_json FROM group_preview_pages ORDER BY group_version,lane,after')]
-    return state
-
-
-def save(conn, header, expected_token, page, dependencies):
-    """The caller validates the original reader under its writer reservation."""
-    row = conn.execute('SELECT token,invalid FROM group_preview_work WHERE singleton=1').fetchone()
-    if (row[0] if row else None) != expected_token:
-        return False
-    if row is not None and row[0] == header['token']:
-        if row[1]:
-            return False
-    else:
-        for table in TABLES:
-            conn.execute('DELETE FROM ' + table)
-        conn.execute('INSERT INTO group_preview_work(singleton,token,schema_version,started_at,expires_at) '
-                     'VALUES (1,?,?,?,?)',
-                     (header['token'], header['schema_version'], header['at'], header['expires_at']))
-    conn.execute('UPDATE group_preview_work SET expires_at=? WHERE singleton=1', (header['expires_at'],))
-    version, lane, after, delta = page
-    conn.execute('INSERT INTO group_preview_pages VALUES (?,?,?,?)',
-                 (version, lane, after, json.dumps(delta, separators=(',', ':'))))
-    conn.executemany('INSERT OR IGNORE INTO group_preview_dependencies VALUES (?,?)', sorted(dependencies))
-    return True

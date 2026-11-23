@@ -12,10 +12,9 @@ from tests.test_audio_vibes import sample
 from tests import file_custody_support as custody
 from tests.store_fixture_support import file_consumer_store, native_sql_calls, without_query_timing
 from yt_playlist.core import db_handles, fao, sample_files
-from yt_playlist.core.db_rebuild import job
+from yt_playlist.core.file_receipts import install_sample_files
 from yt_playlist.core.policy_documents import coordinate_updates
 from yt_playlist.core.store import Store
-from yt_playlist.repos.audio_vibes import install_sample_files
 
 
 pytestmark = pytest.mark.usefixtures('without_query_timing')
@@ -61,7 +60,7 @@ def test_interrupted_sample_commits_its_id_before_file_and_finishes_an_identical
     assert Path(pending['filename']).exists() is (failure == 'status')
     assert not store.audio_vibes.samples(value['run_id'])
     assert not store.audio_vibes.sample_receipts(value['run_id'])
-    assert not store.audio_vibes.repository.sample_owners([value['id']])
+    assert not store.audio_vibes.repository.sample_facts(value['run_id'])
 
     with store.conn:
         store.conn.execute('BEGIN')
@@ -78,13 +77,9 @@ def test_interrupted_sample_commits_its_id_before_file_and_finishes_an_identical
         assert Path(copied['filename']).exists() is (failure == 'status')
         if failure == 'status':
             assert fao.read(copied['filename']).bytes == sample_files.canonical(value)
-    # Maintenance inventories count usable files; an interrupted reservation
-    # without a file must not make compaction fail during its initial report.
-    job._owned_files(store.conn)
-
     restarted = Store(store._db_path)
     try:
-        restarted.init_schema(defer_metadata=True)
+        restarted.init_schema()
         restarted.audio_vibes.save_sample(value, 20)
         assert restarted.audio_vibes.samples(value['run_id']) == [value]
         assert restarted.audio_vibes.sample_receipts(value['run_id']) == [
@@ -92,6 +87,7 @@ def test_interrupted_sample_commits_its_id_before_file_and_finishes_an_identical
         retained = restarted.conn.execute('SELECT * FROM sample_attributes').fetchone()
         assert retained['file_status'] == 'ready' and retained['captured_at'] == 10
         assert retained['filename'] == pending['filename']
+        assert fao.read(retained['filename']).bytes == sample_files.canonical(value)
         assert not restarted.conn.execute('PRAGMA foreign_key_check').fetchone()
     finally:
         restarted.conn.close()
@@ -108,7 +104,7 @@ def test_installed_hash_named_sample_keeps_reading_and_retrying_beside_new_id_na
             store.conn.execute('UPDATE sample_attributes SET filename=?,content_digest=NULL WHERE id=?',
                                (filename, old['id']))
     original = Path(filename).read_bytes()
-    store.init_schema(defer_metadata=True)
+    store.init_schema()
     assert Path(filename).read_bytes() == original
     assert store.audio_vibes.samples(old['run_id']) == [old]
     store.audio_vibes.save_sample(old, 20)
@@ -186,7 +182,7 @@ def test_public_recovery_retains_samples_without_producer(installed, tmp_path, k
         candidate = Store(candidate_path)
         try:
             candidate.conn.execute('PRAGMA synchronous=OFF')
-            candidate.init_schema(defer_metadata=True)
+            candidate.init_schema()
             assert candidate.audio_vibes.samples('captured-run') == values
             assert candidate.conn.execute('SELECT count(*) FROM sample_attributes').fetchone()[0] == 3
             assert not candidate.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -266,43 +262,6 @@ def test_interruption_rolls_back_coordinates_and_retry_preserves_exact_bytes(ins
     assert list(store.conn.iterdump()) == before
 
 
-@pytest.mark.parametrize('installed', [107], indirect=True)
-def test_compactor_inventory_and_retained_original_recovery_include_samples(installed, tmp_path):
-    store, _ = installed
-    values = capture(store)
-    paths = [Path(row[0]) for row in store.conn.execute('SELECT filename FROM sample_attributes')]
-    inventory = job._owned_files(store.conn)
-    assert inventory['files'] >= 3
-    assert inventory['bytes'] >= sum(path.stat().st_size for path in paths)
-    job.run(store)
-    state = db_handles.state(store._db_path)
-    assert state['phase'] == 'complete'
-    candidate_path = tmp_path/'backup-restore'/'copy.db'
-    candidate_path.parent.mkdir()
-    # The current job retains the original database and immutable file owners.
-    # Recover that original through the public exporter, then remove the shared
-    # producer files so a surviving absolute reference cannot hide missing custody.
-    with closing(sqlite3.connect(Path(state['original']).as_uri()+'?mode=ro', uri=True)) as backup, \
-            closing(sqlite3.connect(candidate_path)) as target:
-        backup.row_factory = sqlite3.Row
-        with job._files(backup), backup:
-            backup.execute('BEGIN')
-            manifests = custody.export_files(backup, candidate_path)
-        backup.backup(target)
-        target.row_factory = sqlite3.Row
-        assert 'samples' in manifests
-        custody.restore_files(target, manifests)
-    hidden = sample_files.directory(store.conn).with_name('hidden-producer-samples')
-    sample_files.directory(store.conn).rename(hidden)
-    try:
-        candidate = Store(candidate_path)
-        try:
-            candidate.init_schema(defer_metadata=True)
-            assert candidate.audio_vibes.samples('captured-run') == values
-        finally:
-            candidate.conn.close()
-    finally:
-        hidden.rename(sample_files.directory(store.conn))
 
 
 @pytest.mark.parametrize('installed', [107], indirect=True)

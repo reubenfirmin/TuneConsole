@@ -1,27 +1,10 @@
-"""Real predecessor conversion and controlled interrupted deletion transports."""
-import hashlib
-import json
-import sqlite3
-from contextlib import ExitStack, closing
-from pathlib import Path
+"""Recovery from an interruption before a playlist deletion is sent."""
 
 import pytest
-from ytmusicapi.exceptions import YTMusicServerError
-
-from tests.genre_catalog_support import bound_catalog
-from tests.store_fixture_support import (
-    install_numbered_input,
-    mock_regular_numbered_input,
-    native_sql_calls,
-    reuse_reporting_reader,
-    without_query_timing,
-)
+from tests.store_fixture_support import initialize_consumer, without_query_timing
 from tests.test_undo_recovery import RecoveryClient
-from yt_playlist.core import action_work, fao, schema_inspection
-from yt_playlist.core.migrations import migrate, registry, regular
 from yt_playlist.core.store import Store
-from yt_playlist.library import executor, playlist_deletion
-from yt_playlist.repos.models import Playlist
+from yt_playlist.library import executor
 
 
 @pytest.fixture(autouse=True)
@@ -37,26 +20,6 @@ def controlled_provider_retry_clock(monkeypatch):
     # time is below the uncertain-write/readback boundary exercised here.
     monkeypatch.setattr(executor, 'with_retry',
                         lambda fn, **options: with_retry(fn, sleep=lambda delay: None, **options))
-
-
-@pytest.fixture
-def deletion_inputs(monkeypatch, native_sql_calls, without_query_timing):
-    """Completed lower SQL; each test owns its actual conversion and reopens."""
-    bound_catalog(monkeypatch)
-    with ExitStack() as resources:
-        templates = {}
-
-        def get(version):
-            if version not in templates:
-                schema = resources.enter_context(closing(sqlite3.connect(':memory:')))
-                install_numbered_input(schema, version)
-                assert schema.execute('SELECT max(version) FROM schema_migrations').fetchone()[0] == version
-                assert not schema.execute('SELECT 1 FROM main.actions').fetchone()
-                schema.execute('PRAGMA query_only=ON')
-                templates[version] = schema
-            return templates[version]
-
-        yield get
 
 
 class InterruptedDeletion(RecoveryClient):
@@ -79,10 +42,6 @@ def _step(store, action):
     return row
 
 
-def _writes(client):
-    return (list(client.attempts),list(client.added),list(client.removed),list(client.created))
-
-
 def _merge(store, account, memberships, client, now):
     executor.apply_result(store,{account:client},memberships,['a','b','c'],'all',now)
 
@@ -95,15 +54,14 @@ def private_store(path):
     return store
 
 
-def test_current_unsent_intent_survives_repair_and_admits_keeper_write(tmp_path,monkeypatch,
-                                                                  deletion_inputs):
+def test_current_unsent_intent_survives_repair_and_admits_keeper_write(
+        tmp_path, monkeypatch, _pristine_current_schema, native_sql_calls, without_query_timing):
     monkeypatch.setenv('YT_PLAYLIST_HOME',str(tmp_path/'home'))
     path = tmp_path/'unsent.db'
     store = private_store(path)
     try:
-        deletion_inputs(107).backup(store.conn)
-        store._bind_repositories()
-        account = store.accounts.upsert_account('Owner','owner.json',None,True)
+        initialize_consumer(store, _pristine_current_schema)
+        account = store.accounts.upsert_account('Owner',None,True)
         memberships = [store.playlists.upsert_playlist(account,remote,remote,2,'',1)
                        for remote in ('SOURCE','KEEP')]
         client = InterruptedDeletion()

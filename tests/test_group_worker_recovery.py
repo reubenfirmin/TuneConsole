@@ -6,7 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from tests.group_support import recordings
-from tests.rec.test_home_prepared import one_menu_per_attempt
 from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
 )
@@ -16,7 +15,7 @@ from yt_playlist.core import schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (album_choices, album_notes, choice_evidence, group_preparation,
-                             group_serving, home_cards, home_prepared, measurement, rec_worker)
+                             group_serving, home_prepared, measurement, rec_worker)
 from yt_playlist.rec.worker_queue import Job
 
 
@@ -76,8 +75,7 @@ def previous_groups(store):
 
 @pytest.fixture
 def completed_home_inputs(scheduled, monkeypatch):
-    """Recovery owns real Home publication, independent of albums and diagnostics."""
-    # The shared queue fixture stubs Home. This workflow owns its real publisher.
+    """Recovery runs the real Home job and its discovery and revisit stages."""
     monkeypatch.delattr(scheduled[0].tasks, 'home')
     monkeypatch.setattr(measurement, 'maintain_storage', lambda *args, **kwargs: True)
     monkeypatch.setattr(choice_evidence, 'prepare_context', lambda *args, **kwargs: True)
@@ -86,17 +84,15 @@ def completed_home_inputs(scheduled, monkeypatch):
     monkeypatch.setattr(choice_evidence, 'freeze_context', lambda *args, **kwargs: {})
     monkeypatch.setattr(album_choices, 'prepare_cached', lambda *args, **kwargs: {'items': []})
     monkeypatch.setattr(album_notes, 'prepare', lambda *args, **kwargs: False)
-    # These independent summaries do not participate in the failed group job.
-    # Home still builds and publishes its actual mix payload on every turn.
-    monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda *args, **kwargs: None)
-    monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda *args, **kwargs: None)
-    monkeypatch.setattr(home_cards.HomeCards, 'cards', lambda self, request: home_cards.CardsResult(
-        [], [], None, None, [], [], request.epoch, None))
+    stages = []
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', lambda _, now: stages.append(('discovery', now)) or {})
+    monkeypatch.setattr(home_prepared, 'prepare_revisit', lambda _, now: stages.append(('revisit', now)) or True)
+    return stages
 
 
 @pytest.mark.parametrize('failure', ['initial-progress-write', 'yield-report-write'])
 def test_group_progress_storage_failure_retries_and_runs_real_home(
-        scheduled, previous_groups, completed_home_inputs, one_menu_per_attempt, monkeypatch, caplog, failure):
+        scheduled, previous_groups, completed_home_inputs, monkeypatch, caplog, failure):
     worker, targets = scheduled
     store = worker.ctx.store
     previous, preview, progress = previous_groups
@@ -128,7 +124,7 @@ def test_group_progress_storage_failure_retries_and_runs_real_home(
 
     def prepare_home():
         result = home()
-        homes.append(store.rec_proposals.get_proposals(home_prepared.SURFACE))
+        homes.append(completed_home_inputs[-2:])
         return result
 
     monkeypatch.setattr(store.settings, 'set_setting', storage_full)
@@ -144,7 +140,8 @@ def test_group_progress_storage_failure_retries_and_runs_real_home(
         assert state.dirty and state.failures == count
         assert state.retry_at == clock[0] + delay
         assert attempts == expected * count
-        assert len(homes) == count and homes[-1]['built_at'] == worker.ctx.now_fn()
+        assert len(homes) == count
+        assert homes[-1] == [('discovery', worker.ctx.now_fn()), ('revisit', worker.ctx.now_fn())]
         assert store.taste_groups.head(members=True) == previous
         assert store.rec_proposals.get_proposals(group_serving.SURFACE) == preview
         assert group_preparation.status(store) == progress
@@ -167,7 +164,7 @@ def test_group_progress_storage_failure_retries_and_runs_real_home(
     assert len(targets) == 1
     targets.pop()()
     assert len(steps) == 3 and len(homes) >= 3
-    assert homes[-1]['built_at'] == worker.ctx.now_fn()
+    assert homes[-1] == [('discovery', worker.ctx.now_fn()), ('revisit', worker.ctx.now_fn())]
     assert group_preparation.status(store)['phase'] == 'ready'
     assert not state.dirty and state.failures == 0
     assert not worker._running and not worker.work.active and not targets

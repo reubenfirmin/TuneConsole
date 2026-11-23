@@ -3,7 +3,7 @@ from yt_playlist.rec import artist_model, surfaces
 
 
 def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "bridge", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     entries = []
     for video, title, name, provider in [
         ("seed", "Anchor", "Seed", "seed"),
@@ -23,9 +23,10 @@ def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(sto
     ranks, reads = [], []
     track_keys = type(store.artists).track_keys
 
-    def rank(_store, seeds):
+    def rank(seeds, *args, **kwargs):
         ranks.append(seeds)
-        return {artists[0]: 1.0, artists[1]: 0.8, artists[2]: 0.6}
+        return [artist_model.ArtistNeighbor(key, score, {}, None)
+                for key, score in zip(artists[1:], [0.8, 0.6])]
 
     def credits(repo, **kwargs):
         reads.append(kwargs)
@@ -34,7 +35,7 @@ def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(sto
     def public(*args, **kwargs):
         raise AssertionError("Internal completion must retain canonical artist keys")
 
-    monkeypatch.setattr(artist_model, "_blended_set_scores", rank)
+    monkeypatch.setattr(artist_model, "rank_neighbors", rank)
     monkeypatch.setattr(type(store.artists), "track_keys", credits)
     monkeypatch.setattr(type(store.artists), "public_keys", public)
     suggestions = surfaces.complete_playlist(store, target, limit=4, now=1)
@@ -44,7 +45,7 @@ def test_completion_ranks_once_without_public_names_or_repeated_credit_reads(sto
 
 
 def test_shared_artist_scores_expand_owned_and_discovered_tracks_without_reranking(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "bridge", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     tid = store.tracks.upsert_track("owned", "Owned song", "Related", None, 200)
     library = store.playlists.upsert_playlist(iid, "LIB", "Library", 1, "", 1)
     store.playlists.set_playlist_tracks(library, [tid])

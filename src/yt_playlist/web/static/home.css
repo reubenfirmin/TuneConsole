@@ -142,12 +142,19 @@
 .page-home .home-dashboard {
   min-width: 0;
 }
-.page-home .dash-nav {
+.page-home .dash-navigation {
   display: flex;
   align-items: center;
-  gap: .2rem;
-  max-width: 100%;
+  gap: 1rem;
   margin-block-end: clamp(1.2rem, 3vw, 2rem);
+}
+.page-home .dash-nav {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: .2rem;
+  min-width: 0;
+  max-width: 100%;
   padding-inline: .25rem;
   scroll-padding-inline: .25rem;
   overflow-x: auto;
@@ -179,6 +186,31 @@
 .page-home .dash-nav button.on {
   color: var(--text);
   border-block-end-color: var(--accent);
+}
+.album-tune {
+  display: grid;
+  place-items: center;
+  flex: 0 0 2.75rem;
+  width: 2.75rem;
+  height: 2.75rem;
+  padding: .5rem;
+  border: 1.5px solid currentColor;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--radio-queue-2);
+}
+.album-tune svg {
+  display: block;
+  width: 1.6rem;
+  height: 1.3rem;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+.album-tune:is(:hover, :focus-visible) {
+  color: var(--text);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--radio-queue-2) 30%, transparent);
 }
 .page-home .dash-attention-dot {
   display: inline-block;

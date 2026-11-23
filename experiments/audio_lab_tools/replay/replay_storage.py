@@ -10,6 +10,7 @@ from ..studies.external_checkpoint import RUN
 from ..support.external_experiment import digest, save, stamp
 
 WORK = RUN / 'library-replay'
+COPY_BYTES = 16 * 1024 * 1024
 
 
 def owned_rows(conn):
@@ -38,7 +39,7 @@ def freeze(database, campaign):
     Read source payloads by their SQL-owned identity, never by sweeping the live
     native directory. Missing old payloads fail the new campaign explicitly.
     """
-    from yt_playlist.core import policy_documents, recommendation_outputs
+    from yt_playlist.core import fao, policy_documents, recommendation_outputs
     database, campaign = Path(database).resolve(), Path(campaign).resolve()
     if not campaign.is_relative_to(WORK.resolve()) or database != campaign / 'source.db':
         raise ValueError('Payload relocation requires this campaign\'s private source.db')
@@ -55,13 +56,13 @@ def freeze(database, campaign):
             token = (kind, str(source))
             if token not in replacements:
                 with source.open('rb') as stream:
-                    raw = stream.read(16 * 1024 * 1024 + 1)
-                if len(raw) > 16 * 1024 * 1024:
+                    raw = stream.read(COPY_BYTES + 1)
+                if len(raw) > COPY_BYTES:
                     raise ValueError('Referenced payload exceeds copy bound: ' + str(source))
                 checksum = hashlib.sha256(raw).hexdigest()
-                if source.stem != checksum:
-                    raise ValueError('Referenced payload filename/content differ: ' + str(source))
-                target = root / kind / checksum[:2] / (checksum + '.json')
+                # Native filenames identify decoded content. The archive also
+                # records the exact stored bytes, including compression.
+                target = root / kind / checksum[:2] / checksum / source.name
                 target.parent.mkdir(parents=True, exist_ok=True)
                 if target.exists():
                     if digest(target) != checksum:
@@ -69,6 +70,9 @@ def freeze(database, campaign):
                 else:
                     target.write_bytes(raw)
                     target.chmod(0o600)
+                _, decoded_checksum = fao.read(target, max_bytes=COPY_BYTES).digest
+                if decoded_checksum != source.stem:
+                    raise ValueError('Referenced payload filename/content differ: ' + str(source))
                 relative = str(target.relative_to(campaign))
                 files[relative] = {'sha256': checksum, 'bytes': len(raw)}
                 replacements[token] = str(target)
@@ -122,12 +126,13 @@ def verify(campaign, manifest_sha256):
 
 def guard_reads(patch, campaign):
     """Reject serving reads outside this campaign and its private working copy."""
-    from yt_playlist.core import policy_documents, recommendation_outputs
+    from yt_playlist.core import policy_documents, recommendation_content, recommendation_outputs
     campaign = Path(campaign).resolve()
     if not campaign.is_relative_to(WORK.resolve()):
         raise ValueError('Expected an experiments-only consumer campaign')
     calls = {'policy_reads': 0, 'prepared_output_reads': 0, 'outside_boundary_reads': 0}
     for module, name, counter in ((policy_documents, 'read', 'policy_reads'),
+                                  (recommendation_content, 'read_encoded', 'prepared_output_reads'),
                                   (recommendation_outputs, '_read', 'prepared_output_reads')):
         original = getattr(module, name)
         def guarded(filename, *args, _original=original, _counter=counter, **kwargs):

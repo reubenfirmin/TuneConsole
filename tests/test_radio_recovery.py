@@ -1,13 +1,229 @@
 """Saved-session recovery, native queue adoption and playback continuity."""
 import json
+import shutil
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
+from urllib.parse import parse_qs, urlparse
 
 import pytest
+from yt_playlist.web import radio_session as radio_module
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.radio_playlist_io import PlaylistPending
 from tests.radio_session_support import poc, play
+
+
+_PROVIDER_OBSERVER = r"""
+const fs = require('node:fs');
+const vm = require('node:vm');
+const {frame, provider, navigation} = JSON.parse(process.argv[1]);
+const playlist = frame?.playlist || navigation.radioRecovery.playlist;
+const watchEndpoint = {videoId: provider.video, playlistId: playlist};
+const rows = provider.ids.map(videoId => {
+  const primaryRenderer = {playlistPanelVideoRenderer: {videoId, navigationEndpoint: {watchEndpoint}}};
+  if (videoId !== provider.video || !provider.counterpart) return primaryRenderer;
+  return {playlistPanelVideoWrapperRenderer: {primaryRenderer, counterpart: [{counterpartRenderer: {
+    playlistPanelVideoRenderer: {videoId: provider.counterpart},
+  }}]}};
+});
+const queue = {items: rows, selectedItemIndex: provider.ids.indexOf(provider.video), autoplay: false};
+let fetches = 0, navigated = null;
+const elements = {
+  'ytmusic-app': {polymerController: {
+    getState: () => ({playerPage: {playerPageWatchNextResponse: {currentVideoEndpoint: {watchEndpoint}}}}),
+    handleQueueUpdateCommand: () => { fetches++; },
+  }},
+  'ytmusic-player-queue': {queue: {store: {store: {getState: () => ({queue})}}}},
+  '#movie_player': {
+    getVideoData: () => ({video_id: provider.status ? '' : provider.video}),
+    getPlaylistId: () => provider.status ? '' : playlist,
+    getPlayerState: () => provider.ended ? 0 : provider.paused ? 2 : 1,
+    getPlayerResponse: () => ({playabilityStatus: {status: provider.status || 'OK'}}),
+  },
+  video: {paused: provider.paused, currentTime: 30, duration: 300},
+};
+const context = vm.createContext({
+  window: {}, URL, AbortController, Date, setTimeout() {}, clearTimeout() {},
+  createNativeRatings: () => ({}),
+  location: {href: 'https://music.youtube.com/watch?v=' + provider.video + '&list=' + playlist},
+  document: {querySelector: key => elements[key], querySelectorAll: () => [], addEventListener() {}},
+  chrome: {
+    scripting: {executeScript({files, func, args}) {
+      if (files) vm.runInContext(fs.readFileSync('extension/' + files[0], 'utf8'), context);
+      else return [{result: func(...args)}];
+    }},
+    tabs: {update(id, {url}) { navigated = url; }},
+  },
+});
+if (navigation) {
+  for (const file of ['radio_session.js', 'worker/playback.js'])
+    vm.runInContext(fs.readFileSync('extension/' + file, 'utf8'), context);
+  const playback = vm.runInContext('createPlayback', context)({
+    origin: 'https://music.youtube.com',
+    musicTabs: {list: () => [{id: 1}], coordinate: operation => operation(), suppressBeforeUnload() {}},
+    warn: (message, error) => { throw error; },
+  });
+  playback.navigate(navigation.url, null, navigation.radioRecovery)
+    .then(() => console.log(JSON.stringify({navigated})));
+} else {
+  vm.runInContext(fs.readFileSync('extension/worker/radio.js', 'utf8'), context);
+  const observer = vm.runInContext('createRadioSession', context)({pickTab: () => ({id: 1})});
+  observer.update(frame).then(report => console.log(JSON.stringify({report, fetches})));
+}
+"""
+
+
+@pytest.mark.parametrize('outcome', [
+    'repaired', 'counterpart', 'ended', 'unplayable', 'unplayable_tail', 'unfamiliar_status', 'unmapped_unplayable',
+    'unmapped_ended', 'unmapped_paused', 'paused', 'superseded', 'native_advanced',
+])
+def test_on_air_continues_from_the_confirmed_queue(poc, monkeypatch, outcome):
+    node = shutil.which('node')
+    if node is None:
+        pytest.skip('Node.js is required to exercise the extension')
+    controller, remote, frames, *_ = poc
+    bridge = controller.ctx.bridge
+    provider, fetches = {}, []
+    send = bridge.send_control
+    blocking_status = 'CONTENT_CHECK_REQUIRED' if outcome == 'unfamiliar_status' else 'UNPLAYABLE'
+    blocked_current = outcome in {'unplayable', 'unplayable_tail', 'unfamiliar_status'}
+
+    def provider_call(**message):
+        result = subprocess.run([node, '-e', _PROVIDER_OBSERVER, json.dumps({'provider': provider, **message})],
+                                capture_output=True, text=True, check=True, timeout=10)
+        return json.loads(result.stdout)
+
+    def navigate(frame, **options):
+        sent = send(frame, **options)
+        if sent:
+            if frame.get('radioRecovery'):
+                if outcome == 'native_advanced':
+                    provider.update(video='v2', ids=list(remote.ids), paused=False, ended=False)
+                dispatched = provider_call(navigation=frame)['navigated']
+                if outcome == 'native_advanced':
+                    assert dispatched is None
+                    return sent
+                assert dispatched == frame['url']
+            (video,) = parse_qs(urlparse(frame['url']).query)['v']
+            if outcome == 'unmapped_unplayable' and video == 'v30':
+                # Music can respond to a retry with another unplayable upload
+                # and still identify the same saved playlist.
+                provider.update(video='v31')
+                return sent
+            provider.clear()
+            provider.update(video=video, ids=[] if video == 'v1' else list(remote.ids))
+            if blocked_current and video == 'v2' or outcome == 'unplayable_tail' and video == 'v3':
+                provider.update(status=blocking_status, paused=True, ids=[])
+        return sent
+
+    async def observe(frame):
+        snapshot = provider_call(frame=frame)
+        if snapshot['fetches']:
+            fetches.append(provider['video'])
+            if outcome in {'repaired', 'counterpart'}:
+                provider['ids'] = [provider['video'], *remote.ids[1 if provider['video'] == 'v1' else 2:]]
+        return 200, json.dumps(snapshot['report'])
+
+    monkeypatch.setattr(bridge, 'send_control', navigate)
+    monkeypatch.setattr(bridge, 'request_control', observe)
+    assert controller.start()['ok']
+    session = controller.session
+    clock = time.monotonic()
+    elapsed = 0
+    monkeypatch.setattr(radio_module, 'time', SimpleNamespace(monotonic=lambda: clock + elapsed))
+
+    def tick(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+        controller.listening.observe(session)
+        controller.advance(session)
+
+    tick(0)
+    tick(2)
+    assert fetches[0] == 'v1'
+    assert [track['video_id'] for track in session.heard] == ['v1']
+    assert len(frames) == 1
+    if outcome in {'repaired', 'counterpart'}:
+        tick(2)
+        assert session.browser['playback_synced']
+        if outcome == 'counterpart':
+            provider.update(video='v30', ids=['v30'], counterpart='v2')
+            tick(2)
+            assert session.browser['savedIndex'] == 1
+            tick(2)
+            tick(2)
+            assert session.browser['playback_synced']
+        else:
+            provider.update(video='v2')
+            tick(2)
+        assert [t['video_id'] for t in session.heard] == ['v1', 'v30' if outcome == 'counterpart' else 'v2']
+        assert len(frames) == 1
+    elif blocked_current:
+        provider.update(video='v2', status=blocking_status, paused=True)
+        tick(2)
+        assert session.browser['player']['error'] == blocking_status
+        tick(4)
+        assert frames[-1]['url'].endswith('v=v2&list=PLSESSION'), 'retry the current track first'
+        assert len(frames) == 2
+        tick(12)
+        assert provider['video'] == 'v3'
+        tick(2)
+        if outcome == 'unplayable_tail':
+            tick(4)
+            tick(12)
+            assert len(frames) == 4, 'retry the last saved song before refilling'
+            assert remote.ids[-1] == 'v4'
+            tick(2)
+            tick(2)
+            assert [t['video_id'] for t in session.heard] == ['v1', 'v4']
+            assert len(frames) == 5
+        else:
+            assert [t['video_id'] for t in session.heard] == ['v1', 'v3']
+            assert len(frames) == 3
+    elif outcome == 'unmapped_unplayable':
+        provider.update(video='v30', ids=[], status='UNPLAYABLE', paused=True)
+        tick(2)
+        assert session.browser['player']['playlist_ytm_id'] == session.playlist
+        assert session.browser['player']['error'] == 'UNPLAYABLE'
+        assert session.browser['savedIndex'] is None
+        tick(4)
+        assert frames[-1]['url'].endswith('v=v30&list=PLSESSION')
+        assert len(frames) == 2
+        tick(12)
+        tick(4)
+        assert provider['video'] == 'v2'
+        tick(2)
+        assert [track['video_id'] for track in session.heard] == ['v1', 'v2']
+        assert len(frames) == 3
+    elif outcome in {'unmapped_ended', 'unmapped_paused'}:
+        provider.update(video='v30', ids=[])
+        tick(2)
+        assert len(frames) == 1, 'an unmapped upload that is playing can continue'
+        ended = outcome == 'unmapped_ended'
+        provider.update(paused=True, ended=ended)
+        tick(2)
+        assert session.browser['savedIndex'] is None
+        assert session.browser['player']['ended'] is ended
+        tick(4)
+        tick(2)
+        assert len(frames) == (2 if ended else 1)
+        assert [track['video_id'] for track in session.heard] == (['v1', 'v2'] if ended else ['v1'])
+    else:
+        provider.update(paused=True, ended=outcome != 'paused')
+        tick(2)
+        if outcome == 'superseded':
+            bridge.begin_playback_intent()
+        tick(4)
+        tick(2)
+        if outcome in {'ended', 'native_advanced'}:
+            assert provider['video'] == 'v2'
+            assert [t['video_id'] for t in session.heard] == ['v1', 'v2']
+            assert len(frames) == 2
+        else:
+            assert len(frames) == 1
+    assert remote.ids[:3] == ['v1', 'v2', 'v3']
+    assert not remote.removes
 
 
 def test_checkpoint_only_cancel_survives_late_playback_and_process_reopen(poc, tmp_path):
@@ -19,8 +235,8 @@ def test_checkpoint_only_cancel_survives_late_playback_and_process_reopen(poc, t
 
     controller, remote, frames, *_ = poc
     launch_id = 'checkpoint-only-cancel'
-    with controller.launch_request(launch_id) as cancelled:
-        assert controller.start(cancelled=cancelled)['ok']
+    with controller.launch_request(launch_id) as launch:
+        assert controller.start(launch=launch)['ok']
     initial, revision = controller.ctx.store.radio_checkpoints.load()
     before_remote = json.dumps((remote.ids, remote.adds, remote.removes, frames))
     controller.suspend()
@@ -104,24 +320,29 @@ def test_append_uses_native_observation_instead_of_stale_bridge_video(poc):
     assert remote.adds == [["v4"]]
 
 
-def test_paired_session_restores_its_assignment_and_visible_plans_after_cache_change(poc):
+def test_legacy_trial_session_restores_visible_plans_and_republishes_without_assignment(poc):
     from copy import deepcopy
     c, remote, *_ = poc
     c.start()
-    c.session.candidates.comparison = {'run_id': 7, 'arm': 'challenger', 'unit': 'old-day'}
     play(c, 'v2')
     c.suspend()
     c._persist(c.session)
     before = deepcopy(c.session.directions.slots)
-    fingerprint = c.session.candidates.fingerprint
-    c.session.candidates.fingerprint = 'previous-cache'
-    c._persist(c.session)
-    c.session.candidates.fingerprint = fingerprint
+    checkpoint = c.ctx.store.radio_checkpoints
+    saved, revision = checkpoint.load()
+    saved['fingerprint'] = 'previous-cache'
+    saved['comparison'] = {'run_id': 7, 'arm': 'challenger', 'unit': 'old-day'}
+    saved['candidate_context']['choice_context']['comparison'] = saved['comparison']
+    checkpoint.save(json.dumps(saved), expected=revision)
     restored = PlaylistRadio(c.ctx)
     assert restored.join()['active']
-    assert restored.session.candidates.comparison == c.session.candidates.comparison
+    assert 'comparison' not in restored.session.candidates.choice_context
     assert restored.session.directions.slots == before
     assert remote.adds == []
+    restored._persist(restored.session)
+    current = checkpoint.load()[0]
+    assert 'comparison' not in current
+    assert 'comparison' not in current['candidate_context']['choice_context']
 
 
 def test_refresh_request_is_not_acknowledgment_and_late_drift_is_repaired(poc):

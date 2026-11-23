@@ -5,6 +5,9 @@ The routes now do their YouTube/store work and return an empty 200 with HX-Refre
 location.reload()), and surface failures via the standard 422 OOB error toast, instead of
 the old JSON payloads.
 """
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
+
 from fastapi.testclient import TestClient
 import pytest
 
@@ -75,7 +78,7 @@ def test_artists_read_deadline_defers_without_background_error(store, monkeypatc
             # These read environment settings or model files, not the database.
             # Keep their real behavior available in the recovery document.
             pure_helpers = {name: Mock(wraps=app.state.ctx.templates.env.globals[name])
-                            for name in ('audio_preview_available', 'audio_vibes_enabled')}
+                            for name in ('audio_vibes_enabled',)}
             for name, helper in pure_helpers.items():
                 patch.setitem(app.state.ctx.templates.env.globals, name, helper)
             response = client.get('/artists', headers=headers)
@@ -114,6 +117,39 @@ def deadline_library(tmp_path):
             yield store
 
 
+def test_saved_album_listing_and_owners_read_while_writer_is_held(
+        deadline_library, monkeypatch, without_metadata_providers):
+    from yt_playlist.repos.collection import CollectionRepo
+
+    store = deadline_library
+    owner = store.accounts.upsert_account('Album owner', None, True)
+    album = {'browse': 'MPRE_saved', 'title': 'Saved album', 'artist': 'Artist'}
+    store.collection.add_saved_album(album, account_id=owner)
+    reads_finished = Event()
+    owners = CollectionRepo.saved_album_owners
+
+    def observe_owners(repo, *args, **kwargs):
+        rows = owners(repo, *args, **kwargs)
+        reads_finished.set()
+        return rows
+
+    monkeypatch.setattr(CollectionRepo, 'saved_album_owners', observe_owners)
+    app = create_app(store, lambda: {}, background_work=False)
+    with (TestClient(app, base_url='http://127.0.0.1') as client,
+          ThreadPoolExecutor(1) as worker):
+        with store._lock, store.conn:
+            store.conn.execute('UPDATE albums SET title=? WHERE title=?', ('Uncommitted', album['title']))
+            response_future = worker.submit(client.get, '/albums')
+            completed_while_locked = reads_finished.wait(2)
+            store.conn.rollback()
+        response = response_future.result(timeout=3)
+    assert completed_while_locked, 'Saved albums and owners waited for the shared writer'
+    assert response.status_code == 200
+    assert [(row['browse'], row['title']) for row in response.context['saved']] == [
+        (album['browse'], album['title'])]
+    assert f'<input type="hidden" name="identity_id" value="{owner}">' in response.text
+
+
 @pytest.fixture
 def deadline_routes(monkeypatch, without_metadata_providers):
     from fastapi import APIRouter
@@ -134,7 +170,7 @@ def test_home_card_deadline_preserves_the_board_and_recovers(deadline_library, d
     from yt_playlist.web.routes.home_views import HomeViews
 
     store = deadline_library
-    store.accounts.upsert_account('main', 'cred', None, True)
+    store.accounts.upsert_account('main', None, True)
     returning_listener(store, 'mixes', now=1000)
     publish_menu(store, now=1000)
     original = HomeViews.card_context
@@ -167,7 +203,7 @@ def test_home_card_deadline_preserves_the_board_and_recovers(deadline_library, d
 
 
 def test_save_album_likes_and_refreshes(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = AlbumClient()
     c = _client(store, lambda: {iid: fc})
 
@@ -178,7 +214,7 @@ def test_save_album_likes_and_refreshes(store):
 
 
 def test_unsave_album_unlikes_and_refreshes(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.collection.add_saved_album({"browse": "MPREb_x", "title": "The Album", "artist": "Artist X",
                            "year": "2001", "thumbnail": ""},account_id=iid)
     fc = AlbumClient()
@@ -191,8 +227,8 @@ def test_unsave_album_unlikes_and_refreshes(store):
 
 
 def test_unsave_targets_unique_non_main_owner_and_carries_owner_in_both_views(store):
-    main = store.accounts.upsert_account("Main", "cred", None, True)
-    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    main = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, account_id=other)
     clients = {main: AlbumClient(), other: AlbumClient()}
     c = _client(store, lambda: clients)
@@ -209,8 +245,8 @@ def test_unsave_targets_unique_non_main_owner_and_carries_owner_in_both_views(st
 
 @pytest.mark.parametrize("selected", ["main", "other"])
 def test_multiple_owners_require_choice_and_remove_only_selected_membership(store, selected):
-    main = store.accounts.upsert_account("Main", "cred", None, True)
-    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    main = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     for owner in (main, other):
         store.collection.add_saved_album({"browse": "B", "title": "Album", "artist": "Artist X"}, account_id=owner)
     clients = {main: AlbumClient(), other: AlbumClient()}
@@ -230,8 +266,8 @@ def test_multiple_owners_require_choice_and_remove_only_selected_membership(stor
 
 @pytest.mark.parametrize("owner_state", ["unavailable", "inactive"])
 def test_unavailable_album_owner_never_falls_back_to_main(store, owner_state):
-    main = store.accounts.upsert_account("Main", "cred", None, True)
-    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    main = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     store.collection.add_saved_album({"browse": "B", "title": "Album"}, account_id=other)
     clients = {main: AlbumClient()}
     if owner_state == "inactive":
@@ -247,8 +283,8 @@ def test_unavailable_album_owner_never_falls_back_to_main(store, owner_state):
 
 
 def test_album_unsave_rejects_non_owner_and_unknown_legacy_ownership(store):
-    main = store.accounts.upsert_account("Main", "cred", None, True)
-    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    main = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     store.collection.add_saved_album({"browse": "owned", "title": "Owned"}, account_id=other)
     store.collection.add_saved_album({"browse": "legacy", "title": "Legacy"})
     clients = {main: AlbumClient(), other: AlbumClient()}
@@ -261,7 +297,7 @@ def test_album_unsave_rejects_non_owner_and_unknown_legacy_ownership(store):
 
 
 def test_save_album_without_id_returns_toast(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     c = _client(store, lambda: {iid: AlbumClient()})
     r = c.post("/collection/save-album", data={})
     assert r.status_code == 422
@@ -272,7 +308,7 @@ def test_save_album_without_id_returns_toast(store):
 
 
 def test_save_album_client_error_returns_toast(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fc = AlbumClient(album={})                       # no audioPlaylistId -> ValueError path
     c = _client(store, lambda: {iid: fc})
     r = c.post("/collection/save-album", data={"browse_id": "X"})
@@ -285,8 +321,8 @@ def test_save_album_client_error_returns_toast(store):
 @pytest.mark.parametrize('ack', [False, {'status': 'STATUS_FAILED'}, {'status': 'STATUS_ERROR'}])
 @pytest.mark.parametrize('saved', [False, True])
 def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
-    main = store.accounts.upsert_account('Main', 'cred', None, True)
-    other = store.accounts.upsert_account('Other', 'cred', 'other', False)
+    main = store.accounts.upsert_account('Main', None, True)
+    other = store.accounts.upsert_account('Other', 'other', False)
     for owner in ([other] if saved else [main, other]):
         store.collection.add_saved_album({'browse': 'B', 'title': 'Album'}, account_id=owner)
 
@@ -311,7 +347,7 @@ def test_rejected_album_change_preserves_account_memberships(store, ack, saved):
 def test_manual_and_import_album_saves_share_confirmation_and_metadata(store, ack):
     from yt_playlist.library.spotify_library import _save_album
 
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
 
     class Confirmed(AlbumClient):
         def rate_playlist(self, playlist_id, rating):
@@ -332,7 +368,7 @@ def test_manual_and_import_album_saves_share_confirmation_and_metadata(store, ac
 def test_import_album_rejection_does_not_publish_membership(store, ack):
     from yt_playlist.library.spotify_library import _save_album
 
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     fc = AlbumClient()
     fc.rate_playlist = lambda *args: ack
     with pytest.raises(ValueError, match='did not confirm'):

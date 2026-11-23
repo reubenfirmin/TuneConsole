@@ -1,4 +1,5 @@
 """Capture optional models once, then run prediction against detached values."""
+from yt_playlist.core import audio_embedding
 from yt_playlist.rec import audio_vibe_runtime, audio_vibe_values
 from yt_playlist.rec.audio_vibe_specialists import SPECIALISTS
 
@@ -36,13 +37,28 @@ class VibePrediction:
 class PredictionValues:
     def __init__(self, specialists=()):
         self.specialists = specialists
+        self.signatures = {model['header']['embedding_signature']
+                           for _, mode, model, _ in specialists if mode == 'active'}
+
+    def usable_samples(self, samples):
+        """Choose the largest set that an active specialist can score together."""
+        compatible = {}
+        for sample in samples:
+            try:
+                signature = audio_embedding.signature(sample)
+            except ValueError:
+                continue
+            if signature in self.signatures:
+                compatible.setdefault(signature, []).append(sample)
+        return max(compatible.values(), key=len, default=[])
 
     def predict(self, samples, *, metadata=None, require_complete=True):
-        prediction = audio_vibe_values.heuristic(samples, metadata=metadata, require_complete=require_complete)
-        if prediction is None:
-            return prediction
-        result = {**prediction, 'suitability': {}, 'individual_models': {}}
+        if not samples:
+            return None
+        if len(samples) < 3 and (require_complete or not any(sample.get('embedding') for sample in samples)):
+            return None
+        result = {'suitability': {}, 'individual_models': {}}
         for vibe, mode, specialist, score in self.specialists:
             result = audio_vibe_runtime.apply_loaded(samples, result, selected_mode=mode,
                 model=specialist, scorer=score, vibe=vibe)
-        return audio_vibe_values.specialist_values(result)
+        return audio_vibe_values.specialist_values(result, len(samples))

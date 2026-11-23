@@ -21,10 +21,10 @@ def _pristine_current_schema():
 def setup_routes_only(monkeypatch):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, setup, taste
+    from yt_playlist.web.routes import app_update, audio_vibes, home, setup, taste
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [module.build(ctx)
-        for module in (app_update, audio_preview, home, setup, taste)])
+        for module in (app_update, audio_vibes, home, setup, taste)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
 
@@ -158,12 +158,11 @@ def test_saving_identity_definitions_does_not_clear_expired_session(monkeypatch)
                         lambda ctx: Mock(spec_set=['run', 'remove_spotify']))
     iid = 1
     repository = Mock(spec_set=AccountRepo)
-    repository.has_auth_state.return_value = True
     repository.auth_expirations.return_value = {}
     repository.flag_auth_expiration.return_value = {iid: 'Main'}
     repository.get_accounts.return_value = [SimpleNamespace(id=iid)]
-    store = SimpleNamespace(settings=None, genres=None, album_notes=None, accounts=Accounts(
-        repository, None, paused=lambda: False, maintenance_accounts=lambda: None))
+    store = SimpleNamespace(settings=None, genres=None, album_notes=None,
+                            accounts=Accounts(repository, paused=lambda: False))
     rt = _FakeRuntime(store, configured=True)
     ctx = Ctx(store, rt.clients, lambda: 1.0, Mock(), SyncJobs(), setup=rt)
     ctx.flag_auth_expired(iid, 'Main')

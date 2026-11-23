@@ -1,43 +1,35 @@
 """Retained radio origins, including legacy provider IDs with unknown scope."""
 import json
 
-from . import collection_recovery, playlist_scopes
+from . import playlist_scopes
 
-KEYS = ('radio_session_playlist_ids','radio_playlist_ytm','radio_playlist_a_ytm','radio_playlist_b_ytm')
+UNRESOLVED = 'radio_unresolved_playlist_ids'
 
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM sqlite_schema WHERE name='radio_playlist_origins'").fetchone() is not None
-
-
-@collection_recovery.pinned_read
 def ids(conn):
-    if not available(conn):
-        from . import radio_reads
-        revision = radio_reads.origin_selected(conn)
-        if revision is not None:
-            return radio_reads.origin_ids(conn,revision)
-        values = dict(conn.execute('SELECT key,value FROM settings WHERE key IN (?,?,?,?)',KEYS))
-        return list(dict.fromkeys([*json.loads(values.get(KEYS[0]) or '[]'),
-                                  *(values[key] for key in KEYS[1:] if values.get(key))]))
-    return [row[0] for row in conn.execute('SELECT DISTINCT COALESCE(s.provider_playlist_id,o.unresolved_provider_id) '
-        'FROM radio_playlist_origins o LEFT JOIN playlist_scopes s ON s.id=o.playlist_scope_id ORDER BY 1')]
+    return [row[0] for row in conn.execute('SELECT provider_playlist_id FROM playlist_scopes WHERE radio_origin=1 '
+        'UNION SELECT p.value FROM settings s,json_each(s.value) p WHERE s.key=? ORDER BY 1', (UNRESOLVED,))]
+
+
+def mark_scope(conn, scope):
+    changed = conn.execute('UPDATE playlist_scopes SET radio_origin=1 WHERE id=? AND radio_origin=0', (scope,)).rowcount
+    if not changed and conn.execute('SELECT 1 FROM playlist_scopes WHERE id=?', (scope,)).fetchone() is None:
+        raise ValueError('Unknown Radio playlist scope')
 
 
 def remember(conn,provider_id,account_id=None):
     if not isinstance(provider_id,str) or not provider_id:
         raise ValueError('Radio origin requires a provider playlist ID')
-    if not available(conn):
-        if not conn.in_transaction:
-            conn.execute('BEGIN IMMEDIATE')
-        values = ids(conn)
-        conn.execute('INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
-                     (KEYS[0],json.dumps(list(dict.fromkeys([*values,provider_id])))))
-        return
     if account_id is not None:
         scope = playlist_scopes.ensure(conn,provider_id,account_id)
     else:
         matches = list(conn.execute('SELECT id FROM playlist_scopes WHERE provider_playlist_id=?',(provider_id,)))
         scope = matches[0][0] if len(matches)==1 else None
-    conn.execute('INSERT OR IGNORE INTO radio_playlist_origins(playlist_scope_id,unresolved_provider_id) VALUES (?,?)',
-                 (scope,None if scope is not None else provider_id))
+    if scope is not None:
+        mark_scope(conn, scope)
+        return
+    row = conn.execute('SELECT value FROM settings WHERE key=?', (UNRESOLVED,)).fetchone()
+    retained = set(json.loads(row[0])) if row else set()
+    if provider_id not in retained:
+        retained.add(provider_id)
+        conn.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     (UNRESOLVED, json.dumps(sorted(retained))))

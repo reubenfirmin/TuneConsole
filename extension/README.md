@@ -65,7 +65,7 @@ unconfirmed click ends recovery. Dislike-and-skip confirms the thumb before adva
 and avoids a second skip after uncertain delivery. API rating success remains independent
 of native control reconciliation.
 
-## Audio collection and preview
+## Audio collection
 
 Collection is owned by `worker/audio_sampler.js` and `worker/audio_collection.js`.
 It continues without an app document and posts results directly to
@@ -73,9 +73,9 @@ It continues without an app document and posts results directly to
 collection endpoint; other mutations retain same-origin protection.
 
 `audio_capture.js`, `worker/audio_capture.js` and `audio_capture_frame.html`/`.js`
-share capture and tab-local inference. The separate `/audio-preview` tool uses
-`AudioCaptureSession` from `audio-capture-session.js`. The collection port is
-`tc-audio-collection`, protocol 1; stable preview-named wire identifiers remain compatible.
+implement capture and tab-local inference. The observer port is
+`tc-audio-collection`, protocol 1. Private wire identifiers are shared with
+historical research capture tools.
 Only a top-level page on the configured app origin/port can open an observing app port.
 
 | Behavior | Contract |
@@ -84,7 +84,6 @@ Only a top-level page on the configured app origin/port can open an observing ap
 | Clock | Wait in the music tab against the native per-song clock; missing/stale clocks do not authorize capture. No seeking or padded audio. |
 | Interruptions | Pause, seek, source/track changes and deadlines cancel unfinished capture. Completed recordings may finish inference after a track change. |
 | Retry | Retry failures after 5, 10, 20 and at most 30 seconds while playback remains within ten seconds of the nominal start. Later points stay on their original schedule; expired points remain missed. Validate actual start times and reject overlapping captures, including after worker restart. Partial playback remains partial evidence. |
-| Preview | One capture owner across collection and preview. Preview cancels unfinished collection work; completed excerpts finish durable delivery first. Collection resumes after the last preview disconnects. |
 | Durable delivery | Store up to 12 immutable metadata payloads before posting; back off 5–60 seconds. Only a matching sample UUID receipt removes one. Restarts/lost replies resend idempotently. Full or rejected queues retain data and pause capture. |
 | Upgrade | Import older app outboxes before removing them, only after extension storage acknowledges. |
 
@@ -93,11 +92,6 @@ typed bounded metadata and frozen MusiCNN embeddings, rejecting PCM, spectra and
 arbitrary arrays. Embeddings are mean full-patch pre-activation features, identified
 by artifact, layer, graph policy and pooling. Every production ZIP includes verified
 runtime/model assets; incomplete or mismatched assets prevent packaging/capture.
-
-The preview shows four mood classifiers, DEAM arousal/valence and optional general
-tags. Those diagnostic scores are uncalibrated. Production vibe recipes and adoption
-evidence belong in the [experiment history](../experiments/audio_lab/README.md) and
-[recommendation reference](../src/yt_playlist/rec/README.md).
 
 ### Developer feedback and storage
 
@@ -110,9 +104,8 @@ Each playback occurrence retains its card and explicit multi-label edits. Load s
 answers before accepting clicks; a replay marks the last exact-video answer Previous
 answer. Opening, sampling or dismissing a card creates no label. Preserve unanswered
 cards and pending edits across navigation. Labels freeze the sample IDs and prediction
-shown at the click; later inference never rewrites them. Predictions require three
-saved excerpts; a best guess below the provisional cutoff records `best_available`
-and its top-two gap.
+available at the click. Later inference preserves the frozen evidence for that
+label. Audio details shows each specialist's excerpt scores and aggregation rule.
 
 | Product choice | Feedback meaning |
 | --- | --- |
@@ -124,13 +117,15 @@ and its top-two gap.
 | Let off steam | Forceful, hard-hitting, cathartic; intensity even when slow |
 
 Immutable sample JSON lives under `sample-attributes` beside the app database.
-`sample_attributes` indexes files; `measurements`/`measurement_samples` hold scores
-and links; `audio_vibe_runs`/`audio_session_labels` retain playback and frozen judgments.
-The current taxonomy is `audio-session-targets-1`. Older feedback taxonomies remain
-unchanged. Join playback comparisons on `run_id`; unknown uploads remain provisional.
+`sample_attributes` indexes the files. `measurements` and `measurement_samples`
+hold scores and sample links. `audio_vibe_runs` records the video and the title
+and artist observed at playback start. `audio_annotations` stores each judgment
+with its labels, sample IDs, and frozen model output. Match its `run_key` to
+`audio_vibe_runs.run_id` for playback comparisons. The current taxonomy is
+`audio-session-targets-1`, and each judgment retains the taxonomy it used.
 
-Samples retain 27 scalar attributes, six mood outputs, 50 tags and compatible frozen
-embeddings when available. Essentia measures tempo/confidence/beat variation and excerpt
+New samples retain 27 scalar attributes, 50 tags and frozen MusiCNN embeddings.
+Earlier payloads with mood outputs remain readable and retryable. Essentia measures tempo/confidence/beat variation and excerpt
 EBU R128 loudness at 44.1 kHz; Meyda descriptors use 2048-sample Hann windows with a
 1024 hop, before separate 16 kHz model input. LUFS describes excerpts, Bark loudness
 has arbitrary units, and peak-normalized RMS describes gain-independent structure.
@@ -145,7 +140,6 @@ Chromium's `--disable-audio-output` to process PCM without speaker hardware.
 
 ### Audio runtime and reference harness
 
-The normal preview is **Tools > Audio analysis preview** (`/audio-preview`).
 Use the [audio build reference](../scripts/audio_model/README.md) to fetch
 verified models/licences and build the CSP-compatible runtime before staging.
 
@@ -222,8 +216,9 @@ tab revision/capture snapshots without song/account values. A responding receive
 does not prove MAIN health or current code.
 
 Confirmed Now Playing controls retain displayed state while pending and verify the
-displayed video/action. Play requires observed readiness/clock progress; manual Pause
-cancels delayed startup rescue. Missing bindings, blocked playback and uncertain delivery
+displayed video/action. Play checks progress and audio from the selected native media
+before confirming a resume or recording a new live listen. Manual Pause cancels delayed
+startup rescue. Missing bindings, blocked playback and uncertain delivery
 stay within the action's controls, following the [UI error policy](../AGENTS.md).
 
 ## Verification and packaging

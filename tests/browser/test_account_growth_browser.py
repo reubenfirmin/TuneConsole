@@ -2,12 +2,13 @@
 from tests.enrichment_support import complete_entries, complete_discovered
 import json
 import re
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import expect
 
 from tests.test_account_growth import catalog, ready_radio
-from tests.onboarding_support import publish_personal_album, publish_personal_mix
+from tests.onboarding_support import publish_live_mix_inputs, publish_personal_album, publish_personal_mix
 from tests.test_growth_journey import early_journey
 from tests.home_fixture_support import returning_listener
 from yt_playlist.rec import account_growth
@@ -25,11 +26,214 @@ def growth_catalog(store):
 
 @pytest.fixture
 def store(store, request):
-    if request.node.originalname == 'test_festival_states_notices_home_choice_and_bonus_details':
+    if request.node.originalname in ('test_direct_recent_page_waits_for_ordinary_mixes',
+                                     'test_into_recently_loads_magazine_styles_and_records_visible_stories'):
+        return request.getfixturevalue('recent_growth_store')
+    if request.node.originalname in ('test_festival_states_notices_home_choice_and_bonus_details',
+                                     'test_home_keeps_earlier_tabs_visible_while_checking_later_tabs'):
         # This interaction-only journey repeatedly serves the same prepared
         # state. Keep ordinary private WAL reads instead of memory snapshots.
         return request.getfixturevalue('file_backed_store')
     return store
+
+
+def test_direct_recent_page_waits_for_ordinary_mixes(live_app, store, page, monkeypatch):
+    from tests.test_growth_destinations import publish_destinations
+    from yt_playlist.rec import tv
+
+    store.settings.set_setting('last_sync_at', '1')
+    publish_destinations(store, now=1)
+    store.tv_preparation.record_draw([entry['video_id'] for entry in tv.queue(store, 1)])
+    mixes_ready = False
+    monkeypatch.setattr(account_growth.onboarding_outputs, 'mixes_ready', lambda *_: mixes_ready)
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.route('https://**', lambda route: route.abort())
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
+
+    page.goto(live_app + '/?panel=unlocks#unlocks')
+    landmark = page.get_by_role('button', name=re.compile('^Into recently,'))
+    expect(landmark).to_have_class(re.compile(r'\bis-untouched\b'))
+    expect(page.get_by_role('tab', name='Into recently', exact=True)).to_be_hidden()
+
+    recent_url = live_app + '/?panel=recent'
+    locked = page.goto(recent_url + '#recent')
+    assert locked and locked.ok
+    stories = page.get_by_role('region', name='Into recently')
+    expect(stories).to_be_hidden()
+    mixes_ready = True
+    store.settings.set_setting('last_sync_at', '2')  # Invalidate the cached growth projection.
+    # Leave the locked document before following the direct link again. A hash
+    # change can reuse it, and a reload can retain the fallback Unlocks hash.
+    page.goto(live_app + '/playlists')
+    reopened = page.goto(recent_url + '#recent')
+    assert reopened and reopened.ok and reopened.url == recent_url
+    expect(stories).to_be_visible()
+    expect(stories.locator('.into-card')).to_have_count(3)
+    page.screenshot(path='/tmp/tuneconsole-1489-recent.png')
+
+
+@pytest.mark.parametrize('entry', ['direct', 'tab'])
+def test_into_recently_loads_magazine_styles_and_records_visible_stories(live_app, store, page, entry):
+    from tests.test_growth_destinations import publish_destinations
+    from yt_playlist.rec import into_recently, tv
+
+    returning_listener(store, 'vibes')
+    publish_destinations(store, now=1)
+    publish_personal_mix(store, now=1)
+    store.tv_preparation.record_draw([item['video_id'] for item in tv.queue(store, 1)])
+    store.settings.set_setting('last_sync_at', '1')
+    prepared = store.rec_proposals.get_proposals(into_recently.SURFACE)
+    slowdive, shoegaze, biosphere = prepared['cards']
+    prepared['cards'] = [
+        {**slowdive, 'subject': 'artist:Slowdive', 'display': 'Slowdive', 'title': 'Slowdive',
+         'thumbnail': '/static/vibes/relax.webp', 'extract': 'Layered guitars drift through soft melodies.'},
+        {**shoegaze, 'subject': 'genre:Shoegaze', 'display': 'Shoegaze', 'title': 'Shoegaze',
+         'kind': 'genre', 'group': 'artist:Slowdive', 'thumbnail': None,
+         'extract': 'Guitar textures soften the boundaries between chords.'},
+        {**biosphere, 'subject': 'artist:Biosphere', 'display': 'Biosphere', 'title': 'Biosphere',
+         'thumbnail': '/static/vibes/concentrate.webp', 'extract': 'Ambient recordings make room for silence.'},
+        {**biosphere, 'subject': 'artist:Lusine', 'display': 'Lusine', 'title': 'Lusine',
+         'thumbnail': '/static/vibes/natural.webp', 'extract': 'Small electronic rhythms carry the melody.'},
+    ]
+    store.rec_proposals.put_proposals(into_recently.SURFACE, prepared, 1)
+    before = store.rec_ledger.story_views()
+    prefetched = page.request.get(live_app + '/?panel=recent&fragment=1')
+    assert prefetched.ok and 'data-story-subject' in prefetched.text()
+    assert store.rec_ledger.story_views() == before
+    page.set_viewport_size({'width': 1440, 'height': 1440})
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': True}))
+
+    arrivals = []
+    page.on('response', lambda response: arrivals.append('styles')
+            if response.url.split('?')[0].endswith('/static/home-discovery.css') else None)
+    page.on('request', lambda request: arrivals.append('stories')
+            if request.url.endswith('/?panel=recent&fragment=1') else None)
+    if entry == 'tab':
+        page.goto(live_app + '/?panel=directions#directions')
+        assert not arrivals
+        assert store.rec_ledger.story_views() == before
+
+    subject = 'artist:Slowdive'
+    companion = 'genre:Shoegaze'
+    with page.expect_response(lambda response: response.url.endswith('/home/into-recently/impressions')
+                              and {subject, companion}.issubset(response.request.post_data_json['subjects'])) as impression:
+        if entry == 'tab':
+            page.get_by_role('tab', name='Into recently', exact=True).click()
+        else:
+            page.goto(live_app + '/?panel=recent#recent')
+        stories = page.get_by_role('region', name='Into recently')
+        expect(stories.locator('.into-card')).to_have_count(4)
+        lead = stories.locator('.into-feature').first
+        heading = lead.locator(f'[data-story-subject="{subject}"]')
+        heading.evaluate("heading => heading.scrollIntoView({block: 'center', behavior: 'instant'})")
+        expect(heading).to_be_in_viewport(ratio=0.5)
+        expect(stories.locator(f'[data-story-subject="{companion}"]')).to_be_in_viewport(ratio=0.5)
+    assert impression.value.status == 204
+    views = store.rec_ledger.story_views()
+    for seen in (subject, companion):
+        assert views[seen]['views'] == before.get(seen, {}).get('views', 0) + 1
+    lead.locator('.into-art img').evaluate('image => image.decode()')
+    assert arrivals == (['styles', 'stories'] if entry == 'tab' else ['styles'])
+    expect(stories.locator('.into-spread').first).to_have_css('display', 'grid')
+    expect(lead.locator('.into-subject')).to_have_css('font-family', re.compile(r'Georgia, serif$'))
+    expect(lead.locator('.into-art img')).to_have_css('object-fit', 'cover')
+    expect(lead.locator('.into-songs')).to_have_css('display', 'grid')
+    expect(stories.locator('.into-companions .into-text-only')).to_be_visible()
+    expect(page.locator('head link[href*="/static/radio.css"]')).to_have_count(0)
+
+
+def test_home_keeps_earlier_tabs_visible_while_checking_later_tabs(
+        live_app, store, page, monkeypatch, stalled_routes):
+    from tests.test_growth_destinations import finish_full_journey
+
+    returning_listener(store, 'mixes')
+    store.settings.set_setting('home_format', 'mixes')
+    store.settings.set_setting('last_sync_at', '1')
+    publish_personal_album(store, now=1, count=2)
+    publish_personal_mix(store, now=1)
+    publish_live_mix_inputs(store, now=1)
+    finish_full_journey(store, now=1)
+    monkeypatch.setattr(account_growth.growth_readiness, 'foundation', lambda *args: True)
+    vibe_checks = []
+
+    def vibe_evidence(*args):
+        vibe_checks.append(True)
+        return True
+
+    monkeypatch.setattr(type(store.readiness), 'has_vibe_evidence', vibe_evidence)
+    monkeypatch.setattr(account_growth.growth_readiness, 'vibes', lambda *args: True)
+    destination_requests = []
+    background_url = '**/home/growth?navigation=true'
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.route(background_url, lambda route: stalled_routes.append(route), times=1)
+    page.on('request', lambda request: destination_requests.append(request.url)
+            if 'fragment=1' in request.url else None)
+    with page.expect_request(background_url):
+        page.goto(live_app + '/', wait_until='domcontentloaded')
+    expect(page.get_by_role('tab', name='Mix tapes')).to_have_attribute('aria-selected', 'true')
+    expect(page.locator('#home-mode-cards > .gen-card')).to_have_count(4)
+    expect(page.locator('#home-mode-cards .gen-play')).to_have_count(4)
+    expect(page.get_by_role('tab', name='Long play')).to_be_visible()
+    expect(page.get_by_role('tab', name='Discover')).to_be_visible()
+    expect(page.get_by_role('tab', name='On air')).to_be_hidden()
+    assert not vibe_checks and not destination_requests
+
+    with page.expect_response(background_url) as result:
+        stalled_routes[0].continue_()
+        stalled_routes.pop(0)
+    assert result.value.ok
+    for tab in ('Long play', 'Discover', 'On air', 'TV', 'Revisit', 'Into recently'):
+        expect(page.get_by_role('tab', name=tab, exact=True)).to_be_visible()
+    assert vibe_checks == [True] and not destination_requests
+
+    with page.expect_response('**/?panel=album-choices&fragment=1') as result:
+        page.get_by_role('tab', name='Long play').click()
+    assert result.value.ok
+    expect(page.get_by_role('tab', name='Long play')).to_have_attribute('aria-selected', 'true')
+    expect(page.get_by_role('heading', name='Your next record')).to_be_visible()
+    assert len(destination_requests) == 1
+
+
+@pytest.mark.parametrize('initial_panel', ['album-choices', 'notices'])
+def test_reopening_needs_attention_shows_new_recap(live_app, store, page, request, initial_panel):
+    from tests.test_trends_recap_route import _STORY
+    from yt_playlist.rec.trend_statistics import last_complete_month
+
+    returning_listener(store, 'albums')
+    publish_personal_album(store, now=1, count=2)
+    store.settings.set_setting('last_sync_at', '1')
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.route('https://**', lambda route: route.abort())
+    notice_fragment = '**/?panel=notices&fragment=1'
+    notice_reads = []
+    page.on('request', lambda req: notice_reads.append(req.url)
+            if req.url.endswith('/?panel=notices&fragment=1') else None)
+    page.goto(f'{live_app}/?panel={initial_panel}')
+
+    notices = page.get_by_role('tab', name='Needs attention')
+    albums = page.get_by_role('tab', name='Long play')
+    if initial_panel != 'notices':
+        with page.expect_response(notice_fragment):
+            notices.click()
+    expect(notices).to_have_attribute('aria-selected', 'true')
+    expect(page.locator('[data-dash=notices] [data-loaded="1"]')).to_have_count(1)
+    expect(page.locator('#recap-nudge')).to_have_count(0)
+    albums.click()
+    expect(albums).to_have_attribute('aria-selected', 'true')
+
+    store.rec_proposals.put_proposals('trend_rollups', {'story': {
+        **_STORY, 'month': last_complete_month(1), 'month_name': 'December',
+    }}, now=1)
+    with page.expect_response('**/home/growth?navigation=true') as navigation:
+        page.evaluate("Alpine.$data(document.querySelector('.home-growth')).refresh(false)")
+    assert navigation.value.json()['has_action_notices'] is True
+    assert len(notice_reads) == (initial_panel != 'notices')
+
+    with page.expect_response(notice_fragment) as refreshed:
+        notices.click()
+    assert refreshed.value.ok
+    expect(page.get_by_role('link', name='Play your December')).to_be_visible()
+    page.screenshot(path=Path(request.config.getoption('output')) / f'notices-reopened-{initial_panel}.png')
 
 
 def test_integration_notices_and_highlighted_setup_destinations(live_app, store, page, monkeypatch):
@@ -333,8 +537,8 @@ def test_festival_states_notices_home_choice_and_bonus_details(
 
     # Earn access in the server's private fixture, so polling cannot replace a
     # browser-only override with the still-locked authoritative state.
-    original_tv_draw = store.settings.get_setting('tv_draw')
-    store.settings.set_setting('tv_draw', '1')
+    original_draw = store.tv_preparation.draw()
+    store.tv_preparation.record_draw([])
     server_tv = next(node for node in refresh_growth()['nodes'] if node['id'] == 'tv')
     browser_tv = page.evaluate(f'{growth_model}.node("tv")')
     record_testsuite_property('tv-after-refresh', json.dumps({
@@ -347,10 +551,12 @@ def test_festival_states_notices_home_choice_and_bonus_details(
     expect(popup.get_by_role('region', name='How to get here')).to_be_hidden()
     expect(popup.get_by_role('link', name='Open TV', exact=True)).to_be_visible()
     page.get_by_role('button', name='Close destination', exact=True).click()
-    if original_tv_draw is None:
-        store.settings.delete_setting('tv_draw')
-    else:
-        store.settings.set_setting('tv_draw', original_tv_draw)
+    with store.conn:
+        from yt_playlist.core.recommendation_work import TV_DRAW_KEY
+        from yt_playlist.core.worker_settings import save
+
+        draw, recent, last = original_draw
+        save(store.conn, TV_DRAW_KEY, json.dumps({'number': draw, 'recent': recent, 'last': last}))
     refresh_growth()
     assert not page.evaluate(f'{growth_model}.node("tv").unlocked')
     bonus = page.get_by_role('button', name=re.compile('^Richer music details,'))

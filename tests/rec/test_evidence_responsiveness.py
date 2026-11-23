@@ -32,7 +32,9 @@ from tests.store_fixture_support import (
 from yt_playlist.core import fao, group_documents, schema_inspection
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.evidence_ledger import canonical, EvidenceBudgetExceeded, EvidenceLedger
+from yt_playlist.core.group_preparation_state import ROOTS
 from yt_playlist.core.storage_maintenance import EVIDENCE_MESSAGE, EVIDENCE_RETRY_MESSAGE, StorageMaintenance
+from yt_playlist.core.worker_settings import number
 from yt_playlist.core.store import Store
 from yt_playlist.library import choice_composition, group_composition, group_lifetimes
 from yt_playlist.rec import choice_evidence, choice_retention, group_root_backfill, group_roots, home_cards, home_cache, stored_home
@@ -80,13 +82,13 @@ def serving_routes(monkeypatch, serving_bytecode, without_metadata_providers):
 def install_serving_routes(monkeypatch, serving_bytecode):
     from fastapi import APIRouter
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, home, playlists
 
     # Exercise real pages, settings writes, middleware and maintenance handlers.
     # Registration of unrelated feature routers and desktop idle shutdown are
     # independent of the storage/evidence admission boundaries under test.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, home, playlists)])
+        module.build(ctx) for module in (app_update, audio_vibes, home, playlists)])
     monkeypatch.setattr(webapp, 'build_bridge_route', lambda ctx: APIRouter())
     monkeypatch.setattr(webapp, '_install_idle_shutdown', lambda *args: None)
     # Diagnostic JSONL history is owned by test_home_audit. Opportunity capture,
@@ -132,34 +134,6 @@ def assert_maintenance_banner(response, *, visible=False):
     if visible:
         assert ''.join(banner_text).strip() == (
             'Optimizing app storage; some recommendations are temporarily unavailable.')
-
-
-def pending_inventory(store, identity):
-    """Retained choice files alongside a current comparison with live roots."""
-    captured = {'at': 10, 'group_generation': 'first', 'musical_groups': [
-        {'group_id': 'stable-parent', 'version': 'first-parent'},
-        {'group_id': 'stable-leaf', 'version': 'first-leaf', 'parent_version': 'first-parent'}]}
-    ledger = store.rec_ledger.evidence()
-    artifact = ledger.artifact(captured)
-    ledger.put('opportunity', identity, {'id': identity, 'schema': 1, 'format': 'mixes',
-        'at': 10, 'observed_at': 10, 'context': artifact,
-        'options': [{'id': 'one', 'score': 1}], 'prediction': ['one'], 'prediction_status': 'issued'})
-    run = int(hashlib.sha256(identity.encode()).hexdigest()[:14], 16)
-    surface = f'model_pair:{run}:incumbent:mixes'
-    store.rec_proposals.put_proposals(surface, {'run_id': run, 'data': {'context': {'artifact': artifact}}}, 10)
-    # Inventory still scans retained choice files. The native comparison must
-    # keep its already published roots while that scan is incomplete.
-    with store.conn:
-        store.conn.execute('UPDATE group_retention_state SET roots_complete=0 WHERE id=1')
-    store._group_root_backfill = group_root_backfill.Backfill(store)
-    return identity, surface
-
-
-def comparison_owner(store, surface):
-    run = int(surface.split(':')[1])
-    identity = store.conn.execute("SELECT publication_id FROM model_pair_heads WHERE run_id=? "
-                                  "AND arm='incumbent' AND format='mixes'", (run,)).fetchone()[0]
-    return f'comparison-output:{identity}:context'
 
 
 def seed_evidence_library(store):
@@ -222,8 +196,8 @@ def test_correction_identity_and_current_learning_descriptors_match_the_publishe
             'group_id', 'version', 'generation', 'created_at', 'parent_version')}
         assert library.taste_groups.correction_definition(version, generation='first') == expected
     assert library.taste_groups.correction_definition('first-leaf', generation='other') is None
-    monkeypatch.setattr(group_queries, '_definition', lambda *a: pytest.fail('Decoded a diagnostic graph'))
-    monkeypatch.setattr(group_queries, '_generation', lambda *a: pytest.fail('Decoded model inputs'))
+    monkeypatch.setattr(group_queries, 'definition', lambda *a, **kw: pytest.fail('Decoded a diagnostic graph'))
+    monkeypatch.setattr(group_queries, '_policy', lambda *a: pytest.fail('Loaded model policy inputs'))
     assert library.taste_groups.learning_head() == expected_head
     acknowledged = choice_retention.acknowledge(library, 11, lambda *a: {'watermark': 'published'})
     assert len(acknowledged) == 1
@@ -261,12 +235,12 @@ def test_mix_learning_does_not_recover_retired_legacy_ancestry(library, monkeypa
         return lookup(self, version, **kwargs)
 
     monkeypatch.setattr(CompactTasteGroupsRepo, 'correction_definition', relevant)
-    monkeypatch.setattr(group_queries, '_definition', lambda *a: pytest.fail('Decoded a diagnostic graph'))
-    monkeypatch.setattr(group_queries, '_generation', lambda *a: pytest.fail('Decoded model inputs'))
+    monkeypatch.setattr(group_queries, 'definition', lambda *a, **kw: pytest.fail('Decoded a diagnostic graph'))
+    monkeypatch.setattr(group_queries, '_policy', lambda *a: pytest.fail('Loaded model policy inputs'))
     actual = choice_evidence.compile_report(library, 15)
     assert actual == expected
     assert not readers
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind IN ('offer','checkpoint')").fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind IN ('offer','checkpoint')").fetchone()
 
 
 def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(library, monkeypatch):
@@ -281,7 +255,7 @@ def test_small_inventory_batches_advance_before_repeating_the_whole_ledger_scan(
         publish = command.compile
 
         def counted(*args, **kwargs):
-            assert library.conn.execute('SELECT roots_complete FROM group_retention_state').fetchone()[0]
+            assert number(library.conn, ROOTS)
             calls.append(True)
             return publish(*args, **kwargs)
 
@@ -330,7 +304,7 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(restart_
         with pytest.raises(failure):
             choice_evidence.maintain_storage(library, 11)
     assert not library.activity_paused and library._evidence_maintenance == 0
-    assert library.settings.get_setting(choice_evidence.STORAGE_PENDING) == '1'
+    assert library.evidence_files.maintenance_state()['pending']
     status = StorageMaintenance(library).status()
     assert not status['active'] and status['recording']
     assert status['evidence_maintenance']['pending']
@@ -356,7 +330,7 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(restart_
                     break
             else:
                 pytest.fail('Committed evidence recovery did not finish after restart')
-            assert reopened.settings.get_setting(choice_evidence.STORAGE_PENDING) == '0'
+            assert not reopened.evidence_files.maintenance_state()['pending']
             assert not reopened.activity_paused
             assert not reopened.conn.execute('PRAGMA foreign_key_check').fetchone()
             assert reopened.taste_groups.definition('first-leaf', generation='first')
@@ -370,14 +344,14 @@ def test_pending_cleanup_survives_interruption_without_pausing_activity(restart_
 @pytest.fixture
 def playlist_library(tmp_path, _pristine_current_schema, monkeypatch, serving_routes, native_sql_calls):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, playlists
+    from yt_playlist.web.routes import app_update, audio_vibes, playlists
 
     # Playlist rendering needs admitted SQL and independent snapshot readers,
     # without musical-group publication, choice evidence or Home routing.
     # Store locking, reader admission and WAL visibility remain real; individual
     # SQL-call diagnostics and replacement admission have independent owners.
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (app_update, audio_preview, playlists)])
+        module.build(ctx) for module in (app_update, audio_vibes, playlists)])
     with _file_consumer_store(tmp_path, _pristine_current_schema) as store:
         # The playlist page consumes completed onboarding; readiness/growth
         # calculations have separate owners and do not supply its row metadata.
@@ -387,19 +361,19 @@ def playlist_library(tmp_path, _pristine_current_schema, monkeypatch, serving_ro
 
 def test_playlists_keep_committed_account_metadata_while_schema_writer_is_held(playlist_library):
     library = playlist_library
-    main = library.accounts.upsert_account('Main', 'bridge-main', None, True)
-    other = library.accounts.upsert_account('Other', 'bridge-other', None, False)
+    main = library.accounts.upsert_account('Main', None, True)
+    other = library.accounts.upsert_account('Other', None, False)
     # Completed catalog input sits below playlist snapshot rendering. Provider
     # ingestion, metadata evidence and artist inference have their own owners.
     seed_publication_subjects(library, [
         dict(key='audio|artist', video_id='playlist-audio', title='Audio', artist='Artist', duration_s=100),
         dict(key='video|artist', video_id='playlist-video', title='Video', artist='Artist', duration_s=100)])
     with library.conn:
-        library.conn.executemany('UPDATE youtube_items SET video_type=?,thumbnail=? WHERE video_id=?', [
+        library.conn.executemany('UPDATE track_sources SET video_type=?,thumbnail=? WHERE video_id=?', [
             ('MUSIC_VIDEO_TYPE_ATV', '/audio.png', 'playlist-audio'),
             ('MUSIC_VIDEO_TYPE_OMV', '/video.png', 'playlist-video')])
-    audio = library.conn.execute("SELECT id FROM catalog_entries WHERE video_id='playlist-audio'").fetchone()[0]
-    video = library.conn.execute("SELECT id FROM catalog_entries WHERE video_id='playlist-video'").fetchone()[0]
+    audio = library.conn.execute("SELECT id FROM track_sources WHERE video_id='playlist-audio'").fetchone()[0]
+    video = library.conn.execute("SELECT id FROM track_sources WHERE video_id='playlist-video'").fetchone()[0]
     first = library.playlists.upsert_playlist(main, 'LM', 'Main liked', 1, '', 1,
                                              thumbnail='/main-cover.png')
     second = library.playlists.upsert_playlist(other, 'LM', 'Other liked', 1, '', 1)
@@ -497,7 +471,7 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
                     assert not library.rec_ledger.evidence().get('opportunity', 'no-group-menu')
                     assert not list(directory.glob('*.lock'))
                     assert not library.conn.execute(
-                        "SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+                        "SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
             finally:
                 release.set()
         assert capture.run() == 'no-group-menu'
@@ -543,7 +517,7 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
                 assert not jobs and not library.choice_capture.opportunities()
                 assert not list(directory.glob('*.lock'))
                 assert not library.conn.execute(
-                    "SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+                    "SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
         finally:
             release.set()
             # If an earlier assertion failed before acquiring admission, the
@@ -563,7 +537,7 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
     try:
         assert callable(close)
         path, = directory.glob('*.lock')
-        assert library.conn.execute("SELECT 1 FROM group_evidence_owners "
+        assert library.conn.execute("SELECT 1 FROM group_evidence_contexts "
             "WHERE kind='pending' AND external_key=?", (path.stem,)).fetchone()
     finally:
         if close is not None:
@@ -581,16 +555,16 @@ def test_admission_race_refuses_capture_and_cleans_its_lifetime_file(library, mo
             assert not library.rec_ledger.evidence().get('opportunity', 'refused-menu')
     assert not jobs and not library.choice_capture.opportunities()
     assert not list(directory.glob('*.lock'))
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
 
 
 def test_reader_close_during_maintenance_leaves_a_conservative_root_for_the_reaper(library):
     close = group_roots.pending(library, {'group_generation': 'first'}, 12)
     with ThreadPoolExecutor(1) as executor, group_roots.admission(library):
         executor.submit(close).result(1)
-        assert library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+        assert library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     group_roots.reap_pending(library)
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     directory = group_documents.directory(library.conn) / '.pending'
     assert not list(directory.glob('*.lock'))
 
@@ -625,7 +599,7 @@ def test_repeated_cutoffs_commit_checkpoints_and_resume_beyond_the_prefix_after_
             assert count > previous or count == len(original)
             previous = count
             if turn == 2:
-                assert store.settings.get_setting(choice_retention.AFTER)
+                assert store.evidence_files.maintenance_state()['checkpoint_after']
                 reopened = Store(library._db_path)
                 reopened.conn.execute('PRAGMA synchronous=OFF')
                 with schema_inspection.reuse_tables(reopened.conn):
@@ -681,7 +655,7 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(fi
     assert library.choice_capture.get(oid)
     # The accepted FIFO owns its immutable menu/response custody. Compact mix
     # evidence must not recreate historical group pins during capacity recovery.
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     monkeypatch.setattr(EvidenceLedger, 'put', put)
     monkeypatch.setattr(choice_evidence, '_maintain_storage', maintain)
     worker.jobs.retry[Job.MEASUREMENT].retry_at = 0
@@ -692,7 +666,7 @@ def test_accepted_fifo_tail_keeps_roots_and_retries_while_recovery_is_pending(fi
     worker._run_pending()
     assert not worker.jobs.measurements and not library.choice_capture.opportunities()
     assert library.rec_ledger.evidence().get('response', oid + ':choice:one')
-    assert not library.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not library.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     for _ in range(10):
         if not choice_evidence.maintain_storage(library, 100).get('deferred'):
             break

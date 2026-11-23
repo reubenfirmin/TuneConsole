@@ -1,4 +1,5 @@
-FROM docker.io/library/python:3.12-slim-bookworm AS base
+# The schema uses SQLite's unhex and ordered aggregate arguments.
+FROM docker.io/library/python:3.12-slim-trixie AS base
 
 FROM base AS builder
 RUN python -m pip install --no-cache-dir --timeout 30 --retries 2 uv==0.12.19

@@ -1,38 +1,30 @@
 """Temporary album controls retain canonical genre identities across label edits."""
 import json
 
-from . import control_reads, genre_identity
+from . import genre_identity
+from .recommendation_work import finite
 
 KEYS = frozenset({'album_menu_tuning'})
+TUNING = 'album_menu_tuning'
+REFRESH = 'album_menu_refresh'
 
 
-def available(conn):
-    return (conn.execute("SELECT 1 FROM sqlite_schema WHERE name='album_menu_controls'").fetchone() is not None
-            or control_reads.installed(conn, 'album-controls'))
-
-
-def get(conn,key,default=None):
-    revision = control_reads.selected(conn, 'album-controls')
-    if revision is not None:
-        return control_reads.album_read(conn, revision, default)
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone():
-        row = conn.execute('SELECT value FROM main.settings WHERE key=?', (key,)).fetchone()
-        return row[0] if row else default
-    rows = list(conn.execute('SELECT p.expires_at,p.novelty,c.position,COALESCE(g.key,c.unresolved_value) '
-        'FROM album_menu_controls p LEFT JOIN album_menu_control_genres c ON c.singleton=p.singleton '
-        'LEFT JOIN genre_catalog g ON g.key=c.genre_key WHERE p.singleton=1 ORDER BY c.position'))
-    if not rows:
+def get(conn, key, default=None):
+    row = conn.execute('SELECT value FROM settings WHERE key=?', (key,)).fetchone()
+    if row is None:
         return default
-    genres = [row[3] for row in rows if row[2] is not None]
-    return json.dumps({'until':rows[0][0],'values':{'novelty':rows[0][1]},'genres':genres})
+    value = json.loads(row[0])
+    value['genres'] = [row[0] for row in conn.execute('''SELECT
+        COALESCE(g.redirect_key,g.key,json_extract(c.value,'$[0]'),json_extract(c.value,'$[1]'))
+        FROM json_each(?) c LEFT JOIN genre_catalog g ON g.key=json_extract(c.value,'$[0]') ORDER BY c.key''',
+        (json.dumps(value['genres']),))]
+    return json.dumps(value)
 
 
 def put(conn,values):
-    if not conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='album_menu_controls'").fetchone():
-        return control_reads.retained_write(conn, values)
-    for key,raw in values.items():
-        conn.execute('DELETE FROM album_menu_controls WHERE singleton=1')
+    for raw in values.values():
         if not raw:
+            conn.execute('DELETE FROM settings WHERE key=?', (TUNING,))
             continue
         value = json.loads(raw)
         if not isinstance(value,dict) or set(value)!={'until','values','genres'}:
@@ -45,8 +37,12 @@ def put(conn,values):
                 or not isinstance(genres,list) or len(genres)>100
                 or any(not isinstance(item,str) or not 0<len(item)<=100 for item in genres)):
             raise ValueError('Unsupported temporary album control selections')
-        conn.execute('INSERT INTO album_menu_controls VALUES (1,?,?)',(value['until'],controls['novelty']))
-        for position,label in enumerate(genres):
-            resolved,_ = genre_identity.resolve(conn,label)
-            conn.execute('INSERT INTO album_menu_control_genres VALUES (1,?,?,?)',
-                         (position,resolved,None if resolved else label))
+        if not 0 <= finite(controls['novelty']) <= 1:
+            raise ValueError('Album novelty must be between zero and one')
+        ordered = []
+        for label in genres:
+            resolved, _ = genre_identity.resolve(conn, label)
+            ordered.append((resolved, None if resolved else label))
+        stored = {'until': finite(value['until']), 'values': controls, 'genres': ordered}
+        conn.execute('INSERT INTO settings(key,value) VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value',
+                     (TUNING, json.dumps(stored)))

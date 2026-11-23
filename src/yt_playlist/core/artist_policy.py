@@ -23,6 +23,7 @@ def unique(identities):
 
 
 def normalized_matches(aliases, names):
+    names = list(names)
     wanted = {normalize(name) for name in names}
     matches = {name: set() for name in wanted}
     for index, row in enumerate(aliases):

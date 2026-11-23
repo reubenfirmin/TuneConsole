@@ -8,11 +8,9 @@ class ArtistSimilarityRepo(Repo):
     @synchronized
     def cached_similar(self, artist_id, *, fetched_since):
         """Return evidence meeting the caller's explicit freshness bound."""
-        row = self.conn.execute(
-            "SELECT payload, fetched_at FROM rec_artist_similar WHERE artist_id=?", (artist_id,)).fetchone()
-        if row is None or row["fetched_at"] is None or row['fetched_at'] < fetched_since:
-            return None
-        return json.loads(row["payload"])
+        row = self.conn.execute('SELECT lastfm_similar_json FROM artists WHERE id=? AND lastfm_fetched_at>=?',
+                                (artist_id, fetched_since)).fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     @synchronized
     def artist_similar_edges(self, artist_id) -> list:
@@ -25,10 +23,10 @@ class ArtistSimilarityRepo(Repo):
     @synchronized
     def cache_similar(self, artist_id, pairs, edges, now) -> None:
         with self.conn.atomic(join=True):
-            self.conn.execute(
-                "INSERT INTO rec_artist_similar(artist, payload, fetched_at,artist_id) VALUES (?,?,?,?) "
-                "ON CONFLICT(artist_id) DO UPDATE SET payload=excluded.payload, fetched_at=excluded.fetched_at",
-                (f'@artist:{artist_id}', json.dumps(pairs), now, artist_id))
+            changed = self.conn.execute('UPDATE artists SET lastfm_similar_json=?,lastfm_fetched_at=? WHERE id=?',
+                                        (json.dumps(pairs), now, artist_id)).rowcount
+            if changed != 1:
+                raise ValueError('Unknown artist for similarity cache')
             self.conn.execute('DELETE FROM artist_similarity_targets WHERE source_artist_id=?', (artist_id,))
             self.conn.executemany('INSERT OR REPLACE INTO artist_similarity_targets VALUES (?,?,?)',
                                   [(artist_id, target, weight) for target, weight in edges])

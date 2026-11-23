@@ -15,7 +15,7 @@ def test_preview_expiry_capacity_and_single_use():
 
 
 def test_saved_playlist_report_discards_source_song_metadata(store):
-    account = store.accounts.upsert_account('Destination','destination.json',None,True)
+    account = store.accounts.upsert_account('Destination',None,True)
     save_job(store, {"status":"done", "account_id":account, "report_schema": 5, "report": {"details": {
         "playlists": [{"name": "Source playlist", "provider_playlist_id": "PL1"}],
         "unmatched_tracks": [{"title": "Private source song", "spotify_url": "spotify:track:secret"}],

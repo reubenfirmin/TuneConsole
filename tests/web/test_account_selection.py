@@ -24,8 +24,8 @@ class Client(FakeClient):
 @pytest.mark.parametrize('order',['main-last','main-first','main-missing'])
 @pytest.mark.parametrize('operation',['home','cluster','road-trip','album','discovery'])
 def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,order,operation):
-    other = store.accounts.upsert_account('Other','c','brand',False)
-    main = store.accounts.upsert_account('Main','c',None,True)
+    other = store.accounts.upsert_account('Other','brand',False)
+    main = store.accounts.upsert_account('Main',None,True)
     catalog = {'video': _track('video', 'Song', 'Artist', 120, 'Album')}
     remote_other,remote_main = Client(catalog=catalog),Client(catalog=catalog)
     mapping = {other:remote_other,main:remote_main}
@@ -93,8 +93,8 @@ def test_global_mutations_keep_the_configured_main_account(store,monkeypatch,ord
 def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     from yt_playlist.web import radio_session
     from yt_playlist.library import generated_acquisition
-    other = store.accounts.upsert_account('Other','c','brand',False)
-    main = store.accounts.upsert_account('Main','c',None,True)
+    other = store.accounts.upsert_account('Other','brand',False)
+    main = store.accounts.upsert_account('Main',None,True)
     remotes = {other:object(),main:object()}
     clients = dict(reversed(list(remotes.items()))) if order=='main-first' else dict(remotes)
     if order=='main-missing':
@@ -111,13 +111,16 @@ def test_radio_creation_uses_the_main_account(store,monkeypatch,order):
     store.tracks.upsert_track('song', 'Song', 'Artist', None, 120)
     song = dict(video_id='song', title='Song', artist='Artist', duration=120,
                 key=store.tracks.identity_key_for_video('song'))
-    monkeypatch.setattr(radio_session,'RadioCandidates',lambda *args:SimpleNamespace(
-        by_video={'song':song},seed_offer=lambda n:[song], retain=lambda tracks:None,
-        tuning=radio_session.radio_tuning.DEFAULTS.copy()))
-    monkeypatch.setattr(radio.policy,'pick',lambda session:song)
+    def candidates(_store, _now, *, now_source=None, initial_queue=False):
+        return SimpleNamespace(by_video={'song': song}, seed_offer=lambda n: [song],
+                               retain=lambda tracks: None, close=lambda: None,
+                               tuning=radio_session.radio_tuning.DEFAULTS.copy())
+
+    monkeypatch.setattr(radio_session, 'RadioCandidates', candidates)
+    monkeypatch.setattr(radio.policy,'next_track',lambda session:song)
     writes = []
-    def create(store,title,tracks,client,now,identity,*,recipe=None):
-        writes.append((identity,client))
+    def create(store, title, tracks, client, now, account_id, *, recipe=None, radio_readback=None):
+        writes.append((account_id, client))
         raise RuntimeError('remote creation unavailable')
     monkeypatch.setattr(generated_acquisition,'create_generated_playlist',create)
     try:

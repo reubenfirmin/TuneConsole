@@ -3,18 +3,19 @@
 # resulting flap from corrupting the taste model:
 #   1. sync's rated map is priority-ordered (LIKE beats INDIFFERENT; only DISLIKE beats LIKE)
 #   2. player-pipeline INDIFFERENT never clears (the sync's whole-run INDIFFERENT owns un-like)
-#   3. graduation is once-EVER per key (the stamp survives clear/re-record cycles)
+#   3. rating flaps and same-day re-likes do not add independent learning support
 import json
 
 import pytest
 
 from yt_playlist.library import live_plays, player_events, sync
 from yt_playlist.controllers import library_synchronization as acquisition
-from yt_playlist.rec import rec_params
+from yt_playlist.core.rec_model_policy import PERMANENT_SURFACE
+from yt_playlist.rec import permanent_taste, transient
 from yt_playlist.util import genre_map
 from yt_playlist.util.matching import identity_key
 from tests.conftest import FakeClient
-from tests.retained_rating_support import apply_model_ratings
+from tests.retained_rating_support import apply_model_ratings, observe_rating
 
 
 def _t(status):
@@ -38,25 +39,28 @@ KEY = identity_key("Song", "Band")
 
 
 def test_flap_like_wins_within_a_run_both_orders(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     for order in ("indifferent_last", "like_last"):
         sync.sync_identity(store, iid, _client(order), now=1000.0)
         assert KEY in store.rec_model.recent_liked_keys(), order          # the like held
         assert store.rec_model.like_provenance(KEY) == "sync", order
 
 
-def test_flap_graduates_at_most_once_across_three_runs(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+def test_flap_keeps_one_synced_like_across_three_runs(store):
+    iid = store.accounts.upsert_account("main", None, True)
     for i, order in enumerate(("indifferent_last", "like_last", "indifferent_last")):
         sync.sync_identity(store, iid, _client(order), now=1000.0 + i)
-    # the graduation ledger was fed exactly once, at the low sync-like weight; before the fix each
-    # run cleared and re-recorded the like, feeding the ledger daily until the axis hit the cap
-    assert store.rec_signals.get_theme("artist:Band") == rec_params.get_param(store, "source_w_like_synced")
-    assert store.rec_model.recent_liked_keys() == [KEY]
+        assert store.rec_model.recent_liked_keys() == [KEY]
+        assert store.rec_model.like_provenance(KEY) == 'sync'
+        assert store.rec_model.recent_liked_with_ts() == []
+    rows = store.rec_model.repository.rating_rows([KEY])
+    assert [(row['kind'], row['created_at']) for row in rows] == [('like', 1000.)]
+    assert not permanent_taste.prepare(store, 1002.)
+    assert store.rec_proposals.get_proposals(PERMANENT_SURFACE)['facets'] == {}
 
 
 def test_whole_run_indifferent_still_clears(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     sync.sync_identity(store, iid, _client("indifferent_last"), now=1000.0)
     assert KEY in store.rec_model.recent_liked_keys()
     # a genuine un-like: EVERY context now reads INDIFFERENT
@@ -68,7 +72,7 @@ def test_whole_run_indifferent_still_clears(store):
 
 
 def test_dislike_still_beats_like_within_a_run(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     fake = FakeClient(playlists=[{"playlistId": "A", "title": "a", "count": 1},
                                  {"playlistId": "B", "title": "b", "count": 1}],
                       tracks={"A": [_t("DISLIKE")], "B": [_t("LIKE")]})
@@ -86,7 +90,7 @@ def _item_rating(store, iid):
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 @pytest.mark.parametrize("order", ["indifferent_last", "like_last"])
 def test_missing_rating_context_preserves_feedback_until_complete_sync(store, monkeypatch, status, order):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = _client(order)
     client._tracks["A"] = [_t(status)]
     sync.sync_identity(store, iid, client, now=1000.0)
@@ -122,7 +126,7 @@ def test_missing_rating_context_preserves_feedback_until_complete_sync(store, mo
 
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = _client("indifferent_last")
     monkeypatch.setattr(acquisition, "with_retry", lambda fn, **kw: fn())
 
@@ -147,7 +151,7 @@ def test_partial_sync_still_accepts_explicit_ratings(store, monkeypatch, status)
     {"status": "STATUS_FAILED", "tracks": []},
 ])
 def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = _client("indifferent_last")
     sync.sync_identity(store, iid, client, now=1000.0)
     fetch = client.get_playlist
@@ -164,7 +168,7 @@ def test_incomplete_rating_context_is_unknown(store, monkeypatch, detail):
 ])
 @pytest.mark.parametrize("status", ["LIKE", "DISLIKE"])
 def test_unread_pages_preserve_ratings_until_complete_recovery(store, monkeypatch, pages, status):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     client = _client("indifferent_last")
     client._tracks["A"] = [_t(status)]
     sync.sync_identity(store, iid, client, now=1000.0)
@@ -205,7 +209,7 @@ def _play_msg(**over):
 
 
 def test_pevent_indifferent_never_clears_a_like(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus='LIKE'), 900.0)
     # the player readout shows INDIFFERENT before YTM hydrates the real rating
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus="INDIFFERENT"), 1000.0)
@@ -213,14 +217,14 @@ def test_pevent_indifferent_never_clears_a_like(store):
 
 
 def test_pevent_like_records_action_provenance(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus="LIKE"), 1000.0)
     assert store.rec_model.like_provenance(KEY) == "action"
     assert store.rec_model.recent_liked_with_ts() == [(KEY, 1000.0)]     # feeds the transient model
 
 
 def test_rate_removelike_pevent_does_not_clear_a_like(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     live_plays.handle_play_event(_ctx(store), _play_msg(likeStatus='LIKE'), 900.0)
     body = json.dumps({"target": {"videoId": "v1"}})
@@ -230,7 +234,7 @@ def test_rate_removelike_pevent_does_not_clear_a_like(store):
 
 
 def test_rate_like_pevent_acts_with_action_provenance(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Song", "Band", "", None)
     body = json.dumps({"target": {"videoId": "v1"}})
     msg = {"kind": "rate", "url": ".../youtubei/v1/like/like", "body": body, "brandId": "", "brandKnown": True}
@@ -239,8 +243,6 @@ def test_rate_like_pevent_acts_with_action_provenance(store):
     assert store.rec_model.like_provenance(KEY) == "action"
 
 
-# --- the once-ever graduation stamp ---
-
 def _genre_track(store):
     tid = store.tracks.upsert_track("v1", "Song", "Band", None, None)
     store.tracks.set_track_genre(tid, "Techno")
@@ -248,15 +250,26 @@ def _genre_track(store):
     return f"genre:{fam}"
 
 
-def test_like_clear_rerecord_does_not_regraduate(store):
+def test_like_clear_rerecord_keeps_one_day_of_deliberate_support(store):
     axis = _genre_track(store)
-    apply_model_ratings(store, {KEY: "LIKE"}, 1000.0, provenance="action")
-    assert store.rec_signals.get_theme(axis) == rec_params.get_param(store, "source_w_like")  # graduated once
-    apply_model_ratings(store, {KEY: "INDIFFERENT"}, 2000.0)      # genuine un-like: row gone
-    assert KEY not in store.rec_model.recent_liked_keys()
-    apply_model_ratings(store, {KEY: "LIKE"}, 3000.0, provenance="action")   # re-liked
-    assert KEY in store.rec_model.recent_liked_keys()                            # the like itself is back
-    assert store.rec_signals.get_theme(axis) == rec_params.get_param(store, "source_w_like")  # no second graduation
+    observe_rating(store, KEY, 'LIKE', 1000., provenance='api')
+    assert store.rec_model.recent_liked_with_ts() == [(KEY, 1000.)]
+    assert transient.facet_leans(store, 1000.)[axis] > 0
+    assert not permanent_taste.prepare(store, 1000.)
+    original = store.rec_proposals.get_proposals(PERMANENT_SURFACE)
+    assert original['facets'][axis]['deliberate_days'] == 1
+    assert axis not in original['weights']
+
+    observe_rating(store, KEY, 'INDIFFERENT', 2000., provenance='api')
+    assert store.rec_model.recent_liked_with_ts() == []
+    assert axis not in transient.facet_leans(store, 2000.)
+    observe_rating(store, KEY, 'LIKE', 3000., provenance='api')
+    assert store.rec_model.recent_liked_with_ts() == [(KEY, 3000.)]
+    assert transient.facet_leans(store, 3000.)[axis] > 0
+    assert not permanent_taste.prepare(store, 3000.)
+    replayed = store.rec_proposals.get_proposals(PERMANENT_SURFACE)
+    assert replayed['facets'][axis] == original['facets'][axis]
+    assert axis not in replayed['weights']
 
 
 def test_dislike_clear_rerecord_does_not_regraduate(store):

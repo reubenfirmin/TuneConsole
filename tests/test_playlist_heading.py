@@ -16,7 +16,7 @@ from yt_playlist.web.app import create_app
     'My "own" mix & favorites',
 ])
 def test_saved_name_survives_rendering_and_rename(store, generated, metadata, title):
-    account = store.accounts.upsert_account('Main', 'cred', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     pid = store.playlists.upsert_playlist(account, 'PL1', title, 0, 'h', 1)
     if metadata:
         tid = store.tracks.upsert_track('song', 'Song', 'Artist')

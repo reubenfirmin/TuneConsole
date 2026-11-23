@@ -5,6 +5,7 @@ from pathlib import Path
 
 from . import evidence_ledger, policy_documents, fao
 from .evidence_paths import record_id, record_path, maintenance_path
+from .schema_inspection import definitions
 from yt_playlist.repos import evidence_file_writes
 
 MAX_BYTES = 8 * 1024 * 1024
@@ -24,14 +25,15 @@ def references(conn):
 
 
 def _native_owners(conn):
+    if not definitions(conn, ('collection_file_writes',)):
+        return {}
     return {identity: (kind, key, digest, size) for (kind, key), (identity, digest, size)
             in evidence_file_writes.references(conn).items()}
 
 
-def _retirements(conn, root):
+def _retirements(root):
     from .evidence_retirement import Retirements
-    identity = evidence_file_writes.maintenance_id(conn)
-    return Retirements(root, path=maintenance_path(root, identity, 'retirements') if identity is not None else None)
+    return Retirements(root, path=maintenance_path(root, 1, 'retirements'))
 
 
 def _read(path, *, with_age=False):
@@ -91,9 +93,10 @@ def export(conn, target):
     from . import mix_choices
     excluded = set()
     with policy_documents.retained_reader(root), source._budget():
+        pending = _retirements(root)
         for identity, (kind, key, digest, size) in owners.items():
             path = record_path(root, kind, identity)
-            if not path.is_file():
+            if not path.is_file() and identity not in pending.files:
                 raise FileNotFoundError('Missing SQL-owned listening evidence: ' + str(path))
         for kind in ('opportunity', 'response', 'forecast', 'artifact', 'report', 'checkpoint'):
             for path in sorted((root / kind).glob('*/*.json')):
@@ -119,8 +122,7 @@ def export(conn, target):
             page()
         # A snapshot can follow a partial unlink. Preserve the intent needed to
         # finish its orphan events and SQL reconciliation after restoration.
-        pending = _retirements(conn, root)
-        if pending.offers or pending.checkpoints:
+        if pending.offers or pending.checkpoints or pending.files:
             encoded, age = _read(pending.source_path, with_age=True)
             output._publish(target / '.retention-retirements', encoded, 'retirement', 'intent', age=age)
             retirement = [len(encoded), hashlib.sha256(encoded).hexdigest()]
@@ -141,6 +143,7 @@ def restore(conn, manifest):
     output = evidence_ledger.EvidenceLedger(directory(conn), 2**63 - 1)
     owners = _native_owners(conn)
     restored_ids = set()
+    pending_files = set()
     with output._budget() as (_used, save):
         if 'retirements' in index:
             from .evidence_retirement import Retirements
@@ -148,9 +151,11 @@ def restore(conn, manifest):
             if [len(data), hashlib.sha256(data).hexdigest()] != index['retirements']:
                 raise ValueError('Listening evidence retirement intent failed verification')
             source = Retirements(manifest.parent)
-            pending = _retirements(conn, output.directory)
+            pending_files = source.files
+            pending = _retirements(output.directory)
             pending.offers.update(source.offers)
             pending.checkpoints.update(source.checkpoints)
+            pending.files.update(pending_files)
             pending.save()
         for number, (count, digest) in enumerate(index['pages']):
             encoded = _read(manifest.parent / ('page-' + str(number) + '.json'))
@@ -170,7 +175,7 @@ def restore(conn, manifest):
                 if record_id(relative) is not None:
                     restored_ids.add(int(token))
                 output._publish(output.directory / relative, data, kind, token, age=age)
-        if restored_ids != set(owners):
+        if set(owners) - restored_ids - pending_files:
             raise ValueError('Listening evidence backup is missing a SQL owner')
         save(sum(fao.read(path).info.logical_bytes for path in references(conn)))
         output._advance_generation()

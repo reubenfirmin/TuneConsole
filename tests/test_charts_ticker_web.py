@@ -12,7 +12,7 @@ from yt_playlist.web.analytics_views import ticker
 
 
 def _seed(store):
-    iid = store.accounts.upsert_account("me", "c", None, True)
+    iid = store.accounts.upsert_account("me", None, True)
     a = store.tracks.upsert_track("v1", "Alpha", "Artist A", "Album A", 200, album_browse_id="album-a")
     b = store.tracks.upsert_track("v2", "Beta", "Artist B", "Album B", 200, album_browse_id="album-b")
     seed_enrichment(store, a, "techno", "1995")
@@ -21,7 +21,7 @@ def _seed(store):
     store.playlists.set_playlist_tracks(p, [a, b])
 
     def key(tid):
-        return store.conn.execute("SELECT identity_key k FROM tracks WHERE id=?", (tid,)).fetchone()["k"]
+        return store.conn.execute("SELECT identity_key k FROM catalog_tracks WHERE id=?", (tid,)).fetchone()["k"]
 
     # Two snapshots ~30d apart so the ticker has a real history span to slice into periods.
     store.history.record_history_plays(iid, NOW - 30 * 86400, [key(a), key(b)], source_timezone="UTC")
@@ -73,7 +73,7 @@ def test_charts_ticker_tabs_render(store):
 
 
 def test_charts_ticker_handles_no_history(store):
-    store.accounts.upsert_account("me", "c", None, True)
+    store.accounts.upsert_account("me", None, True)
     app = create_app(store, lambda: {}, now_fn=lambda: 1000.0)
     c = TestClient(app, base_url="http://127.0.0.1")
     r = c.get("/charts")
@@ -102,8 +102,8 @@ def test_charts_root_opens_top_songs(store):
 
 @pytest.mark.parametrize('other_account', [False, True])
 def test_same_title_playlists_keep_counts_history_artwork_and_navigation(store, other_account):
-    first = store.accounts.upsert_account('main', 'c', None, True)
-    second = store.accounts.upsert_account('other', 'd', None, False) if other_account else first
+    first = store.accounts.upsert_account('main', None, True)
+    second = store.accounts.upsert_account('other', None, False) if other_account else first
     a = store.tracks.upsert_track('v1', 'Old song', 'Artist', '', 180)
     b = store.tracks.upsert_track('v2', 'Recent song', 'Artist', '', 180, thumbnail='/recent.png')
     extra = store.tracks.upsert_track('v3', 'Unplayed', 'Artist', '', 180)

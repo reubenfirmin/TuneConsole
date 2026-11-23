@@ -26,21 +26,22 @@ def resolve(conn, label):
         return None, None
     if not isinstance(label, str):
         raise ValueError('A genre label must be text or null')
-    matches = {row[0] for row in conn.execute(
-        'SELECT key FROM genre_catalog WHERE key=? OR name=? COLLATE NOCASE '
-        'UNION SELECT genre_key FROM genre_alias WHERE label_key=? OR label=? COLLATE NOCASE',
-        (label, label, normalize(label), label))}
-    if conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone():
-        matches = {current_key(conn, key) for key in matches}
+    matches = matching_keys(conn, label, normalize(label))
     if len(matches) == 1:
         return matches.pop(), None
     return None, 'ambiguous_genre' if matches else 'unknown_genre'
 
 
+def matching_keys(conn, label, normalized):
+    return {row[0] for row in conn.execute(
+        'WITH matches(key) AS (SELECT key FROM genre_catalog WHERE key=? OR name=? COLLATE NOCASE '
+        'UNION SELECT genre_key FROM genre_alias WHERE label_key=? OR label=? COLLATE NOCASE) '
+        'SELECT COALESCE(c.redirect_key,c.key) FROM matches m JOIN genre_catalog c ON c.key=m.key',
+        (label, label, normalized, label))}
+
+
 def current_key(conn, key):
-    if not conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone():
-        return key
-    row = conn.execute('SELECT genre_key FROM genre_redirects WHERE retired_key=?', (key,)).fetchone()
+    row = conn.execute('SELECT redirect_key FROM genre_catalog WHERE key=? AND redirect_key IS NOT NULL', (key,)).fetchone()
     return row[0] if row else key
 
 
@@ -73,13 +74,10 @@ def axis_match_rows(conn, labels):
     """Read canonical identity/family candidates for supplied label/normalized pairs."""
     if not labels:
         return {}
-    redirected = conn.execute("SELECT 1 FROM sqlite_schema WHERE name='genre_redirects'").fetchone() is not None
     result = {}
     for offset in range(0, len(labels), 200):
         page = labels[offset:offset + 200]
         wanted = ','.join('(?,?)' for _ in page)
-        current = 'COALESCE(d.genre_key,m.genre_key)' if redirected else 'm.genre_key'
-        redirects = 'LEFT JOIN genre_redirects d ON d.retired_key=m.genre_key ' if redirected else ''
         # Filter unindexed display labels once before joining the requested
         # labels. Otherwise SQLite can scan the complete alias/name tables for
         # every label in a large first-selection batch.
@@ -92,8 +90,9 @@ def axis_match_rows(conn, labels):
             'UNION SELECT w.label,c.key FROM wanted w JOIN names c ON c.name=w.label COLLATE NOCASE '
             'UNION SELECT w.label,a.genre_key FROM wanted w JOIN genre_alias a ON a.label_key=w.normalized '
             'UNION SELECT w.label,a.genre_key FROM wanted w JOIN aliases a ON a.label=w.label COLLATE NOCASE) '
-            'SELECT m.label,' + current + ',c.family_key FROM matches m ' + redirects +
-            'JOIN genre_catalog c ON c.key=' + current,
+            'SELECT m.label,c.key,c.family_key FROM matches m '
+            'JOIN genre_catalog d ON d.key=m.genre_key '
+            'JOIN genre_catalog c ON c.key=COALESCE(d.redirect_key,d.key)',
             [value for pair in page for value in pair])
         matches = {label: {} for label, normalized in page}
         for label, key, family_key in rows:

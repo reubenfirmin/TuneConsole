@@ -1,17 +1,17 @@
 """Pure road-trip allocation and ordering; no repositories, providers or draft writes."""
 import math
 from collections import Counter, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import zip_longest
 from typing import Protocol
 
 from yt_playlist.rec.journeys import journey_order
 from yt_playlist.rec.artist_variety import members
+from yt_playlist.rec.road_trip_artists import selected_artist
+from yt_playlist.rec.road_trip_ranking import CROSSOVER_SIMILARITY, TrackRanking, sample_order
 from yt_playlist.util import genre_map
 
 AVG_TRACK_S = 210
-FAMILIARITY_SIGMA = 0.3
-REPEAT_PENALTY = 0.3
 
 
 class RandomSource(Protocol):
@@ -32,6 +32,8 @@ class MixRequest:
     previous: list[str]
     building: bool
     genre_families: dict[str,str] | None = None
+    ranking: TrackRanking = field(default_factory=TrackRanking)
+    artist_refs: dict[str, dict] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -41,24 +43,6 @@ class MixResult:
     groups: dict[str, list[dict]]
     short: dict[str, int]
     blend_available: bool
-
-
-def _weight(cand, familiarity, penalized):
-    w = cand["score"]
-    w *= math.exp(-((cand["fam"] - familiarity) ** 2) / (2 * FAMILIARITY_SIGMA ** 2)) + 0.05
-    if cand["video_id"] in penalized:
-        w *= REPEAT_PENALTY
-    return max(w, 0.0)
-
-
-def _sample_order(cands, rng, weight_of):
-    keyed = []
-    for candidate in cands:
-        weight = weight_of(candidate)
-        if weight > 0:
-            keyed.append((rng.random() ** (1.0 / weight), candidate))
-    keyed.sort(key=lambda pair: -pair[0])
-    return [candidate for _, candidate in keyed]
 
 
 def _artist_cap(cands, needed):
@@ -75,7 +59,7 @@ def _bucket(cand, kind, quota):
     return key if key in quota else ""
 
 
-def _prefer_seed_artists(order, artists):
+def _prefer_seed_artists(order, artists, refs):
     groups = {}
     for candidate in order:
         groups.setdefault(_axis_genre(candidate), []).append(candidate)
@@ -83,8 +67,7 @@ def _prefer_seed_artists(order, artists):
     for genre, rows in groups.items():
         named, related = {}, []
         for candidate in rows:
-            artist = candidate["artist"].casefold()
-            if artist in artists:
+            if artist := selected_artist(candidate, artists, refs):
                 named.setdefault(artist, []).append(candidate)
             else:
                 related.append(candidate)
@@ -93,7 +76,7 @@ def _prefer_seed_artists(order, artists):
     return [queues[_axis_genre(c)].popleft() for c in order]
 
 
-def _quota_weights(state, party, cands, conditional=False):
+def _quota_weights(state, party):
     targets = (state.get("targets") or {}).get(party) or {}
     out = {}
     for kind in ("genre", "era"):
@@ -104,11 +87,6 @@ def _quota_weights(state, party, cands, conditional=False):
         if claimed > 1.0:
             pins = {k: v / claimed for k, v in pins.items()}
         out[kind] = {**pins, "": max(0, 1 - claimed)}
-    if conditional:
-        eligible = [c for c in cands if all(q[_bucket(c, kind, q)] > 0 for kind, q in out.items())]
-        for kind, weights in out.items():
-            available = {_bucket(c, kind, weights) for c in eligible}
-            weights.update({k: 0 for k in weights if k not in available})
     return out
 
 
@@ -124,13 +102,16 @@ def _apportion_percentages(weights, total=100):
     return allocated
 
 
-def _quotas(state, party, slots, cands, conditional=False):
-    return {kind: (_apportion_percentages(weights, slots) if any(weights.values())
-                   else dict.fromkeys(weights, 0))
-            for kind, weights in _quota_weights(state, party, cands, conditional).items()}
+def _quotas(weights, slots):
+    return {kind: _apportion_percentages(shares, slots) for kind, shares in weights.items()}
 
 
-def _fill(order, slots, cap, quotas=None, preferred_artists=()):
+def missed_balances(tracks, quotas):
+    return [kind for kind, quota in quotas.items()
+            if Counter(_bucket(candidate, kind, quota) for candidate in tracks) != Counter(quota)]
+
+
+def _fill(order, slots, cap, quotas=None, preferred_artists=(), artist_refs=None, *, bucket_for=_bucket):
     quotas = quotas or {}
     picked, per, taken = [], Counter(), set()
     spent = {kind: Counter() for kind in quotas}
@@ -139,16 +120,19 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
     def blocked(candidate, *, relax_artist=False):
         if len(picked) >= slots:
             return True
-        if (not relax_artist and candidate["artist"].casefold() not in preferred_artists
+        if (not relax_artist and not selected_artist(candidate, preferred_artists, artist_refs or {})
                 and any(per[artist] >= cap for artist in members(candidate))):
             return True
-        return any(spent[kind][_bucket(candidate, kind, quota)] + 1 > quota.get(_bucket(candidate, kind, quota), 0)
-                   for kind, quota in quotas.items())
+        for kind, quota in quotas.items():
+            bucket = bucket_for(candidate, kind, quota)
+            if spent[kind][bucket] >= quota.get(bucket, 0):
+                return True
+        return False
 
     def take(candidate):
         nonlocal total
         for kind, quota in quotas.items():
-            spent[kind][_bucket(candidate, kind, quota)] += 1
+            spent[kind][bucket_for(candidate, kind, quota)] += 1
         per.update(members(candidate))
         taken.add(candidate["video_id"])
         picked.append(candidate)
@@ -161,7 +145,7 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
             for candidate in order:
                 if spent[kind][key] >= want:
                     break
-                if candidate["video_id"] in taken or _bucket(candidate, kind, quota) != key or blocked(candidate):
+                if candidate["video_id"] in taken or bucket_for(candidate, kind, quota) != key or blocked(candidate):
                     continue
                 take(candidate)
     for candidate in order:
@@ -174,6 +158,65 @@ def _fill(order, slots, cap, quotas=None, preferred_artists=()):
     return picked, total
 
 
+def _joint_quotas(orders, wanted, weights, quotas):
+    """Find track counts for the available intersections of source, genre and era."""
+    from scipy.optimize import Bounds, LinearConstraint, milp
+    from scipy.sparse import csc_array
+
+    def cell(candidate):
+        return tuple(_bucket(candidate, kind, quota) for kind, quota in quotas.items())
+
+    limits = {('source', side): count for side, count in wanted.items()}
+    limits.update({(kind, key): count for kind, quota in quotas.items() for key, count in quota.items()})
+    columns = {}
+    ranks = {}
+    row_numbers = {key: index for index, key in enumerate(limits)}
+    for side, order in orders.items():
+        if not wanted[side]:
+            continue
+        for index, candidate in enumerate(order):
+            keys = cell(candidate)
+            if any(not shares[key] for key, shares in zip(keys, weights.values(), strict=True)):
+                continue
+            bucket = side, keys
+            columns[bucket] = columns.get(bucket, 0) + 1
+            ranks.setdefault(bucket, index / len(order))
+    by_source = {side: {} for side in wanted}
+    if not columns:
+        return by_source, cell
+
+    rows, cols, coefficients = [], [], []
+    for column, (side, keys) in enumerate(columns):
+        constraints = [('source', side), *zip(quotas, keys, strict=True)]
+        for key in constraints:
+            rows.append(row_numbers[key])
+            cols.append(column)
+            coefficients.append(1.)
+
+    # Fill the available source slots first, then minimize shares over target.
+    # Positive shares may flex when the requested balance is impossible. Zero
+    # shares are excluded above. Weighted draw order breaks equally good fits.
+    axis_rows = len(limits) - len(wanted)
+    rows.extend(range(len(wanted), len(limits)))
+    cols.extend(range(len(columns), len(columns) + axis_rows))
+    coefficients.extend([-1.] * axis_rows)
+    matrix = csc_array((coefficients, (rows, cols)), shape=(len(limits), len(columns) + axis_rows))
+    slots = sum(wanted.values())
+    fill_value = slots * len(quotas) + 1
+    costs = [-fill_value + rank / (slots + 1) for rank in ranks.values()] + [1.] * axis_rows
+    result = milp(costs, integrality=[1] * len(columns) + [0] * axis_rows,
+                  bounds=Bounds(0, [*columns.values(), *([slots] * axis_rows)]),
+                  constraints=LinearConstraint(matrix, ub=list(limits.values())),
+                  options={'mip_rel_gap': 0.0})
+    if not result.success:
+        return None
+
+    for (side, bucket), count in zip(columns, result.x[:len(columns)], strict=True):
+        if round(count):
+            by_source[side][bucket] = round(count)
+    return by_source, cell
+
+
 def _feat(item):
     return {"artist": item.get("artist") or "", "genre": item.get("genre") or "",
             'artist_ids': item.get('artist_ids'),
@@ -182,15 +225,16 @@ def _feat(item):
 
 
 def _is_overlap(candidate, state):
+    if (candidate.get("passenger_similarity") or 0) >= CROSSOVER_SIMILARITY:
+        return True
     inputs = state.get("inputs") or {}
-    artists = {artist.strip().lower() for artist in inputs.get("artists", []) if artist}
-    if (candidate.get("artist") or "").strip().lower() in artists:
+    if selected_artist(candidate, inputs.get("artists", []), inputs.get("artist_refs", {})):
         return True
     families = state.get('genre_families')
-    wanted = {families[genre] if families is not None else genre_map.family(genre)
+    wanted = {families.get(genre) if families is not None else genre_map.family(genre)
               for genre in inputs.get("genres", []) if genre}
     family = (candidate.get('family') if families is not None else genre_map.family(candidate.get('genre')))
-    return bool(wanted and family in wanted)
+    return bool(family and family in wanted)
 
 
 def _mix_source(candidate, state):
@@ -207,15 +251,39 @@ def _mix_weights(state):
 
 def _pick_mix(state, groups, orders, target_s):
     weights = _mix_weights(state)
-    artists = {artist.casefold() for artist in state.get("inputs", {}).get("artists", [])}
-    orders["theirs"] = _prefer_seed_artists(orders["theirs"], artists)
+    seeds = state.get("inputs", {})
+    artists, refs = seeds.get("artists", []), seeds.get("artist_refs", {})
+    orders["theirs"] = _prefer_seed_artists(orders["theirs"], artists, refs)
     averages = {side: (sum(c["duration"] or AVG_TRACK_S for c in rows) / len(rows)
                        if rows else AVG_TRACK_S) for side, rows in groups.items()}
 
-    def fill(side, count):
-        party = "theirs" if side == "theirs" else "mine"
-        quotas = _quotas(state, party, count, groups[side], conditional=party == "mine" and state["blend_available"])
-        return _fill(orders[side], count, _artist_cap(groups[side], count), quotas, artists if side == "theirs" else ())
+    def fill_party(party, wanted):
+        sources = {side: orders[side] for side in wanted}
+        weights = _quota_weights(state, party)
+        quotas = _quotas(weights, sum(wanted.values()))
+        caps = {side: _artist_cap(groups[side], count) for side, count in wanted.items()}
+        preferred = artists if party == 'theirs' else ()
+        draws = {side: _fill(rows, wanted[side], caps[side], quotas, preferred, refs)
+                 for side, rows in sources.items()}
+        if not quotas or not any(wanted.values()):
+            return draws
+
+        tracks = [candidate for picks, _ in draws.values() for candidate in picks]
+        if (all(len(draws[side][0]) == count for side, count in wanted.items())
+                and not missed_balances(tracks, quotas)):
+            return draws
+        fit = _joint_quotas(sources, wanted, weights, quotas)
+        if fit is None:
+            return draws
+
+        cells, cell_for = fit
+        return {side: _fill(rows, wanted[side], caps[side], {'cell': cells[side]}, preferred, refs,
+                            bucket_for=lambda candidate, _kind, _quota: cell_for(candidate))
+                for side, rows in sources.items()}
+
+    def fill(wanted):
+        return {**fill_party('mine', {side: wanted[side] for side in ('yours', 'blend')}),
+                **fill_party('theirs', {'theirs': wanted['theirs']})}
 
     attempts = {}
 
@@ -223,10 +291,11 @@ def _pick_mix(state, groups, orders, target_s):
         if count in attempts:
             return attempts[count]
         wanted = _apportion_percentages(weights, count)
+        allocation = fill(wanted)
         picked, seconds, short = {}, {}, {}
         expected_s = 0
         for side, slots in wanted.items():
-            picked[side], seconds[side] = fill(side, slots)
+            picked[side], seconds[side] = allocation[side]
             avg = seconds[side] / len(picked[side]) if picked[side] else averages[side]
             missing_s = (slots - len(picked[side])) * avg
             expected_s += seconds[side] + missing_s
@@ -237,10 +306,15 @@ def _pick_mix(state, groups, orders, target_s):
             for side in ("yours", "theirs", "blend"):
                 if not gap:
                     break
-                replacement, secs = fill(side, len(picked[side]) + gap)
-                added = len(replacement) - len(picked[side])
+                party = 'theirs' if side == 'theirs' else 'mine'
+                sources = ('theirs',) if party == 'theirs' else ('yours', 'blend')
+                expanded = {pool: len(picked[pool]) for pool in sources}
+                expanded[side] += gap
+                replacement = fill_party(party, expanded)
+                added = sum(len(rows) - len(picked[pool]) for pool, (rows, _) in replacement.items())
                 if added > 0:
-                    picked[side], seconds[side] = replacement, secs
+                    for pool, (rows, secs) in replacement.items():
+                        picked[pool], seconds[pool] = rows, secs
                     gap -= added
         secs = sum(seconds.values())
         attempts[count] = (picked, short, expected_s if state.get("building") else secs)
@@ -272,7 +346,7 @@ def construct(request: MixRequest, rng: RandomSource) -> MixResult:
     decides eligibility; construction never searches, looks up metadata or persists.
     """
     state = {"own_pct": request.own_pct, "targets": request.targets, "building": request.building,
-             "inputs": {"artists": request.artists, "genres": request.genres},
+             "inputs": {"artists": request.artists, "genres": request.genres, "artist_refs": request.artist_refs},
              "genre_families":request.genre_families}
     groups = {"yours": [], "theirs": [], "blend": []}
     banned, penalized = set(request.banned), set(request.previous)
@@ -288,9 +362,10 @@ def construct(request: MixRequest, rng: RandomSource) -> MixResult:
         if previous is None or (candidate["source"] == "mine" and previous["source"] != "mine"):
             unique[video] = candidate
     for candidate in unique.values():
+        candidate = request.ranking.annotate(candidate)
         groups[_mix_source(candidate, state)].append(candidate)
     state["blend_available"] = bool(groups["blend"])
-    orders = {side: _sample_order(rows, rng, lambda c: _weight(c, request.familiarity_pct / 100, penalized))
+    orders = {side: sample_order(rows, rng, request.familiarity_pct / 100, penalized, request.ranking)
               for side, rows in groups.items()}
     picked, short = _pick_mix(state, groups, orders, request.target_minutes * 60)
     ordered = journey_order(picked["yours"] + picked["blend"] + picked["theirs"], "road_trip", request.seed, _feat)

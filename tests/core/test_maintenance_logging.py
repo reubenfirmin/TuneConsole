@@ -10,7 +10,7 @@ from yt_playlist.core import db_diagnostics, work_diagnostics
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
-from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement
+from yt_playlist.rec import album_choices, album_notes, choice_evidence, home_prepared, measurement, permanent_taste
 from yt_playlist.library import mode_composition
 from yt_playlist.rec.rec_worker import RecWorker
 from yt_playlist.rec.worker_tasks import ServingTasks
@@ -35,13 +35,9 @@ def publication_store():
 
 
 @pytest.fixture
-def budget_store(publication_store, monkeypatch):
-    # Budget accounting consumes an already saved output. Keep actual SQL and
-    # snapshot diagnostics without bootstrapping unrelated catalog/model owners.
-    publication_store.conn.execute(
-        'CREATE TABLE rec_proposals(surface TEXT PRIMARY KEY,payload TEXT NOT NULL,built_at REAL)')
-    monkeypatch.setattr(publication_store.rec_ledger, 'card_views', Mock(return_value=0))
-    return publication_store
+def budget_store(file_backed_store, monkeypatch):
+    monkeypatch.setattr(file_backed_store.rec_ledger, 'card_views', Mock(return_value=0))
+    return file_backed_store
 
 
 @pytest.fixture
@@ -106,25 +102,26 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(
     store = budget_store
     clock = [0.0]
     store.maintenance_diagnostics = work_diagnostics.MaintenanceDiagnostics(clock=lambda: clock[0])
-    store.rec_proposals.put_proposals('home_prepared', {'last-good': True}, 0)
+    surface, phase = home_prepared.REVISIT_SURFACE, home_prepared.REVISIT_PHASE
+    last_good = {'rediscover': [{'id': 1, 'name': 'Last good playlist'}]}
+    store.rec_proposals.put_proposals(surface, last_good, 0)
     exhausted_calls = []
 
-    def exhausted(source, now):
-        assert source is store
+    def exhausted(reader, now, *, count, pool):
+        assert reader._read_only
         exhausted_calls.append(now)
         raise WorkBudgetExceeded('budget exhausted')
 
     # Keep the task adapter, Home budget boundary and last-good SQL output real.
     # Other producers have their own preparation/worker owners.
     monkeypatch.setattr(measurement, 'maintain_storage', Mock())
-    monkeypatch.setattr(choice_evidence, 'prepare_context', Mock())
     monkeypatch.setattr(choice_evidence, 'refresh_report', Mock())
+    monkeypatch.setattr(permanent_taste, 'prepare', Mock(return_value=False))
     monkeypatch.setattr(album_choices, 'prepare_cached', Mock(return_value={'items': []}))
     monkeypatch.setattr(album_choices, 'selection', Mock(return_value=(None, [], None)))
     monkeypatch.setattr(album_notes, 'prepare', Mock(return_value=False))
-    monkeypatch.setattr(home_prepared, 'prepare_discovery', Mock())
-    monkeypatch.setattr(home_prepared, 'prepare_revisit', Mock())
-    monkeypatch.setattr(home_prepared, '_prepare', exhausted)
+    monkeypatch.setattr(home_prepared, 'prepare_discovery', Mock(return_value={}))
+    monkeypatch.setattr(home_prepared.surfaces, 'rediscover_playlists', exhausted)
     tasks = ServingTasks(SimpleNamespace(store=store, now_fn=lambda: 1000, client_provider=lambda: {},
         logger=logging.getLogger('test')), lambda name, target, *args, **kwargs: target(*args, **kwargs))
     if report_all_publications:
@@ -148,7 +145,7 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(
         else:
             # Further retries count Home's actual budget handling without
             # repeatedly preparing unrelated worker stages.
-            assert home_prepared.prepare(store, 1000) is None
+            assert home_prepared.prepare_revisit(store, 1000) is False
     assert exhausted_calls == [1000] * 30
     assert not summaries()
     if report_all_publications:
@@ -161,10 +158,10 @@ def test_home_budget_is_counted_once_and_keeps_last_good_collections(
     assert len(records) == 1
     elapsed, _published, deferred, failed, phases, reasons, waiting = records[0].args
     assert (elapsed, deferred, failed) == (60, 30, 0)
-    assert phases['rec: Home collections'] == {'deferred': 30}
-    assert reasons == {'rec: Home collections': {'time_budget': 30}}
-    assert waiting['rec: Home collections'] == 60
-    assert store.rec_proposals.get_proposals('home_prepared') == {'last-good': True}
+    assert phases[phase] == {'deferred': 30}
+    assert reasons == {phase: {'time_budget': 30}}
+    assert waiting[phase] == 60
+    assert store.rec_proposals.get_proposals(surface) == last_good
 
 
 def test_fast_phase_details_are_debug_and_slow_work_remains_visible(monkeypatch, caplog):

@@ -12,8 +12,9 @@ def apply_model_ratings(store, statuses, now, provenance='sync'):
 
 def observe_rating(store, key, status, now, *, provenance='sync'):
     masters = [account for account in store.accounts.get_accounts() if account.is_master]
-    account = masters[0].id if masters else store.accounts.upsert_account('rating fixture', 'fixture', None, True)
-    row = store.conn.execute('SELECT video_id FROM tracks WHERE identity_key=? LIMIT 1', (key,)).fetchone()
+    account = masters[0].id if masters else store.accounts.upsert_account('rating fixture', None, True)
+    row = store.conn.execute('SELECT s.video_id FROM track_sources s JOIN recordings r ON r.id=s.recording_id '
+                             'WHERE r.identity_key=? AND s.library_origin IS NOT NULL LIMIT 1', (key,)).fetchone()
     if row is None:
         title, artist = key.split('|', 1)
         video = 'rating-fixture:' + key

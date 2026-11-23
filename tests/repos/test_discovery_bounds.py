@@ -5,7 +5,7 @@ delete, orphaned-track prune."""
 def test_interested_artists_limit(store):
     s = store
     # two artists with different engagement: A (2 plays), B (1 play)
-    iid = s.accounts.upsert_account("m", "c", None, True)
+    iid = s.accounts.upsert_account("m", None, True)
     s.tracks.upsert_track("v1", "S1", "A", None, None)
     s.tracks.upsert_track("v2", "S2", "A", None, None)
     s.tracks.upsert_track("v3", "S3", "B", None, None)

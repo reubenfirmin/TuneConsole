@@ -11,7 +11,7 @@ class HomeNavigation:
         self.respond, self.refresh = respond, refresh
         self.group_stories = group_stories
 
-    def choose(self, preference, panel, growth):
+    def choose(self, preference, panel, growth, *, panel_access=None):
         if preference is not None:
             if preference not in {'auto', 'albums', 'mixes', 'radio', 'both'}:
                 return 400
@@ -19,7 +19,8 @@ class HomeNavigation:
                 return 409
             self.settings.set_setting('home_format', preference)
         if panel in {'album-choices', 'directions', 'radio'}:
-            if not self.retained(panel) and not has_access(growth(), panel):
+            accessible = panel_access or (lambda panel: has_access(growth(), panel))
+            if not self.retained(panel) and not accessible(panel):
                 return 409
             self.settings.set_setting('home_last_panel', panel)
         return 204

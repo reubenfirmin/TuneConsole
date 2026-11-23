@@ -15,7 +15,7 @@ REMINDER_AT = FIRST_PLAY + 8 * 86400
 @pytest.fixture
 def listener(store, monkeypatch):
     monkeypatch.setattr(lastfm, 'api_key', lambda source: source.settings.get_setting('lastfm_api_key') or None)
-    account = store.accounts.upsert_account('main', 'credential', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='song')
     store.history.record_play_event(account, 'song|artist', 'song', FIRST_PLAY)
     returning_listener(store, 'mixes')
@@ -53,17 +53,22 @@ def test_unparseable_dismissal_timestamp_still_obeys_initial_delay(listener):
 def test_reminder_and_dismissal_preserve_optional_setup_access(listener):
     store = listener
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: REMINDER_AT), base_url="http://127.0.0.1")
-    html = c.get('/').text
-    assert '/setup?tab=enrichment#setup-lastfm' in html
+    notices = {'panel': 'notices', 'fragment': 'true'}
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    html = response.text
     assert 'id="lastfm-nudge"' in html
-    assert 'Needs attention' in html
-    assert 'Find more music that fits' in html and 'How to get here' in html
-    assert 'Register for a free Last.fm API key, paste it into Setup and turn Last.fm on.' in html
-    assert 'Set up Last.fm' in html
+    assert 'aria-label="Needs attention"' in html
+    assert 'href="/setup?tab=enrichment#setup-lastfm"' in html
+    assert 'hx-post="/onboard/lastfm/dismiss"' in html
     assert c.post("/onboard/lastfm/dismiss").status_code == 200
-    assert store.settings.get_setting("lastfm_nudge_dismissed_at") is not None   # snooze timestamp recorded
-    after = c.get('/').text
-    assert 'id="lastfm-nudge"' not in after
-    assert 'Find more music that fits' in after
-    assert '/setup?tab=enrichment' in after
-    assert 'Register for a free Last.fm API key, paste it into Setup and turn Last.fm on.' in after
+    assert float(store.settings.get_setting('lastfm_nudge_dismissed_at')) == REMINDER_AT
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    assert 'id="lastfm-nudge"' not in response.text
+
+    growth = c.get('/home/growth')
+    assert growth.status_code == 200
+    lastfm_node = next(node for node in growth.json()['nodes'] if node['id'] == 'lastfm')
+    assert lastfm_node['href'] == '/setup?tab=enrichment#setup-lastfm'
+    assert 'Register for a free Last.fm API key' in lastfm_node['how_to']

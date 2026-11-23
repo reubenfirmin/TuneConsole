@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from yt_playlist.web.radio_session import PlaylistRadio
 from yt_playlist.web.routes import radio_session as radio_routes
-from tests.radio_session_support import poc, play
+from tests.radio_session_support import poc, play, replace_native_future
 
 def test_latest_direction_choice_updates_only_future_and_waits_for_native_ack(poc):
     c, remote, frames, *_ = poc
@@ -143,6 +143,8 @@ def test_native_transition_during_tail_removal_stays_in_history(poc, monkeypatch
     assert state["history_count"] == 2
     assert state["position"] == -1 and c.session.furthest == 0
     assert state["browser"]["player"]["video_id"] == "v2"
+    assert state["browser"]["playback_synced"]
+    assert c.ctx.bridge.native_ids == ["v2", "v3", target]
     assert "v2" in c.session.directions.retired
     assert all(t["video_id"] != "v2" for b in state["directions"] for t in b["tracks"])
     assert PlaylistRadio(c.ctx).bootstrap()["state"]["history"] == state["history"]
@@ -165,6 +167,53 @@ def test_native_transition_during_tail_removal_stays_in_history(poc, monkeypatch
     assert [t["video_id"] for t in state["history"]] == ["v1", "v2", "v3"]
     assert state["ahead"] == 1
     assert len(frames) == 1
+
+
+@pytest.mark.parametrize("rejoin", [False, True])
+def test_delayed_playback_of_removed_track_recovers_saved_future(poc, monkeypatch, rejoin):
+    c, remote, frames, workers, _ = poc
+    clock = [1234.0]
+    c.ctx.now_fn = c.listening.now_fn = lambda: clock[0]
+    successor = replace_native_future(c, remote)
+    added = list(remote.adds)
+    removed = list(remote.removes)
+    clock[0] += 165
+    play(c, "v3")
+    assert not c.session.edits.recent_states
+
+    if rejoin:
+        c.suspend()
+        c = PlaylistRadio(c.ctx)
+        monkeypatch.setattr(c.work, "start_thread", lambda *args, **kwargs: workers.append((args, kwargs)))
+        assert c.join()["active"]
+
+    play(c, "v4", playlist="OTHER")
+    assert [t["video_id"] for t in c.status()["history"]] == ["v1", "v2", "v3"]
+    play(c, "v4")
+    play(c, "v4")
+    state = c.status()
+    assert [t["video_id"] for t in state["history"]] == ["v1", "v2", "v3", "v4"]
+    assert state["updating"] and not state["browser"]["playback_synced"]
+
+    bridge = c.ctx.bridge
+    bridge.auto_adopt = True
+    play(c, "v4")
+    assert bridge.native_ids == ["v4", successor]
+    assert bridge.now_playing["video_id"] == "v4" and bridge.now_playing["position"] == 30
+    assert c.status()["browser"]["playback_synced"]
+    assert not c.status()["updating"]
+    assert remote.adds == added and remote.removes == removed
+
+    play(c, successor)
+    play(c, successor)
+    assert [t["video_id"] for t in c.status()["history"]] == ["v1", "v2", "v3", "v4", successor]
+    assert c.status()["ahead"] == 1
+    assert remote.adds == [*added, [remote.ids[-1]]] and remote.removes == removed
+    assert len(frames) == 1
+
+    play(c, "v4")
+    play(c, "v4")
+    assert [t["video_id"] for t in c.status()["history"]] == ["v1", "v2", "v3", "v4", successor, "v4"]
 
 
 def test_tuning_honors_a_pending_explicit_stream_selection(poc):

@@ -20,10 +20,11 @@ import pytest
 
 from tests.bench_svd_background import _saved_library_source
 from tests.library_image.fixtures import benchmark_library
-from yt_playlist.core import embeddings, embedding_files
+from yt_playlist.core import content_work, embeddings, embedding_files
 from yt_playlist.core.db_diagnostics import PublicationTimings
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.numerics import limit_native_threads
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.core.store import Store
 from yt_playlist.rec import content_model, musical_preparation, progressive, taste_modes, vibe_preparation
 from yt_playlist.repos.musical_profiles import MusicalProfilesRepo
@@ -250,18 +251,19 @@ def _measure(path, scenario):
     try:
         if scenario == 'cold-and-growing':
             with store.conn:
-                store.conn.execute("DELETE FROM recording_embeddings WHERE space IN ('content_library','content_discovery')")
                 store.conn.execute("DELETE FROM recording_embedding_files WHERE space IN ('content_library','content_discovery')")
-                for table in ('prepared_recording_inputs', 'unresolved_preparation_inputs', 'rec_content_pending'):
-                    store.conn.execute(f'DELETE FROM {table}')
+                store.conn.execute('DELETE FROM prepared_recording_inputs')
+                content_work.acknowledge(store.conn, content_work.pending(store.conn, -1))
             # Encoders and preparation checkpoints have typed owners now.
             # Deleting only legacy settings leaves the old model/retry delay
             # active and does not establish the advertised cold scenario.
-            reset = ('rec_content_model', 'rec_content_generation', 'rec_content_genre_revision',
-                     'rec_content_inputs', progressive.BASIS_STATE, progressive.FIT_STATE)
+            store.rec_model.publish_model_state(recording=RecordingModelUpdate(
+                encoder=None, generation=None, genre_revision=None, input_fingerprint=None))
+            reset = (progressive.BASIS_STATE, progressive.FIT_STATE)
             for key in reset:
                 store.settings.delete_setting(key)
             assert all(store.settings.get_setting(key) is None for key in reset)
+            assert store.rec_model.recording_encoder() is None
             report['controlled_changes'] = ['Removed derived content inputs/vectors/model on copy',
                                              'Lost queue rebuilt by production maintenance audit',
                                              'Two recording BPM values change continually during fit']

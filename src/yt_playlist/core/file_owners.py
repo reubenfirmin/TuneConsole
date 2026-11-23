@@ -4,12 +4,12 @@ This is a code inventory, not a persisted file or artifact registry.
 """
 from contextlib import contextmanager, ExitStack
 
-from . import file_paths, policy_documents, profile_files, vibe_provenance, embedding_files, legacy_journals, policy_history, vibe_models
+from . import file_paths, policy_documents, profile_files, vibe_provenance, embedding_files, policy_history_read, vibe_models
 
 
 def owners():
     return {'vibe-provenance': vibe_provenance, 'vibe-models': vibe_models, 'profiles': profile_files, 'embeddings': embedding_files,
-            'legacy-journals': legacy_journals, 'policy-history': policy_history}
+            'policy-history': policy_history_read}
 
 
 @contextmanager

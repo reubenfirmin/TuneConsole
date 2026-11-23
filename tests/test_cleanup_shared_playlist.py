@@ -14,8 +14,8 @@ from yt_playlist.library.playlist_undo import undo_action
 
 @pytest.fixture
 def shared_playlist(store):
-    owner = store.accounts.upsert_account('owner', 'bridge', None, True)
-    saved_by = store.accounts.upsert_account('saved', 'bridge', None, False)
+    owner = store.accounts.upsert_account('owner', None, True)
+    saved_by = store.accounts.upsert_account('saved', None, False)
     track = store.tracks.upsert_track('one', 'First song', 'Artist', None, 200)
     memberships = []
     for account in (owner, saved_by):
@@ -128,7 +128,7 @@ def test_keep_one_retains_owner_alternative_but_never_retries_uncertain_deletion
     from ytmusicapi.exceptions import YTMusicServerError
 
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
-    accounts = [store.accounts.upsert_account(name, 'bridge', None, index == 0)
+    accounts = [store.accounts.upsert_account(name, None, index == 0)
                 for index, name in enumerate(('Keeper', 'Saved copy', 'Copy owner'))]
     track = store.tracks.upsert_track('one', 'First song', 'Artist', None, 200)
     playlists, clients = [], {}
@@ -199,7 +199,7 @@ def test_confirmed_system_list_absence_only_prunes_its_own_account(store, remote
     from types import SimpleNamespace
     from yt_playlist.library.playlist_deletion import _prune
 
-    accounts = [store.accounts.upsert_account(name, 'bridge', None, index == 0)
+    accounts = [store.accounts.upsert_account(name, None, index == 0)
                 for index, name in enumerate(('One', 'Two'))]
     memberships = [store.playlists.upsert_playlist(account, remote, remote, 0, '', 1)
                    for account in accounts]

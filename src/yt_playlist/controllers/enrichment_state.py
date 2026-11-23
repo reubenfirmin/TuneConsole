@@ -1,5 +1,4 @@
 """Coordinate provider evidence, retries and restartable configuration refreshes."""
-import json
 from contextlib import nullcontext
 
 from yt_playlist.core import enrichment_state_policy as policy
@@ -39,8 +38,6 @@ class EnrichmentState:
             if len(encoded) > MAX_BYTES - 4096:
                 raise ValueError('Provider result exceeds its byte budget')
             return Capture(inputs['entry_id'], inputs['recording_id'], inputs['video_id'], provider, encoded, run_id, clock(now)), {}
-        if not inputs['attempts']:
-            return None
         return self.choices.capture_result(inputs['entry_id'], provider, fields, run_id=run_id, now=now)
 
     def record_metadata_observations(self, entry_id, provider, observations, *, run_id, now=None, expected_recording_id=None):
@@ -48,10 +45,7 @@ class EnrichmentState:
         if expected_recording_id is not None and expected_recording_id != inputs['recording_id']:
             raise SubjectChanged('Observation catalog subject changed during lookup')
         at = clock(now)
-        prepared, groups = native.prepare(provider, observations, run_id, at, native=inputs['native'])
-        if not inputs['native']:
-            self.repository.store_legacy_observations(inputs, native.legacy_rows(inputs, provider, prepared, run_id, at))
-            return
+        _, groups = native.prepare(provider, observations, run_id, at, native=True)
         for (scope, entity), values in groups.items():
             if inputs['layout'] == 'runtime':
                 if scope in native.MODEL_SCOPES:
@@ -126,25 +120,15 @@ class EnrichmentState:
                         if len(result) == limit:
                             return result
                 return result
-            if layout == 'native':
-                if sum(row['raw_byte_size'] for row in rows) > MAX_BYTES:
-                    raise WorkBudgetExceeded('Native metadata page exceeds byte budget')
-                bodies, result = {}, []
-                for row in rows:
-                    if row['delivery_id'] not in bodies:
-                        bodies[row['delivery_id']] = self.delivery_files.read(row['reference'])
-                    payload = metadata_native.decode_observation(row, bodies[row['delivery_id']])
-                    result.append(policy.native_observation(row, payload))
-                return result
-            if layout == 'prepared':
-                result = []
-                for reference in rows:
-                    row = self.delivery_files.read(tuple(reference[name] for name in
-                        ('filename', 'digest', 'byte_size', 'byte_offset')))['row']
-                    result.append({**row, 'value': json.loads(row['value_json']),
-                                   'provenance': json.loads(row['provenance_json'])})
-                return result
-            return rows
+            if sum(row['raw_byte_size'] for row in rows) > MAX_BYTES:
+                raise WorkBudgetExceeded('Native metadata page exceeds byte budget')
+            bodies, result = {}, []
+            for row in rows:
+                if row['delivery_id'] not in bodies:
+                    bodies[row['delivery_id']] = self.delivery_files.read(row['reference'])
+                payload = metadata_native.decode_observation(row, bodies[row['delivery_id']])
+                result.append(policy.native_observation(row, payload))
+            return result
 
     def integration_cooldown(self, provider):
         return self.repository.integration_cooldown(provider)
@@ -159,6 +143,15 @@ class EnrichmentState:
     def clear_integration_cooldown(self, provider, admitted_deadline):
         return self.repository.clear_integration_cooldown(provider, admitted_deadline)
 
+    def release_check(self):
+        return self.repository.release_check()
+
+    def schedule_release_check(self, deadline):
+        self.repository.schedule_release_check(deadline)
+
+    def record_release_check(self, now, latest):
+        self.repository.record_release_check(now, latest)
+
     def record_enrichment_attempt(self, identity_key, provider, fields, *, retry=False, now=None,
                                   video_id=None, error='', retry_after=0, providers=(), run_id=None, delivery_id=None):
         at, retry_after = float(clock(now)), clock(retry_after)
@@ -171,7 +164,7 @@ class EnrichmentState:
                 raise ValueError('Provider attempt needs a current catalog input')
             return
         observations = {}
-        if delivery_id is None and inputs['layout'] != 'legacy':
+        if delivery_id is None:
             delivery_id, observations = self.capture_provider_result(subject['entry_id'], provider, fields, run_id=run_id, now=at)
         if inputs['layout'] == 'evidence':
             observations = self.choices.result_evidence(subject['entry_id'], provider, delivery_id, fields, complete=True, run_id=run_id)
@@ -189,9 +182,9 @@ class EnrichmentState:
                     return
                 retained = selections.scoped_fields(subject, prior)
             else:
-                if current['layout'] == 'evidence' and policy.attempt_replayed(current['attempt'], status):
+                if policy.attempt_replayed(current['attempt'], status):
                     return
-                retained = json.loads(current['previous']['fields_json']) if current['layout'] == 'legacy' and current['previous'] else {}
+                retained = {}
             result = policy.attempt_state(current['previous'], current['cycle'], fields, now=at, retry=retry,
                 retry_after=retry_after, error=error, prior=retained, runtime=current['layout'] == 'runtime')
             if current['layout'] == 'runtime':
@@ -209,7 +202,7 @@ class EnrichmentState:
                     if checked != current:
                         raise SubjectChanged('Provider attempt changed during file publication')
                     self.repository.store_attempt(current, provider, fields, result, delivery_id=delivery_id,
-                        observations=observations, video_id=video_id, **({'file_record': record} if record else {}))
+                        observations=observations, **({'file_record': record} if record else {}))
         if not retry:
             self._complete_provider(subject['recording_id'], provider, fields, providers, at)
 
@@ -269,7 +262,8 @@ class EnrichmentState:
         now = clock(now)
         if self.repository.expiry_state() is None:
             return 0
-        with self.files.collecting() as acquired:
+        # Provider publication can pin these files while owning the writer.
+        with self.repository.expiry_guard(), self.files.collecting() as acquired:
             if not acquired:
                 return 0
             state = self.repository.expiry_state()

@@ -167,7 +167,12 @@ def test_ppr_keeps_generation_when_rebuild_happens_during_graph_read(store, monk
 
 
 def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, monkeypatch):
+    from tests.group_support import publish_keyed
+
     _entries, keys, remap = _seed_remappable_space(store)
+    leaves = publish_keyed(store, [('Folk', [keys[0], keys[2]], .1), ('Techno', [keys[1]], .9)])
+    assert leaves[keys[0]] != leaves[keys[1]]
+    original = store.rec_model.content_generation()['generation']
 
     def rebuild_while_ranking(*args, **kwargs):
         remap()
@@ -191,15 +196,17 @@ def test_bundles_keep_ppr_in_candidate_generation_during_pool_rebuild(store, mon
     assert mode_surfaces.prepare_bundles(store, 100_000) is not None
     assert store.recommendations.head('home') is not None
     payload = calculated[0]
-    assert payload["_ppr"]["1"][0] == keys[0]
-    assert payload["_ppr"]["2"][0] == keys[1]
+    assert payload["_radio"]["generation"] == original
+    assert payload["_ppr"][leaves[keys[0]]][0] == keys[0]
+    assert payload["_ppr"][leaves[keys[1]]][0] == keys[1]
 
 
 @pytest.mark.parametrize("classifier", [layers.now_mode_mix, layers.session_mode_mix])
 def test_mode_classification_keeps_generation_during_rebuild(store, monkeypatch, classifier):
     _entries, keys, remap = _seed_remappable_space(store)
-    identity = store.accounts.upsert_account("main", "cred", None, True)
-    store.history.import_play_events(identity, [(keys[0], "a", 100_000), (keys[2], "c", 100_000)])
+    identity = store.accounts.upsert_account("main", None, True)
+    store.history.record_play_event(identity, keys[0], "a", 99_995)
+    store.history.record_play_event(identity, keys[2], "c", 100_000)
     rec_params.set_param(store, "now_min_events", 2)
     live_modes = taste_modes.live_modes
 
@@ -216,7 +223,7 @@ def test_mode_classification_keeps_generation_during_rebuild(store, monkeypatch,
 
 def test_catalog_scores_keep_generation_when_rebuild_follows_taste_read(store, monkeypatch):
     entries, keys, remap = _seed_remappable_space(store)
-    identity = store.accounts.upsert_account("main", "cred", None, True)
+    identity = store.accounts.upsert_account("main", None, True)
     playlist = store.playlists.upsert_playlist(identity, "P", "A context", 1, "h", 0.)
     store.playlists.set_playlist_tracks(playlist, [entries[0]])
     content_taste = surfaces.content_taste

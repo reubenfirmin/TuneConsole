@@ -12,6 +12,7 @@ from yt_playlist.controllers.genres import Genres
 from yt_playlist.controllers.player_events import PlayerEvents
 from yt_playlist.controllers.rec_model import RecommendationModel
 from yt_playlist.core import collection_recovery, embeddings
+from yt_playlist.core.model_state import ArtistModelState, ArtistModelUpdate, RecordingModelState, RecordingModelUpdate, UNCHANGED
 from yt_playlist.core.rating_feedback import Rating
 from yt_playlist.core.rec_model_policy import VectorChanges
 from yt_playlist.repos.rec_model import RecModelRepo
@@ -32,10 +33,15 @@ def model():
     vectors = create_autospec(Embeddings, instance=True, spec_set=True)
     recovery = create_autospec(collection_recovery.RecoveryFiles, instance=True, spec_set=True)
     repo.reserve_checkpoint_file.return_value = 41
+    repo.reserve_encoder.return_value = 42
+    repo.recording_state.return_value = RecordingModelState()
+    repo.artist_state.return_value = ArtistModelState()
     recovery.describe.return_value = ('digest', 12)
+    recovery.publish_reserved.return_value = ('model', 'digest', 12)
     vectors.retained.side_effect = recovery.retained.side_effect = nullcontext
     settings.get_setting.return_value = None
     repo.weight_records.return_value = {}
+    repo.legacy_dislike_weight_events.return_value = {}
     return RecommendationModel(repo, settings, events, genres, vectors, recovery, nullcontext)
 
 
@@ -49,9 +55,10 @@ def test_association_keeps_earliest_feedback_expiry_and_graduation_guard(model, 
     guard = {**donor, 'surface': 'like_grad', 'kind': 'like_grad', 'reason': 'learned'}
     model.repository.rating_rows.return_value = [current]
     model.reassociate_rating_feedback({'target': Rating(polarity, 100, 'action')}, {'target': [donor, guard]}, association=association)
+    reason = 'action' if kind == 'like' else 'sync'
     model.repository.publish_association_ratings.assert_called_once_with(
-        [('target', kind)], [('target',)] if kind == 'like' else [], [],
-        [(10, 50, surface, 'target')], [('target', 'learned', 10)], association=association)
+        [('target', kind)], [], [], [(10, 50, reason, surface, 'target')],
+        [('target', 'learned', 10)], association=association)
     model.repository.publish_ratings.assert_not_called()
 
 
@@ -119,35 +126,35 @@ def test_unban_covers_retained_api_dislike_after_clock_moves_backwards(model):
 
 
 def test_checkpoint_writes_file_before_selecting_sql_reference(model):
-    model.repository.checkpoint_facts.return_value = {'typed': True, 'header': None, 'weights': []}
+    model.repository.checkpoint_facts.return_value = {'header': None, 'weights': []}
     model.repository.parameter_values.return_value = {'rec_param:x': '.5'}
     model.recovery.publish_reserved.return_value = ('file', 'digest', 12)
     order = Mock()
     order.attach_mock(model.repository.reserve_checkpoint_file, 'reserve')
     order.attach_mock(model.recovery.publish_reserved, 'file')
     order.attach_mock(model.repository.publish_checkpoint, 'sql')
-    model.save_taste_settings('taste_settings_checkpoint_v1', ['rec_param:x'], 12)
+    model.save_taste_settings(['rec_param:x'], 12)
     assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'sql']
     model.recovery.publish_reserved.assert_called_once_with(41, 'taste-checkpoint', 1, {'rec_param:x': '.5'},
                                                           expected=('digest', 12))
 
 
 def test_checkpoint_file_failure_leaves_existing_sql_reference(model):
-    model.repository.checkpoint_facts.return_value = {'typed': True, 'header': None, 'weights': []}
+    model.repository.checkpoint_facts.return_value = {'header': None, 'weights': []}
     model.recovery.publish_reserved.side_effect = OSError('storage unavailable')
     with pytest.raises(OSError):
-        model.save_taste_settings('taste_settings_checkpoint_v1', [], 12)
+        model.save_taste_settings([], 12)
     model.repository.publish_checkpoint.assert_not_called()
 
 
 def test_restore_rejects_merged_axes_before_changing_settings_or_weights(model):
-    model.repository.checkpoint_facts.return_value = {'typed': True,
+    model.repository.checkpoint_facts.return_value = {
         'header': {'recovery_filename': 'file', 'recovery_digest': 'hash', 'recovery_bytes': 12},
         'weights': [{'position': 0, 'captured_axis': 'genre:first'}, {'position': 1, 'captured_axis': 'genre:second'}]}
     model.recovery.read.return_value = {}
     model.repository.checkpoint_axes.return_value = [(7, .3, 1), (7, .4, 2)]
     with pytest.raises(ValueError, match='Merged checkpoint axes'):
-        model.restore_taste_settings('taste_settings_checkpoint_v1', [])
+        model.restore_taste_settings([])
     model.settings.replace_keys.assert_not_called()
     model.repository.replace_weights.assert_not_called()
 
@@ -171,22 +178,24 @@ def test_training_publication_validates_all_owner_names_before_preparing_files(m
 
 
 def test_content_publication_prepares_both_pools_then_sql_then_generation(model):
-    model.settings.get_setting.return_value = 'old'
+    model.repository.recording_state.return_value = RecordingModelState(generation='old')
     model.vectors.prepare.side_effect = ['library', 'discovered']
     order = Mock()
     order.attach_mock(model.vectors.prepare, 'file')
     order.attach_mock(model.vectors.publish, 'sql')
-    order.attach_mock(model.settings.publish_values, 'head')
+    order.attach_mock(model.repository.publish_model_state, 'head')
     assert model.publish_content_generation([('a', VECTOR)], [], MODEL, 'rev', 'inputs', 'old')
     assert [call[0] for call in order.mock_calls] == ['file', 'file', 'sql', 'head']
-    assert model.settings.publish_values.call_args.args[0]['rec_content_generation'] != 'old'
+    update, reference = model.repository.publish_model_state.call_args.args[0]
+    assert update.generation != 'old' and update.encoder == MODEL
+    assert reference == ('model', 'digest', 12)
 
 
 def test_stale_content_publication_never_selects_its_files(model):
-    model.settings.get_setting.return_value = 'newer'
+    model.repository.recording_state.return_value = RecordingModelState(generation='newer')
     assert not model.publish_content_generation([('a', VECTOR)], [], MODEL, 'rev', '', 'old')
     model.vectors.publish.assert_not_called()
-    model.settings.publish_values.assert_not_called()
+    model.repository.publish_model_state.assert_not_called()
 
 
 def test_second_content_file_failure_never_changes_sql_or_head(model):
@@ -194,14 +203,51 @@ def test_second_content_file_failure_never_changes_sql_or_head(model):
     with pytest.raises(OSError):
         model.publish_content_generation([('a', VECTOR)], [], MODEL, 'rev', '', '')
     model.vectors.publish.assert_not_called()
-    model.settings.publish_values.assert_not_called()
+    model.repository.publish_model_state.assert_not_called()
 
 
 def test_content_reads_hide_vectors_from_a_different_encoder(model):
-    model.settings.get_setting.side_effect = lambda key: MODEL if key == 'rec_content_model' else None
+    model.repository.recording_state.return_value = RecordingModelState(reference=('model', 'digest', 12))
+    model.recovery.read.return_value = MODEL
     basis = embeddings.version('rec_content_vectors', {'rec_content_model': MODEL})
     model.vectors.head.side_effect = [(basis, 1), ('obsolete', 1)]
     model.vectors.rows.side_effect = [[('a', VECTOR)], [('b', VECTOR)]]
     result = model.content_generation()
     assert result['library'] == [('a', VECTOR)] and result['discovered'] == []
     assert not result['coherent']
+
+
+def test_artist_encoder_publication_prepares_its_file_before_committing_both_updates(model):
+    order = Mock()
+    order.attach_mock(model.repository.reserve_encoder, 'reserve')
+    order.attach_mock(model.recovery.publish_reserved, 'file')
+    order.attach_mock(model.repository.publish_model_state, 'sql')
+    recording = RecordingModelUpdate(fit_fingerprint='recording')
+    artist = ArtistModelUpdate(encoder=MODEL, fit_fingerprint='artist')
+    model.publish_model_state(recording=recording, artist=artist)
+    assert [call[0] for call in order.mock_calls] == ['reserve', 'file', 'sql']
+    model.recovery.publish_reserved.assert_called_once_with(
+        42, 'taste-settings', 'artist', MODEL, expected=('digest', 12))
+    reference = ('model', 'digest', 12)
+    model.repository.publish_model_state.assert_called_once_with(
+        (recording, UNCHANGED), (artist, reference), file_writes=[(42, 'artist', reference)], related_settings=None)
+
+
+def test_invalid_encoder_or_failed_file_never_changes_the_published_models(model):
+    with pytest.raises(ValueError, match='JSON object'):
+        model.publish_model_state(recording=RecordingModelUpdate(encoder='[]'))
+    model.repository.reserve_encoder.assert_not_called()
+    model.recovery.publish_reserved.side_effect = OSError('disk full')
+    with pytest.raises(OSError, match='disk full'):
+        model.publish_model_state(recording=RecordingModelUpdate(encoder=MODEL, fit_fingerprint='fit'))
+    model.repository.publish_model_state.assert_not_called()
+
+
+def test_encoder_reads_use_the_explicit_owner_and_fingerprint_reads_skip_files(model):
+    reference = ('model', 'digest', 12)
+    model.repository.artist_state.return_value = ArtistModelState(fit_fingerprint='fit', reference=reference)
+    assert model.artist_state().fit_fingerprint == 'fit'
+    model.recovery.read.assert_not_called()
+    model.recovery.read.return_value = MODEL
+    assert model.artist_encoder() == MODEL
+    model.recovery.read.assert_called_once_with(reference, kind='taste-settings', owner='artist')

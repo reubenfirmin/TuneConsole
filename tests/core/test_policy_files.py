@@ -7,52 +7,39 @@ import pytest
 
 from tests.repository_mock_support import no_database
 from yt_playlist.core import fao, file_collection, file_map, policy_documents, policy_files, policy_history_files
-from yt_playlist.core.evidence_ledger import canonical
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
 
-def record(identity, value):
-    encoded = canonical({'format': policy_documents.FORMAT, 'configuration': value})
-    return dict(file_id=identity, value=value, digest=hashlib.sha256(encoded).hexdigest(), size=len(encoded))
-
-
-def test_new_policies_use_the_sql_id_and_verify_their_digest_independently(tmp_path):
+def test_new_policy_file_reads_check_the_stored_digest_at_its_offset(tmp_path):
     files = policy_files.PolicyFiles(tmp_path, tmp_path / 'archive')
-    with files.write_reserved([record(513, {'weights': {'rock': 2}})]) as references:
-        filename, digest, size, offset = references[0]
-        assert filename == str(tmp_path / 'by-id' / '01' / '513.json')
-        assert offset == 0
-        assert files.read(dict(configuration_filename=filename, content_digest=digest,
-                               byte_size=size, configuration_offset=offset)) == {'weights': {'rock': 2}}
-        with pytest.raises(ValueError, match='digest'):
-            policy_documents.read(filename, '0' * 64)
+    (filename, digest, size, offset), = files.publish([{'value': {'weights': {'rock': 2}}}])
+    assert files.read(dict(configuration_filename=filename, content_digest=digest,
+                           byte_size=size, configuration_offset=offset)) == {'weights': {'rock': 2}}
+    with pytest.raises(ValueError, match='digest'):
+        policy_documents.read(filename, '0' * 64, size=size, offset=offset)
 
 
-def test_shared_and_variant_values_get_distinct_files_even_when_their_bytes_match(tmp_path):
+def test_shared_and_variant_values_have_separate_references_within_a_pack(tmp_path):
     files = policy_files.PolicyFiles(tmp_path, tmp_path / 'archive')
-    with files.write_reserved([record(1, {}), record(2, {})]) as references:
-        assert references[0][0] != references[1][0] and references[0][1] == references[1][1]
-
-
-def test_changed_configuration_is_rejected_before_a_file_is_created(tmp_path):
-    files = policy_files.PolicyFiles(tmp_path, tmp_path / 'archive')
-    changed = record(1, {}) | {'value': {'changed': True}}
-    with pytest.raises(ValueError, match='changed after reservation'), files.write_reserved([changed]):
-        pytest.fail('Changed configuration admitted')
-    assert not list(tmp_path.iterdir())
+    first, second = files.publish([{'value': {}}, {'value': {}}])
+    assert first[:3] == second[:3]
+    assert first[3] != second[3]
+    assert first == files.publish([{'value': {}}, {'value': {}}])[0]
 
 
 def test_archiving_retains_the_shared_base_and_uses_its_reserved_sql_identity(tmp_path):
     files = policy_files.PolicyFiles(tmp_path / 'current', tmp_path / 'archive')
-    with files.write_reserved([record(1, {'weights': {'rock': 2}}),
-                               record(2, {'_policy_base': 'base', 'ranker': 'variant'})]) as references:
-        def facts(version, reference, base=None):
-            filename, digest, size, offset = reference
-            return dict(version=version, configuration_filename=filename, content_digest=digest,
-                        byte_size=size, configuration_offset=offset, created_at=1, base_version=base)
-        records = files.archive_records([facts('variant', references[1], 'base')],
-                                        {'base': facts('base', references[0])})
+    references = files.publish([{'value': {'weights': {'rock': 2}}},
+                                {'value': {'_policy_base': 'base', 'ranker': 'variant'}}])
+
+    def facts(version, reference, base=None):
+        filename, digest, size, offset = reference
+        return dict(version=version, configuration_filename=filename, content_digest=digest,
+                    byte_size=size, configuration_offset=offset, created_at=1, base_version=base)
+
+    records = files.archive_records([facts('variant', references[1], 'base')],
+                                    {'base': facts('base', references[0])})
     records[0]['file_id'] = 7
     with files.retained(), files.write_archive_reserved(records):
         with file_collection.collector(files.archive_root) as admitted:

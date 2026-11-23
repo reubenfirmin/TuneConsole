@@ -56,7 +56,7 @@ def boundary(monkeypatch):
 def test_both_entry_points_share_detached_cache_and_complete_metadata(boundary, store):
     b = boundary()
     result = ab.probe({'mb_recording_id': MBID}, store)
-    assert result.fields['bpm'] == 128 and result.fields['energy'] == .709
+    assert result.fields['bpm'] == 128 and result.fields['danceability'] == .92
     assert len(b.calls) == 2
     assert ab.enrich(MBID.upper())['bpm'] == 128
     with ab.access(store):
@@ -86,7 +86,7 @@ def test_outage_is_shared_between_endpoints_and_other_recordings(boundary, store
     assert store.enrichment_state.integration_cooldown('acousticbrainz')['retry_at'] == 1030
     assert ab.tripped()
     b.clock[0] = 1030
-    assert ab.probe({'mb_recording_id': MBID}, store).fields['energy'] == .709
+    assert ab.probe({'mb_recording_id': MBID}, store).fields['danceability'] == .92
     assert len(b.calls) == 3 and not ab.tripped()
     assert store.enrichment_state.integration_cooldown('acousticbrainz') is None
 
@@ -121,9 +121,9 @@ def test_partial_outage_reuses_successful_half_until_missing_half_recovers(bound
         first = ab.probe({'mb_recording_id': MBID}, store)
         second = ab.probe({'mb_recording_id': MBID}, store)
     assert first.fields['bpm'] == second.fields['bpm'] == 128
-    assert 'energy' not in first.fields and len(b.calls) == 2 and len(errors) == 2
+    assert 'danceability' not in first.fields and len(b.calls) == 2 and len(errors) == 2
     b.clock[0] = 1120
-    assert ab.probe({'mb_recording_id': MBID}, store).fields['energy'] == .709
+    assert ab.probe({'mb_recording_id': MBID}, store).fields['danceability'] == .92
     assert len(b.calls) == 3 and b.calls[-1][0].full_url.endswith('/high-level')
 
 
@@ -138,7 +138,7 @@ def test_only_missing_endpoint_is_negative_cached(boundary, endpoint):
         first = ab.enrich(MBID)
         assert ab.enrich(MBID) == first
     assert not errors and len(b.calls) == 2 and not ab.tripped()
-    assert first['bpm' if endpoint == 'high-level' else 'energy'] is not None
+    assert first['bpm' if endpoint == 'high-level' else 'danceability'] is not None
     b.clock[0] += access.MISS_TTL
     ab.enrich(MBID)
     assert len(b.calls) == 3 and b.calls[-1][0].full_url.endswith(endpoint)
@@ -274,7 +274,7 @@ def test_malformed_half_is_pending_but_unrelated_half_is_usable(boundary, bad):
     b = boundary(lambda request: bad if request.full_url.endswith('high-level') else LOWLEVEL)
     with net.probe_errors() as errors:
         assert ab.enrich(MBID)['bpm'] == 128
-        assert ab.enrich(MBID)['energy'] is None
+        assert ab.enrich(MBID)['danceability'] is None
     assert len(errors) == 2 and all(not net.provider_outage(error) for error in errors)
     assert len(b.calls) == 2 and len(b.iao._cache) == 1
     b.clock[0] += 30
@@ -291,7 +291,7 @@ def test_malformed_low_level_does_not_block_high_level_or_another_recording(boun
     with net.probe_errors() as errors:
         feat = ab.enrich(MBID)
         assert ab.enrich(OTHER)['bpm'] == 128
-    assert feat['bpm'] is None and feat['energy'] == .709
+    assert feat['bpm'] is None and feat['danceability'] == .92
     assert len(errors) == 1 and not net.provider_outage(errors[0])
     assert len(b.calls) == 4
 
@@ -312,7 +312,7 @@ def test_success_does_not_clear_a_newer_persisted_host_deadline(boundary, store)
 
 def test_stale_successful_halves_remain_useful_and_pending_through_failure(boundary):
     b = boundary()
-    assert ab.enrich(MBID)['energy'] == .709
+    assert ab.enrich(MBID)['danceability'] == .92
     b.clock[0] += access.POSITIVE_TTL
 
     def fail(request):
@@ -320,12 +320,12 @@ def test_stale_successful_halves_remain_useful_and_pending_through_failure(bound
     b.iao.open = fail
     with net.probe_errors() as errors:
         feat = ab.enrich(MBID)
-    assert feat['bpm'] == 128 and feat['energy'] == .709
+    assert feat['bpm'] == 128 and feat['danceability'] == .92
     assert len(errors) == 2
     b.clock[0] += 30
     b.iao.open = lambda request, **kwargs: io.StringIO(json.dumps(descriptors(request)))
     with net.probe_errors() as errors:
-        assert ab.enrich(MBID)['energy'] == .709
+        assert ab.enrich(MBID)['danceability'] == .92
     assert not errors
 
 
@@ -434,11 +434,11 @@ def test_waterfall_retains_partial_findings_and_finishes_healthy_work(boundary, 
     assert not run_waterfall(store, tracks, config, lambda event: None,
                              registry=registry, now_fn=lambda: b.clock[0])
     assert len(healthy_calls) == 2 and len(b.calls) == 2
-    assert store.tracks.get_track_audio(tracks[0]['id']) == (128, None, None)
+    assert store.tracks.get_track_audio(tracks[0]['id']) == (128, None)
     attempt = store.enrichment_state.enrichment_provider_state(tracks[0]['recording_id'])['acousticbrainz']
     assert attempt['status'] == 'retry' and attempt['retry_at'] == 1120
     b.clock[0] = 1120
     assert run_waterfall(store, tracks, config, lambda event: None,
                          registry=registry, now_fn=lambda: b.clock[0])
-    assert store.tracks.get_track_audio(tracks[0]['id']) == (128, .709, .92)
+    assert store.tracks.get_track_audio(tracks[0]['id']) == (128, .92)
     assert len(b.calls) == 3

@@ -234,7 +234,7 @@ def _exact(store,account,key,timestamp,playlist=None):
 
 
 def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     since, until = month_bounds("2026-09")
     for ytm, date, source, generated in (("real", since, "youtube", False),
                                          ("unknown", None, None, False),
@@ -262,7 +262,7 @@ def test_repo_excludes_generated_plays_and_requires_real_playlist_dates(store):
 def test_new_playlist_counts_do_not_multiply_copies_or_attribute_song_matches(store):
     since, until = month_bounds("2026-09")
     for label in ("main", "other"):
-        iid = store.accounts.upsert_account(label, "cred", None, label == "main")
+        iid = store.accounts.upsert_account(label, None, label == "main")
         store.playlists.upsert_playlist(iid, "real", "New mix", 4, "h", since, created_at=since)
     # The same song can be played from another playlist or with no known playlist.
     # Only directly attributed events during the recap month count.
@@ -289,7 +289,7 @@ def test_unused_new_playlists_are_not_highlights_even_when_size_is_unknown(data,
 
 
 def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     key = identity_key("Song", "Artist")
     for video in ("v1", "v2"):
         store.tracks.upsert_track(video, "Song", "Artist", "Release", 100)
@@ -304,7 +304,7 @@ def test_repo_preserves_true_counts_with_video_variants_and_coarse_familiarity(s
 
 def test_worker_bakes_all_three_screens_and_replaces_overlapping_old_beats(store, data):
     from yt_playlist.rec import trend_rollups
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     familiar_months(data)
     add_plays(data, "2026-09", per_day=12, artist="New artist", genre="jazz", album="MPRE")
     for key, card in data["meta"].items():

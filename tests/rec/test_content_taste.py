@@ -14,7 +14,7 @@ def _trk(s, vid, title, artist, genre):
 
 
 def test_catalog_ranks_content_only_owned_track(store):
-    s = store; iid = s.accounts.upsert_account("m", "c", None, True)
+    s = store; iid = s.accounts.upsert_account("m", None, True)
     a = _trk(s, "v1", "A", "X", "Techno"); b = _trk(s, "v2", "B", "Y", "Techno"); c = _trk(s, "v3", "C", "Z", "Techno")
     pl = s.playlists.upsert_playlist(iid, "P", "Techno", 3, "h", 0.0); s.playlists.set_playlist_tracks(pl, [a, b, c])
     _trk(s, "v4", "D", "W", "Techno")              # owned, genre, NOT in any playlist, NO co-occurrence vector

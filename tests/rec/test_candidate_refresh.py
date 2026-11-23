@@ -22,7 +22,8 @@ from tests.store_fixture_support import (
     without_query_timing,
 )
 from yt_playlist.core.store import Store
-from yt_playlist.core import embeddings, model_contract
+from yt_playlist.core import embeddings
+from yt_playlist.library import mix_listening
 from yt_playlist.library import surface_composition
 from yt_playlist.rec import mode_inputs
 from yt_playlist.rec import candidate_refresh, embedding_training as embed, home_prepared, model_refresh, mode_surfaces, rec_params, surfaces
@@ -104,6 +105,18 @@ def test_artist_policy_change_refreshes_existing_rankings_without_a_catalog_writ
     assert candidate_refresh.due(store, 100)
 
 
+@pytest.mark.parametrize('setting,previous', [('STARTUP_WEIGHT_POLICY', 'previous'), ('RADIO_INTENSITY_VERSION', 2)])
+def test_policy_change_refreshes_an_old_ranking_without_changing_held_menu(preference_store, monkeypatch, setting, previous):
+    store = preference_store
+    with monkeypatch.context() as previous_policy:
+        previous_policy.setattr(candidate_refresh, setting, previous)
+        held_menu = candidate_refresh.preferences(store, 100, include_exposure=False)
+        store.settings.set_setting('rec_candidate_preferences', candidate_refresh.preferences(store, 100))
+        assert not candidate_refresh.due(store, 100)
+    assert candidate_refresh.due(store, 100)
+    assert candidate_refresh.preferences(store, 100, include_exposure=False) == held_menu
+
+
 def candidate(store, key):
     return next((row for row in pool(store, 'wheelhouse') if row['key'] == key), None)
 
@@ -137,18 +150,25 @@ def _assert_library_matches(store, original):
     assert store.history.recent_plays_with_ts(limit=128) == original.history.recent_plays_with_ts(limit=128)
     for name in embeddings.SPACES:
         assert embeddings.rows(store.conn, name) == embeddings.rows(original.conn, name)
-    for name in {*model_contract.FIELDS, 'rec_dim', 'rec_refresh_version', 'rec_mode_fit_inputs'} - {
-            'rec_content_generation'}:
+    for name in ('rec_dim', 'rec_mode_fit_inputs'):
         assert store.settings.get_setting(name) == original.settings.get_setting(name)
-    assert list(map(tuple, store.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id'))) == list(
-        map(tuple, original.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id')))
+    assert store.rec_refresh.version() == original.rec_refresh.version()
+    for state in ('recording_state', 'artist_state'):
+        actual = getattr(store.rec_model, state)()
+        expected = getattr(original.rec_model, state)()
+        assert actual.fit_fingerprint == expected.fit_fingerprint
+    assert store.rec_model.recording_state().input_fingerprint == original.rec_model.recording_state().input_fingerprint
+    assert store.rec_model.recording_state().genre_revision == original.rec_model.recording_state().genre_revision
+    assert store.rec_model.recording_encoder() == original.rec_model.recording_encoder()
+    assert store.rec_model.artist_encoder() == original.rec_model.artist_encoder()
+    assert list(map(tuple, store.conn.execute('SELECT * FROM legacy_mode_payloads ORDER BY mode_id'))) == list(
+        map(tuple, original.conn.execute('SELECT * FROM legacy_mode_payloads ORDER BY mode_id')))
     ranks = ('SELECT h.surface,m.mode_key,m.purpose,c.recording_id,c.rank,c.score,p.policy_version,'
-             'b.intensity_band,b.genre_key FROM recommendation_heads h '
+             'c.intensity_band,c.genre_key FROM recommendation_generation_surfaces h '
              'JOIN recommendation_surface_pools m ON m.generation_id=h.generation_id AND m.surface=h.surface '
              'JOIN recommendation_pools p ON p.id=m.pool_id '
              'JOIN recommendation_candidates c ON c.pool_id=p.id '
-             'LEFT JOIN recommendation_radio_bands b ON b.pool_id=p.id AND b.recording_id=c.recording_id '
-             'ORDER BY h.surface,m.mode_key,m.purpose,c.rank')
+             'WHERE h.selected=1 ORDER BY h.surface,m.mode_key,m.purpose,c.rank')
     assert list(map(tuple, store.conn.execute(ranks))) == list(map(tuple, original.conn.execute(ranks)))
     assert not store.rec_refresh.has_pending_changes()
     assert not candidate_refresh.due(store, 2000)
@@ -172,6 +192,8 @@ def test_prepared_candidate_copies_match_an_independent_producer_and_keep_privat
             _assert_library_matches(template.source, producer)
     with template.open(':memory:') as memory, template.open(tmp_path / 'copy.db') as disk:
         for current in (memory, disk):
+            # A reopened worker prepares its in-memory listening reading from the copied facts.
+            mix_listening.prepare(current, 2000)
             # Compare private, quiescent stores under their actual locks.
             # Reporting-reader admission is independent of copy equality.
             with current._lock, template.source._lock:
@@ -390,7 +412,7 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
     assert pool(store, 'wheelhouse') == original_pool
     assert not candidate_refresh.due(store, 2000)
     store.rec_model.set_weight(axis, .5, now=2000)
-    store.rec_model.save_taste_settings('taste_settings_checkpoint_v1', [], 2000)
+    store.rec_model.save_taste_settings([], 2000)
     rerank()
     saved = pool(store, 'wheelhouse')
     saved_score = candidate(store, key)['score']
@@ -398,7 +420,7 @@ def test_genre_edits_reset_and_restore_update_scores_and_served_provenance(
     store.rec_model.set_weight(axis, 1.5, now=2000)
     rerank()
     assert candidate(store, key)['score'] != saved_score
-    assert store.rec_model.restore_taste_settings('taste_settings_checkpoint_v1', [])
+    assert store.rec_model.restore_taste_settings([])
     rerank()
     assert candidate(store, key)['score'] == saved_score
     assert pool(store, 'wheelhouse') == saved
@@ -447,7 +469,7 @@ def test_completed_ranking_retains_captured_preferences_and_leaves_later_edits_d
 def small_taste_ranking(preference_store, monkeypatch, taste_parameter_inputs):
     """Real ranking controls/publications, with completed lower candidate inputs."""
     store = preference_store
-    iid = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    iid = store.accounts.upsert_account('Listener', None, True)
     seed_publication_subjects(store, [
         {'key': f'song {i}|artist {i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
          'video_id': f'control-{i}', 'genre': 'Techno'} for i in range(4)])

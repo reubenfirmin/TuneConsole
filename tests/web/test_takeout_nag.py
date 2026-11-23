@@ -14,7 +14,7 @@ def _finished_onboarding(store):
     store.settings.set_setting("last_sync_at", "999")
     store.settings.set_setting("onboard_dismissed", "1")
     seed_catalog_track(store, 'song|artist', 'Song', 'Artist', video_id='existing-song')
-    account = store.accounts.upsert_account('main', 'credential', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.history.record_play_event(account, 'song|artist', 'existing-song', FIRST_PLAY)
     returning_listener(store, 'mixes')
     return account
@@ -52,19 +52,25 @@ def test_empty_upload_keeps_reminder_but_imported_play_suppresses_it(store):
 def test_dismiss_route_stamps(store):
     _finished_onboarding(store)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: REMINDER_AT), base_url="http://127.0.0.1")
-    html = c.get('/').text
+    notices = {'panel': 'notices', 'fragment': 'true'}
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    html = response.text
     assert 'id="takeout-nag"' in html
-    assert 'Needs attention' in html
-    assert '/setup?tab=import#setup-takeout' in html
-    assert 'Download your YouTube Music listening history from Google Takeout.' in html
-    assert 'In Setup, choose Import and upload the file.' in html
-    assert 'Rediscover old favorites sooner' in html
+    assert 'aria-label="Needs attention"' in html
+    assert 'href="/setup?tab=import#setup-takeout"' in html
+    assert 'hx-post="/onboard/takeout/dismiss"' in html
     assert c.post("/onboard/takeout/dismiss").status_code == 200
-    assert store.settings.get_setting("takeout_nag_dismissed_at") is not None   # snooze timestamp recorded
-    after = c.get('/').text
-    assert 'id="takeout-nag"' not in after
-    assert '/setup?tab=import' in after
-    assert 'Rediscover old favorites sooner' in after
+    assert float(store.settings.get_setting('takeout_nag_dismissed_at')) == REMINDER_AT
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    assert 'id="takeout-nag"' not in response.text
+
+    growth = c.get('/home/growth')
+    assert growth.status_code == 200
+    takeout_node = next(node for node in growth.json()['nodes'] if node['id'] == 'takeout')
+    assert takeout_node['href'] == '/setup?tab=import#setup-takeout'
+    assert 'Download your YouTube Music listening history from Google Takeout.' in takeout_node['how_to']
 
 
 def test_banner_waits_on_fresh_install_and_during_onboarding(store):
@@ -72,9 +78,14 @@ def test_banner_waits_on_fresh_install_and_during_onboarding(store):
     c = TestClient(create_app(store, lambda: FakeClient()), base_url="http://127.0.0.1")
     html = c.get('/').text
     assert 'id="arrival-title"' in html and 'Welcome to TuneConsole' in html
-    assert 'takeout-nag' not in html and 'lastfm-nudge' not in html
+    notices = {'panel': 'notices', 'fragment': 'true'}
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    assert 'id="takeout-nag"' not in response.text and 'id="lastfm-nudge"' not in response.text
     store.settings.set_setting("last_sync_at", "999")
-    assert "takeout-nag" not in c.get("/").text
+    response = c.get('/', params=notices)
+    assert response.status_code == 200
+    assert 'id="takeout-nag"' not in response.text and 'id="lastfm-nudge"' not in response.text
 
 
 def test_unparseable_dismissal_timestamp_means_due(store):

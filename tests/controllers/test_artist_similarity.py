@@ -34,6 +34,7 @@ def test_identity_admission_finishes_before_similarity_write():
     repository = create_autospec(ArtistSimilarityRepo, instance=True, spec_set=True)
     artists = create_autospec(Artists, instance=True, spec_set=True)
     artists.state_id.side_effect = [10, 20, 30]
+    artists.name_matches.return_value = {'First': set(), 'Second': set()}
     service = ArtistSimilarity(repository, artists)
     service.cache_similar('Source', iter([['First', .8], ['Second', .4]]), 100)
     assert [call.args for call in artists.state_id.call_args_list] == [('Source',), ('First',), ('Second',)]
@@ -52,7 +53,11 @@ def test_unknown_explicit_artist_cannot_replace_cached_evidence():
 def test_edge_tokens_are_built_outside_the_repository():
     repository = create_autospec(ArtistSimilarityRepo, instance=True, spec_set=True)
     repository.artist_similar_edges.return_value = [(20, .8), (30, .4)]
+    repository.cached_similar.return_value = [['First', .8], ['Second', .4]]
     artists = create_autospec(Artists, instance=True, spec_set=True)
     artists.resolve.return_value = 10
+    artists.get_artist.return_value = {'id': 10, 'name': 'Source'}
+    artists.resolve_many.return_value = {}
+    artists.name_matches.return_value = {'Source': {10}, 'First': {20}, 'Second': {30}}
     assert ArtistSimilarity(repository, artists).artist_similar_edges('Source') == [('@artist:20', .8), ('@artist:30', .4)]
     repository.artist_similar_edges.assert_called_once_with(10)

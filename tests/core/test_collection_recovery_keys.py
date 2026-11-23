@@ -11,7 +11,7 @@ from tests.store_fixture_support import (
     _file_consumer_store, bounded_consumer_schema,
     native_sql_calls, without_query_timing,
 )
-from yt_playlist.core import action_backup_files, collection_recovery as recovery
+from yt_playlist.core import action_backup_files, action_backup_inventory, collection_recovery as recovery
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.repos import collection_retention
 from yt_playlist.controllers.collection_retention import CollectionCollector
@@ -40,7 +40,7 @@ def test_retained_backup_survives_seek_key_move(
     store = file_backed_store
     try:
         earlier = store.actions.record_action('copy_playlist', '{}', '{}', 'executed', '{}', 1)
-        account = store.accounts.upsert_account('Owner', 'owner.json', None, True)
+        account = store.accounts.upsert_account('Owner', None, True)
         deletions = []
         for index in range(3):
             remote = f'BACKUP-{index}'
@@ -49,10 +49,8 @@ def test_retained_backup_survives_seek_key_move(
                               'backup': backup(tmp_path, account, remote)})
         action = store.actions.record_action('delete_playlist', '{}', '{}', 'delete_pending',
                                              json.dumps({'deletions': deletions}), 2)
-        with store.conn:
-            store.conn.execute('UPDATE action_backups SET position=position+10 WHERE action_id=?', (action,))
-        owner = store.conn.execute('SELECT retained_filename,digest,bytes FROM action_backups '
-                                   'WHERE action_id=? AND position=12', (action,)).fetchone()
+        backups = store.actions.repository.backups(action)
+        owner = backups[-1]
         target = Path(owner['retained_filename'])
         exact = action_backup_files.verified(target, owner['digest'], owner['bytes'])[0]
         collector = CollectionCollector(recovery.directory(store.conn))
@@ -62,8 +60,8 @@ def test_retained_backup_survives_seek_key_move(
         check = collection_retention.check_cancellable_work
 
         def pause_after_first_backup():
-            if (collector.owners._table_index < len(collector.owners._tables)
-                    and collector.owners._tables[collector.owners._table_index][0] == 'action_backups'
+            if (collector.owners._table_index < len(collection_retention.FILE_OWNERS)
+                    and collection_retention.FILE_OWNERS[collector.owners._table_index][1] == action_backup_inventory.COLUMN
                     and collector.owners._after is not None):
                 raise WorkBudgetExceeded('Pause after the first retained backup')
             check()
@@ -72,7 +70,7 @@ def test_retained_backup_survives_seek_key_move(
             pause.setattr(collection_retention, 'check_cancellable_work', pause_after_first_backup)
             for _ in range(50):
                 store.retention.collections.maintain()
-                if collector.owners._after == (action, 10):
+                if collector.owners._after == (earlier,):
                     break
             else:
                 pytest.fail('Did not pause the partial backup ownership scan')
@@ -80,12 +78,17 @@ def test_retained_backup_survives_seek_key_move(
             writer.execute('PRAGMA foreign_keys=ON')
             with writer:
                 if move == 'position':
-                    writer.execute('UPDATE action_backups SET position=0 WHERE action_id=? AND position=12', (action,))
+                    owner['position'] = 10
+                    writer.execute('UPDATE actions SET backup_inventory=? WHERE id=?',
+                                   (action_backup_inventory.encode(backups), action))
                 elif move == 'action_id':
-                    writer.execute('UPDATE action_backups SET action_id=? WHERE action_id=? AND position=12',
-                                   (earlier, action))
+                    writer.execute('UPDATE actions SET backup_inventory=? WHERE id=?',
+                                   (action_backup_inventory.encode(backups[:-1]), action))
+                    writer.execute('UPDATE actions SET backup_inventory=? WHERE id=?',
+                                   (action_backup_inventory.encode([owner]), earlier))
         assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
-        assert store.conn.execute('SELECT 1 FROM action_backups WHERE retained_filename=?', (str(target),)).fetchone()
+        assert any(item['retained_filename'] == str(target) for item in
+                   store.actions.repository.backups(earlier if move == 'action_id' else action))
         for _ in range(100):
             store.retention.collections.maintain()
             if not store.retention.collections.pending():

@@ -1,8 +1,6 @@
 // Audio stays in the YTM tab. Only bounded predictions and frozen embeddings leave.
 function createAudioCapture({appOrigin, pickTab}) {
   let active = null;
-  const previews = new Set();
-  let collectionChanged = () => {};
   let collectionAvailable;
   function hasCollectionModel() {
     // An incomplete installation cannot start capture. Production builds include
@@ -31,20 +29,18 @@ function createAudioCapture({appOrigin, pickTab}) {
       throw Error('Invalid tab-local analysis result.');
     const result = Object.fromEntries(keys.filter(key => key in value).map(key => [key, value[key]]));
     const embedding = result.prediction.embedding;
-    if (embedding != null) {
-      if (typeof embedding !== 'object' || Array.isArray(embedding)
-          || Object.keys(embedding).sort().join(',') !== 'graph_policy,layer,patches,pooling,values,version'
-          || embedding.version !== 'musicnn-embedding-1' || embedding.layer !== 'model/dense/BiasAdd'
-          || embedding.graph_policy !== 'restore-fused-preactivation-1' || embedding.pooling !== 'mean_full_patches'
-          || !Number.isInteger(embedding.patches) || embedding.patches < 1 || embedding.patches > 8
-          || !Array.isArray(embedding.values) || embedding.values.length !== 200
-          || embedding.values.some(n => typeof n !== 'number' || !Number.isFinite(n) || Math.abs(n) > 1e6)
-          || result.prediction.model !== 'msd-musicnn-1'
-          || typeof result.prediction.model_version !== 'string' || !result.prediction.model_version
-          || !['musicnn/model.json', 'musicnn/group1-shard1of1.bin'].every(path =>
-            result.prediction.bundle?.files?.some(file => file.path === path && /^[a-f0-9]{64}$/.test(file.sha256))))
-        throw Error('Invalid frozen music embedding.');
-    }
+    if (!embedding || typeof embedding !== 'object' || Array.isArray(embedding)
+        || Object.keys(embedding).sort().join(',') !== 'graph_policy,layer,patches,pooling,values,version'
+        || embedding.version !== 'musicnn-embedding-1' || embedding.layer !== 'model/dense/BiasAdd'
+        || embedding.graph_policy !== 'restore-fused-preactivation-1' || embedding.pooling !== 'mean_full_patches'
+        || !Number.isInteger(embedding.patches) || embedding.patches < 1 || embedding.patches > 8
+        || !Array.isArray(embedding.values) || embedding.values.length !== 200
+        || embedding.values.some(n => typeof n !== 'number' || !Number.isFinite(n) || Math.abs(n) > 1e6)
+        || result.prediction.model !== 'msd-musicnn-1'
+        || typeof result.prediction.model_version !== 'string' || !result.prediction.model_version
+        || !['musicnn/model.json', 'musicnn/group1-shard1of1.bin'].every(path =>
+          result.prediction.bundle?.files?.some(file => file.path === path && /^[a-f0-9]{64}$/.test(file.sha256))))
+      throw Error('Invalid frozen music embedding.');
     const forbidden = new Set(['pcm', 'samples', 'embeddings', 'mel', 'spectrogram', 'audio', 'buffer']);
     function inspect(item, depth = 0, path = '') {
       if (depth > 12 || (typeof item === 'string' && item.length > 1024)
@@ -70,19 +66,9 @@ function createAudioCapture({appOrigin, pickTab}) {
         [app.hostname, 'localhost'].includes(url.hostname);
     } catch (e) { return false; }
   }
-  function connect(port, internal = false) {
-    if (!internal && (port.name !== 'tc-audio-preview' || !allowed(port.sender))) {
-      port.disconnect(); return;
-    }
-    if (!internal) {
-      previews.add(port);
-      // A future collection reservation must never prevent opening preview.
-      // Completed excerpts may finish inference before the preview starts.
-      if (active?.collection && !active.analysing) active.interrupt();
-      collectionChanged();
-    }
+  function connectCollection(port) {
     let capture = null, closed = false, timer = null, job = null;
-    let ready = port.name === 'tc-audio-preview';
+    let ready = false;
     const send = message => {
       if (closed) return false;
       try { port.postMessage(message); return true; }
@@ -92,27 +78,27 @@ function createAudioCapture({appOrigin, pickTab}) {
       clearTimeout(timer);
       const source = capture;
       capture = null;
-      source?.disconnect();
       if (active === job) active = null;
       job = null;
+      try { source?.disconnect(); } catch (error) { /* The tab may have already disconnected. */ }
+    }
+    function finish(message) {
+      // Delivery can synchronously start the next eligible capture.
+      cancel();
+      send(message);
     }
     function close() {
       closed = true; cancel();
-      if (previews.delete(port)) collectionChanged();
     }
     port.onDisconnect.addListener(close);
     port.onMessage.addListener(async message => {
       if (message?.type === 'stop') { cancel(); return; }
       if (!ready || message?.type !== 'capture' || typeof message.id !== 'string' || message.id.length > 80) return;
       if (active) {
-        if (!internal && active.collection && active.analysing)
-          send({id: message.id, type: 'waiting', collection_finishing: true});
-        else send({id: message.id, error: 'Another audio capture is already running. Stop it first.'});
+        send({id: message.id, error: 'Another audio capture is already running. Stop it first.'});
         return;
       }
-      if (internal && previews.size) { send({id: message.id, error: 'Audio preview is open.'}); return; }
-      const request = job = {port, collection: internal, analysing: false,
-        interrupt() { send({id: message.id, error: 'Audio preview is open.'}); cancel(); }};
+      const request = job = {};
       active = request;
       const id = message.id;
       const waitingMs = Number.isFinite(message.not_before) && message.not_before >= 0 && message.not_before <= 86400
@@ -130,65 +116,60 @@ function createAudioCapture({appOrigin, pickTab}) {
           if (data.type === 'result') {
             let owner;
             try { owner = await pickTab(); }
-            catch (error) { if (capture === source) { send({id, error: 'The music player is unavailable.'}); cancel(); } return; }
+            catch (error) { if (capture === source) finish({id, error: 'The music player is unavailable.'}); return; }
             if (capture !== source || closed) return;
-            if (owner?.id !== tab.id) { send({id, error: 'The playing music tab changed.'}); cancel(); return; }
-            try { send({id, type: 'result', result: metadata(data.result)}); }
-            catch (error) { send({id, error: error.message}); }
-            cancel();
+            if (owner?.id !== tab.id) { finish({id, error: 'The playing music tab changed.'}); return; }
+            let result;
+            try { result = metadata(data.result); }
+            catch (error) { finish({id, error: error.message}); return; }
+            finish({id, type: 'result', result});
           } else if (data.type === 'waiting') {
             send({id, type: 'waiting'});
           } else if (data.type === 'analysing') {
-            request.analysing = true;
             send({id, type: 'analysing'});
             clearTimeout(timer);
-            timer = setTimeout(() => { send({id, error: 'Audio analysis timed out.'}); cancel(); }, 32000);
+            timer = setTimeout(() => finish({id, error: 'Audio analysis timed out.'}), 32000);
           } else if (data.error) {
             // Keep source-media failures distinct from worker tab discovery.
             // State flags identify a wrong/loading tab without exporting URLs.
             const state = `tab=${tab.id},audible=${+!!tab.audible},muted=${+!!tab.mutedInfo?.muted},` +
               `loading=${+(tab.status === 'loading')},pending=${+!!tab.pendingUrl}`;
-            send({id, error: `${String(data.error).slice(0, 380)} [${state}]`.slice(0, 500)});
-            cancel();
+            finish({id, error: `${String(data.error).slice(0, 380)} [${state}]`.slice(0, 500)});
           }
           else if (data.type === 'progress') {
             if (data.seconds === 0) {
               clearTimeout(timer);
-              timer = setTimeout(() => { send({id, error: 'Audio capture timed out.'}); cancel(); }, 16000);
+              timer = setTimeout(() => finish({id, error: 'Audio capture timed out.'}), 16000);
             }
             send({id, type: 'progress', seconds: data.seconds});
           }
-          else { send({id, error: 'Only analysis metadata may leave the music tab.'}); cancel(); }
+          else { finish({id, error: 'Only analysis metadata may leave the music tab.'}); }
         });
         source.onDisconnect.addListener(() => {
           if (capture === source) {
-            send({id, error: 'Audio capture disconnected. Reload the TuneConsole extension and try again.'});
-            cancel();
+            finish({id, error: 'Audio capture disconnected. Reload the TuneConsole extension and try again.'});
           }
         });
-        timer = setTimeout(() => { send({id, error: 'Audio capture timed out.'}); cancel(); }, 16000 + waitingMs);
+        timer = setTimeout(() => finish({id, error: 'Audio capture timed out.'}), 16000 + waitingMs);
         source.postMessage({type: 'capture', id, video_id: message.video_id,
           ...(waitingMs ? {not_before: message.not_before} : {})});
       } catch (error) {
-        if (!closed && job === request) { send({id, error: String(error.message || error)}); cancel(); }
+        if (!closed && job === request) finish({id, error: String(error.message || error)});
       }
     });
-    if (ready) send({type: 'ready'});
-    else hasCollectionModel().then(available => {
+    hasCollectionModel().then(available => {
       ready = available;
       send({type: available ? 'ready' : 'unavailable'});
     });
   }
-  return {connect, allowed, hasCollectionModel,
-    get previewOpen() { return previews.size > 0; },
-    onCollectionChanged(callback) { collectionChanged = callback; },
+  return {allowed, hasCollectionModel,
     openCollection(receive) {
       const messages = [], disconnects = [];
-      const port = {name: 'tc-audio-owned-collection',
+      const port = {
         onMessage: {addListener: fn => messages.push(fn)},
         onDisconnect: {addListener: fn => disconnects.push(fn)},
         postMessage: receive, disconnect() { disconnects.forEach(fn => fn()); }};
-      connect(port, true);
+      connectCollection(port);
       return {postMessage: value => { for (const fn of messages) fn(value); },
         disconnect: () => port.disconnect()};
     }};

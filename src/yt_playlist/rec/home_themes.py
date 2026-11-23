@@ -53,10 +53,8 @@ def genre_options(store, *, genre_plays=None, bundles=None):
     if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
         with store.read_view() as reader:
             return genre_options(reader, genre_plays=genre_plays, bundles=bundles)
-    if bundles is None and getattr(store, '_recommendation_files', False):
-        return _stored_genre_options(store, genre_plays)
     if bundles is None:
-        bundles = store.rec_proposals.get_proposals("mode_bundles") or {}
+        return _stored_genre_options(store, genre_plays)
     tracks = {}
     for mid, bucket in bundles.items():
         if mid.startswith("_"):
@@ -104,26 +102,22 @@ def genre_option_values(families, plays, axes):
 
 
 def _stored_genre_options(store, genre_plays):
-    """Count complete membership with bounded metadata reads and no bundle decode."""
-    from yt_playlist.core.activity import check_cancellable_work
-    if not getattr(store, '_read_only', False) and not store._lock.held_by_current_thread:
-        with store.read_view() as reader:
-            return _stored_genre_options(reader, genre_plays)
-    head = store.recommendations.head('home')
+    """Count each playable recording once across the published Home pools."""
     families = defaultdict(Counter)
     counts = Counter()
-    if head is not None:
-        after = 0
-        while True:
-            check_cancellable_work()
-            page = store.recommendations.recording_metadata_page('home', generation=head['id'], after=after)
-            for item in resolved_genres(store, page['tracks']):
-                genre = (item.get('genre') or '').strip().lower()
-                if genre:
-                    counts[genre] += 1
-            after = page['after']
-            if page['exhausted']:
-                break
+    untagged = Counter()
+    for item in store.recommendations.home_genre_candidates():
+        stored_genre = item['genre']
+        genre = (stored_genre or '').strip().lower()
+        if genre:
+            counts[genre] += 1
+        elif not stored_genre:
+            untagged[item['artist'] or ''] += 1
+    if untagged:
+        for artist, item in store.rec_query.artist_genre_years_for(untagged).items():
+            genre = (item.get('genre') or '').strip().lower()
+            if genre:
+                counts[genre] += untagged[artist]
     if not counts:
         # The original fresh-user fallback remains useful before preparation.
         for item in store.rec_query.artist_genre_years().values():

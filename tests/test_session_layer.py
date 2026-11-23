@@ -16,12 +16,17 @@ def no_database(monkeypatch):
 
 
 def inputs(plays=(), *, min_events=2, radio=()):
-    store = Mock(spec_set=['settings', 'history', 'rec_eligibility', 'playlists',
-                           'transient_radio_playlists'])
+    store = Mock(spec_set=['settings', 'history', 'rec_eligibility', 'playlists', 'player_events',
+                           'transient_radio_playlists', 'memoized_read'])
+    store.memoized_read.side_effect = lambda name, read: read()
     store.settings = Mock(spec_set=['get_setting'])
     store.settings.get_setting.side_effect = {
         'rec_param:now_min_events': str(min_events), 'rec_param:session_halflife_h': '4'}.get
-    store.history = Mock(spec_set=['play_events_since'])
+    store.history = Mock(spec_set=['play_events_since', 'listening_calendars', 'live_play_activity'])
+    store.history.listening_calendars.return_value = {None: 'UTC'}
+    store.history.live_play_activity.return_value = []
+    store.player_events = Mock(spec_set=['playback_activity'])
+    store.player_events.playback_activity.return_value = []
     store.history.play_events_since.return_value = [
         {'identity_key': key, 'played_at': at} for key, at in plays]
     store.rec_eligibility = Mock(spec_set=['generated_only_keys'])
@@ -47,7 +52,7 @@ def test_hour_old_play_dominates_12h_old_at_hl4h():
     V[1] = v2_raw
     idx = {"track1|artist1": 0, "track2|artist2": 1}
 
-    now = 1000000.0
+    now = 150000.0
     # Record two plays at different ages
     store = inputs([
         ("track1|artist1", now - 3600.0),    # 1 hour old
@@ -123,7 +128,7 @@ def test_session_tilt_passes_radio_exclusion_to_play_events_since():
     layers.session_tilt(store, 1000.0, np.zeros((1, 1)), {})
 
     store.history.play_events_since.assert_called_once_with(
-        1000.0 - 24 * 3600, exclude_list_ids=['PLRADIO', 'PLRADIO_A'], taste_only=True)
+        0., exclude_list_ids=['PLRADIO', 'PLRADIO_A'], taste_only=True)
 
 
 def test_zero_norm_contribution_returns_none():

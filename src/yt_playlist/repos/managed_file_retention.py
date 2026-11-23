@@ -1,73 +1,61 @@
 """SQL ownership checks for bounded managed-file collection; no file access."""
 from contextlib import contextmanager
 
-from yt_playlist.core import album_description_files, legacy_evidence, metadata_locator_contract
+from yt_playlist.core import legacy_journals, paid_description_access, policy_bodies, runtime_metadata_choices
 from yt_playlist.core.db_writes import atomic_write, reserved_write
 from .base import Repo, synchronized
 from . import metadata_file_writes
-from .playback_inbox import owns_file as inbox_owns_file
 
 RELATIONS = {
-    'policies': (('recommendation_policy_bodies', 'configuration_filename'),
+    'policies': ((policy_bodies.VIEW, 'configuration_filename'),
                  ('recommendation_policies', 'configuration_filename')),
-    'annotations': (('audio_annotations', 'model_output_filename'),),
-    'descriptions': tuple((table, fields[1]) for table, fields in album_description_files.OWNERS.items()),
-    'archives': tuple((table, 'filename') for table in legacy_evidence.DOMAINS.values()),
+    'descriptions': (('album_description_requests', 'evidence_filename'),),
+    'archives': (('archive_evidence_files', 'filename'),),
 }
 
 
 class ManagedFileRetentionRepo(Repo):
-    def __init__(self, database, inbox_path):
-        super().__init__(database)
-        self.inbox_path = inbox_path
-
     @contextmanager
     def reservation(self, domain):
         # Installed writers still require SQL admission in addition to the file
         # fence. This reservation touches no other repository or domain mutation.
-        if domain == 'playback-inbox':
-            # Its independent SQL queue and native writers use this root's
-            # reader fence. Never reserve the library writer across inbox SQL.
+        with reserved_write(self._store):
             yield
-        else:
-            with reserved_write(self._store):
-                yield
+
+    @synchronized
+    def workflow_publication(self):
+        return legacy_journals.workflow_publication(self.conn)
 
     @synchronized
     def required(self, domain, path, owner=None):
-        if domain == 'playback-inbox':
-            return inbox_owns_file(self.inbox_path, path)
         if domain == 'metadata-runtime':
             return self._metadata_required(owner)
         if domain == 'metadata-deliveries':
-            return (not metadata_locator_contract.retired(self.conn) and self.conn.execute(
-                'SELECT 1 FROM metadata_deliveries WHERE raw_filename=? LIMIT 1', (str(path),)).fetchone() is not None)
-        if domain == 'samples':
-            columns = {row[1] for row in self.conn.execute('PRAGMA main.table_info(sample_attributes)')}
-            ready = " AND file_status='ready'" if 'file_status' in columns else ''
-            return self.conn.execute('SELECT 1 FROM sample_attributes WHERE filename=?' + ready + ' LIMIT 1',
+            return self.conn.execute('SELECT 1 FROM metadata_delivery_locations WHERE raw_filename=? LIMIT 1',
                                      (str(path),)).fetchone() is not None
+        if domain == 'samples':
+            return self.conn.execute("SELECT 1 FROM sample_attributes WHERE filename=? AND file_status='ready' LIMIT 1",
+                                     (str(path),)).fetchone() is not None
+        if domain == 'descriptions' and paid_description_access.retains(self.conn, path):
+            return True
         return any(self.conn.execute(f'SELECT 1 FROM {table} WHERE {column}=? LIMIT 1',
                     (str(path),)).fetchone() is not None
-                   for table, column in RELATIONS[domain]
-                   if self.conn.execute('SELECT 1 FROM sqlite_schema WHERE name=?', (table,)).fetchone())
+                   for table, column in RELATIONS[domain])
 
     def _metadata_required(self, owner):
         if owner is None:
             return True
         if owner[0] == 'receipt':
-            return metadata_file_writes.available(self.conn) and self.conn.execute(
-                'SELECT 1 FROM metadata_file_references WHERE file_id=? LIMIT 1', (owner[1],)).fetchone() is not None
+            return metadata_file_writes.retains(self.conn, owner[1])
         kind, keys, revision = owner
-        if not self.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='metadata_runtime_state'").fetchone():
-            return True
         if kind == 'alternatives':
-            row = self.conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN metadata_runtime_providers p '
-                'ON p.name=s.provider WHERE s.recording_id=? AND p.id=?', keys).fetchone()
+            row = self.conn.execute('SELECT s.at FROM enrichment_provider_state s JOIN enrichment_provider_config p '
+                "ON p.provider=s.provider WHERE s.recording_id=? AND p.metadata_provider_id=? AND s.status<>'queued'", keys).fetchone()
+        elif kind == 'conflicts':
+            row = self.conn.execute('SELECT runtime_revision FROM metadata_conflicts WHERE runtime_id=?', keys).fetchone()
         else:
             table, key = {'native': ('rec_musical_sources', 'source_key'),
-                          'choices': ('metadata_runtime_choices', 'id'),
-                          'conflicts': ('metadata_runtime_conflicts', 'id')}[kind]
+                          'choices': (runtime_metadata_choices.VIEW, 'id')}[kind]
             row = self.conn.execute(f'SELECT revision FROM {table} WHERE {key}=?', keys).fetchone()
         return row is not None and (1 <= revision <= row[0] if kind == 'choices' else row[0] == revision)
 

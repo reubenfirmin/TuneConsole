@@ -9,7 +9,7 @@ import logging
 import uuid
 from copy import deepcopy
 
-from yt_playlist.rec import choice_bandit, embedding_vectors as vectors, home_vibe, musical_character, rec_params, scoring, transient
+from yt_playlist.rec import embedding_vectors as vectors, home_vibe, musical_character, rec_params, scoring, transient
 from yt_playlist.core.activity import WorkClosing
 from yt_playlist.core import policy_config
 from yt_playlist.repos.base import synchronized
@@ -34,16 +34,21 @@ class PoolPolicies:
         self.store = store
         self.now = now
         self._configuration = None
+        self.mix_listening = None
         self.rows = {}
         self.bases = {}
 
-    def generation_policy(self):
-        """Name the actual captured inputs even when preparation produced no songs."""
+    def _base(self):
         if self._configuration is None:
-            _, self._configuration = serving_policy(self.store, self.now)
+            options = {} if self.mix_listening is None else {'mix_tape_listening': self.mix_listening}
+            _, self._configuration = serving_policy(self.store, self.now, **options)
             base = policy_config.base_record(self._configuration, self.now)
             self.bases[base[0]] = base
-        row = policy_config.variant_record(next(iter(self.bases)), {'ranker': 'prepared-bundle'}, self.now)
+        return next(iter(self.bases))
+
+    def generation_policy(self):
+        """Name the actual captured inputs even when preparation produced no songs."""
+        row = policy_config.variant_record(self._base(), {'ranker': 'prepared-bundle'}, self.now)
         self.rows[row[0]] = row
         return row[0]
 
@@ -51,12 +56,7 @@ class PoolPolicies:
         if not items:
             return items
         try:
-            if self._configuration is None:
-                _, self._configuration = serving_policy(self.store, self.now)
-                base = policy_config.base_record(self._configuration, self.now)
-                self.bases[base[0]] = base
-            base_version = next(iter(self.bases))
-            row = policy_config.variant_record(base_version, {'ranker': ranker}, self.now)
+            row = policy_config.variant_record(self._base(), {'ranker': ranker}, self.now)
             version = row[0]
             self.rows[version] = row
             return [{**item, "pool_policy": version} for item in items]
@@ -67,46 +67,49 @@ class PoolPolicies:
             return items
 
 
-def serving_policy(store, now, ranker="lane"):
+def serving_policy(store, now, ranker="lane", *, mix_tape_listening=None):
     """Calculate a coherent fingerprint without holding the serving connection."""
     if getattr(store, "_read_only", False):
-        return _serving_policy(store, now, ranker)
+        return _serving_policy(store, now, ranker, mix_tape_listening)
     with store.read_snapshot() as snapshot:
-        return _serving_policy(snapshot.store, now, ranker)
+        return _serving_policy(snapshot.store, now, ranker, mix_tape_listening)
 
 
-def _serving_policy(store, now, ranker):
+def _serving_policy(store, now, ranker, mix_tape_listening=None):
     """Snapshot effective knobs, exclusions, time-dependent evidence and actual model contents.
 
     No credentials or unrelated application settings are included. Identical policy inputs have a
     stable identity; changing a preference or replacing vectors changes it even without a rebuild ID.
     """
-    params = {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS}
+    params = {spec.name: rec_params.get_param(store, spec.name) for spec in rec_params.PARAMS
+              if spec.name not in rec_params.LEGACY_MODE_PARAMS}
     configuration = {
-        "schema": 4, "algorithm": "served-ranking-v2", "ranker": ranker,
+        "schema": 4, "algorithm": "served-ranking-v3", "ranker": ranker,
         "params": params,
         "weights": store.rec_model.get_weights(now=now, revert_halflife_d=params["weight_revert_halflife_d"]),
         "weight_records": store.rec_model.weight_records(), "leans": store.rec_model.get_leans(),
         "muted_artists": sorted(store.rec_model.muted_artists()),
         "suppressed": sorted(store.rec_model.suppressed_keys("for_you", now)),
-        "facet_leans": transient.facet_leans(store, now),
-        "mood": store.rec_signals.recent_mood_events(),
-        "recent_plays": store.history.recent_plays_with_ts(limit=int(params["recent_play_limit"])),
-        "evidence_plays": transient.evidence_plays(store, int(params["recent_play_limit"])),
-        "recent_likes": store.rec_model.recent_liked_with_ts(limit=int(params["recent_play_limit"])),
-        "recent_skips": store.player_events.recent_skips_with_ts(now - 4 * params["skip_halflife_d"] * 86400),
-        "radio_lists": transient.radio_list_ids(store),
         "home": {"vibe": store.settings.get_setting("home_mix_vibe"),
                  "vibe_at": store.settings.get_setting('home_mix_vibe_updated_at'),
                  "tuning_at": store.settings.get_setting("home_mix_tuning_updated_at"),
                  "genre_request": store.rec_proposals.get_proposals("home_genre_request")},
-        "modes": {"definitions": [{k: v for k, v in m.items() if k != "centroid"}
-                                   for m in store.modes.list_modes()],
-                  "offered": store.modes.impression_counts(), "picks": store.modes.pick_counts(),
-                  "response_evidence": choice_bandit.stats(store, now)},
         "musical": {'profile_version': musical_character.VERSION, 'vibe_policy': home_vibe.VERSION},
         "models": store.memoized_read("serving-model-identities", lambda: _model_identities(store)),
     }
+    if mix_tape_listening is None:
+        limit = int(params['recent_play_limit'])
+        configuration.update(
+            facet_leans=transient.facet_leans(store, now), mood=store.rec_signals.recent_mood_events(),
+            recent_plays=store.history.recent_plays_with_ts(limit=limit),
+            evidence_plays=transient.evidence_plays(store, limit),
+            recent_likes=store.rec_model.recent_liked_with_ts(limit=limit),
+            recent_skips=store.player_events.recent_skips_with_ts(now - 4 * params['skip_halflife_d'] * 86400),
+            radio_lists=transient.radio_list_ids(store))
+    else:
+        from yt_playlist.library import mix_listening
+        configuration.update(algorithm='shared-prepared-ranking-v1',
+                             mix_listening=mix_listening.ranking_policy(mix_tape_listening, now))
     raw = json.dumps(configuration, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(raw.encode()).hexdigest()[:16], configuration
 
@@ -126,8 +129,7 @@ def _model_identities(store):
                                              content_taste.weights.tobytes()).hexdigest(),
             "baskets": hashlib.sha256(json.dumps(sorted(sorted(b) for b in store.rec_evidence.rec_baskets()))
                                       .encode()).hexdigest(),
-            "modes": _vector_identity([(str(m["mode_id"]), m["centroid"].tobytes())
-                                       for m in store.modes.list_modes()])}
+            "groups": store.taste_groups.head_generation()}
 
 
 def record_recommendations(store, surface, items, now, *, lane="", mode_id=None,
@@ -321,22 +323,23 @@ def maintain_storage(store, now, *, progress=False):
     """
     history = store.rec_ledger.maintain_policy_history(now)
     store.rec_ledger.maintain_impressions(now)
+    store.rec_ledger.maintain_responses(now)
     with store.read_snapshot() as snapshot:
-        versions, cursor = snapshot.store.rec_ledger.policy_retention_candidates(now)
+        versions, more = snapshot.store.rec_ledger.policy_retention_candidates(now)
         stats = {}
-        published = snapshot.publish_ordered(lambda: stats.update(store.rec_ledger.prune_policies(versions, cursor)))
+        published = snapshot.publish_ordered(lambda: stats.update(store.rec_ledger.prune_policies(versions)))
     if published and (stats['policies_deleted'] or stats['bodies_deleted']):
         log.info('Recommendation policy retention: policies_deleted=%d bodies_deleted=%d more=%s',
-                 stats['policies_deleted'], stats['bodies_deleted'], cursor is not None)
+                 stats['policies_deleted'], stats['bodies_deleted'], more)
     if progress:
         return {**stats, 'published': published,
-                'pending': bool(history) or not published or cursor is not None or stats.get('bodies_deleted', 0) == policy_config.SCAN_LIMIT}
+                'pending': bool(history) or not published or more or stats.get('bodies_deleted', 0) == policy_config.SCAN_LIMIT}
     return published
 
 
 @synchronized
 def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
-                  event_id=None, generated=False):
+                  event_id=None, generated=False, prune=True):
     """Log a successful explicit action separately from observed plays and organic taste evidence."""
     if getattr(store, 'activity_paused', False):
         return
@@ -350,7 +353,8 @@ def record_action(store, kind, now, *, keys=(), video_id=None, playlist_id=None,
                 keys.update(store.discovery.identity_keys_for_video(video_id))
         if playlist_id is not None:
             keys.update(store.playlists.get_playlist_track_keys(playlist_id))
+        options = {} if prune else {'prune': False}
         store.rec_ledger.record_recommendation_outcomes(event_id or uuid.uuid4().hex, kind, keys, now,
-                                             generated=generated)
+                                                       generated=generated, **options)
     except Exception:
         log.warning("recommendation response measurement failed for %s", kind, exc_info=True)

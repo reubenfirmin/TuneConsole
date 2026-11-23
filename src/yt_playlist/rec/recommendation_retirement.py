@@ -5,11 +5,9 @@ import time
 
 from yt_playlist.core.activity import WorkBudgetExceeded, check_cancellable_work
 from yt_playlist.core.group_admission import source
-from yt_playlist.rec import group_roots, measurement, recommendation_roots
+from yt_playlist.rec import group_roots, measurement
 
 log = logging.getLogger(__name__)
-BATCH_ROWS = 32768
-BATCH_POOLS = 512
 
 
 def drain(store, now):
@@ -20,8 +18,6 @@ def drain(store, now):
     A failure leaves recovery pending; the worker retries before other jobs.
     """
     store = source(store)
-    if not recommendation_roots.enabled(store):
-        return
     with store._lock:
         if not hasattr(store, '_recommendation_retirement_lock'):
             store._recommendation_retirement_lock = threading.Lock()
@@ -47,9 +43,8 @@ def drain(store, now):
         checkpoint_at = started + 1
         while True:
             check_cancellable_work()
-            generation = store.recommendations.cleanup_generations(checkpoint=False, row_limit=BATCH_ROWS)
-            pool = store.recommendations.cleanup_pools(
-                checkpoint=False, row_limit=BATCH_ROWS, pool_limit=BATCH_POOLS)
+            generation = store.recommendations.cleanup_generations(checkpoint=False)
+            pool = store.recommendations.cleanup_pools(checkpoint=False)
             for result in (generation, pool):
                 progress['generations'] += result.generations
                 progress['pools'] += result.pools
@@ -60,9 +55,6 @@ def drain(store, now):
                 log.info('Recommendation cleanup progress: %s', progress)
             if not generation and not pool:
                 break
-        # Releasing old pool owners can make policies behind the previous
-        # incremental cursor eligible. Start a complete fresh scan.
-        store.rec_ledger.restart_policy_retirement()
         while True:
             check_cancellable_work()
             result = measurement.maintain_storage(store, now, progress=True)

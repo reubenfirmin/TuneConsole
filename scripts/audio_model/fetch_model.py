@@ -23,17 +23,12 @@ ASSETS = {
     'musicnn/group1-shard1of1.bin': GITHUB + 'examples/starter-code/autotagging/models/msd-musicnn-1/group1-shard1of1.bin',
     'musicnn/metadata.json': MODELS + 'autotagging/msd/msd-musicnn-1.json',
 }
-MOODS = json.loads((ROOT.parent / 'mood_models.json').read_text())
-for head in MOODS:
-    for name in ('model.json', 'group1-shard1of1.bin'):
-        ASSETS[f"{head['id']}/{name}"] = MODELS + f"classification-heads/{head['path']}-tfjs/{name}"
-    ASSETS[f"{head['id']}/metadata.json"] = MODELS + f"classification-heads/{head.get('metadata', head['path'])}.json"
 
 
 def main():
     ROOT.mkdir(parents=True, exist_ok=True)
     manifest = {'schema': 1, 'purpose': 'tuneconsole_audio', 'essentia_js_commit': REVISION,
-                'tensorflow_js_version': '3.18.0', 'meyda_version': '5.6.3', 'mood_heads': MOODS, 'files': []}
+                'tensorflow_js_version': '3.18.0', 'meyda_version': '5.6.3', 'files': []}
     previous = ROOT / 'bundle.json'
     known = {row['path']: row for row in json.loads(previous.read_text())['files']} if previous.exists() else {}
     total = 0

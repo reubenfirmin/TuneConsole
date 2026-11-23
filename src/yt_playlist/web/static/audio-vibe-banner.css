@@ -16,8 +16,7 @@
   animation: audio-vibe-appear .25s ease-out;
 }
 .audio-vibe-banner[hidden], .audio-vibe-banner [hidden] { display: none; }
-/* Keep drafts while preview and the model map need an unobstructed screen. */
-body:has(#app-page [data-audio-preview]) > .audio-vibe-banner,
+/* Keep drafts while the model map takes the full screen. */
 body:has(#app-page.page-model-admin) > .audio-vibe-banner { display: none; }
 .audio-vibe-banner[data-stacked="true"]::before, .audio-vibe-banner[data-stacked="true"]::after { content: ""; position: absolute; inset: -10px 8px auto; height: 10px; border: 1px solid var(--border); border-bottom: 0; border-radius: 14px 14px 0 0; background: var(--surface-raised, var(--surface)); z-index: -1; }
 .audio-vibe-banner[data-stacked="true"]::after { inset: -17px 16px auto; height: 7px; z-index: -2; }
@@ -66,6 +65,10 @@ body:has(#app-page.page-model-admin) > .audio-vibe-banner { display: none; }
 .audio-vibe-diagnostics th, .audio-vibe-diagnostics td { border-bottom: 1px solid var(--border); padding: .35rem .2rem; vertical-align: top; }
 .audio-vibe-diagnostics th { text-align: left; font-weight: 400; }
 .audio-vibe-diagnostics td { text-align: right; overflow-wrap: anywhere; }
+[data-vibe-specialist-details] thead th { text-align: right; white-space: nowrap; }
+[data-vibe-specialist-details] thead th:first-child { text-align: left; white-space: normal; }
+[data-vibe-specialist-details] td { white-space: nowrap; overflow-wrap: normal; }
+[data-vibe-specialist-details] small { display: block; color: var(--dim); }
 @keyframes audio-vibe-appear { from { opacity: 0; transform: translateY(12px); } to { opacity: 1; transform: translateY(0); } }
 @media (max-width: 600px) {
   .audio-vibe-banner { right: .6rem; bottom: .6rem; width: calc(100vw - 1.2rem); }

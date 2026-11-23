@@ -14,7 +14,7 @@ def _album():
 
 
 def _client(store, album=None):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.collection.replace_saved_albums([{"browse": "MPRE", "title": "Album", "artist": "Artist"}])
     client = FakeClient(albums={"MPRE": album}) if album is not None else None
     return TestClient(create_app(store, lambda: {iid: client} if client else {}, now_fn=lambda: 1),
@@ -76,7 +76,7 @@ def test_materialization_boundary_remains_required_even_with_an_ordered_snapshot
     with store.conn:
         tracklist = album_tracklists.begin(store.conn, store.collection.album_id('MPRE'),
                                           'MPRE', expected_count=3)
-        entry = store.conn.execute("SELECT id FROM catalog_entries WHERE video_id='v2'").fetchone()[0]
+        entry = store.conn.execute("SELECT id FROM track_sources WHERE video_id='v2'").fetchone()[0]
         album_tracklists.occurrence(store.conn, tracklist, entry_id=entry, position=0)
         album_tracklists.occurrence(store.conn, tracklist, raw_source_ref='unmaterialized-video',
                                    captured_title='First', captured_credit='Artist', position=1)
@@ -89,7 +89,7 @@ def test_materialization_boundary_remains_required_even_with_an_ordered_snapshot
 def test_complete_published_sources_remain_shareable_without_library_membership(store):
     _materialize(store)
     with store.conn:
-        store.conn.execute('DELETE FROM library_memberships')
+        store.conn.execute('UPDATE track_sources SET library_origin=NULL,library_added_at=NULL WHERE library_origin IS NOT NULL')
     assert not store.collection.is_album_tracklist_complete('MPRE')
     response = _client(store).get('/album/MPRE/share.txt')
     assert response.status_code == 200

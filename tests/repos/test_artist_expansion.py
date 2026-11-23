@@ -25,17 +25,19 @@ def _catalog(store, prefix, title, artist, count):
     with store.conn:
         subject = ensure(store.conn, artist)
         store.conn.execute("INSERT INTO entry_artists(entry_id,position,artist_id,credit,source) "
-            "SELECT e.id,0,?,?,'fixture' FROM catalog_entries e JOIN recordings r ON r.id=e.recording_id "
+            "SELECT e.id,0,?,?,'fixture' FROM track_sources e JOIN recordings r ON r.id=e.recording_id "
             'WHERE r.artist=?', (subject, artist, artist))
     return subject
 
 
 def _legacy(store, wanted):
+    from yt_playlist.core.catalog_query import PLAYABLE_LIBRARY_SQL
+
     return [{"key": r["k"], "title": r["title"], "artist": r["artist"], "album": r["album"] or "",
              "video_id": r["vid"], "thumbnail": r["thumb"], "genre": r["genre"] or ""}
             for r in store.conn.execute(
                 "SELECT t.identity_key k,t.title,t.artist,t.album,t.video_id vid,t.thumbnail thumb,t.genre "
-                "FROM playable_library_tracks t WHERE t.title<>'' AND EXISTS "
+                f"FROM ({PLAYABLE_LIBRARY_SQL}) t WHERE t.title<>'' AND EXISTS "
                 "(SELECT 1 FROM entry_artists ta WHERE ta.entry_id=t.id AND ta.artist_id=?) "
                 "ORDER BY t.identity_key", (wanted,))]
 
@@ -73,7 +75,9 @@ def _measured(store, artist):
         finally:
             conn.set_progress_handler(None, 0)
             conn.set_trace_callback(None)
-        query = next(s for s in statements if s.startswith("WITH requested"))
+        queries = [sql for sql in statements if 'where ta.artist_id in (' in ' '.join(sql.lower().split())]
+        assert len(queries) == 1, 'Expected one catalog lookup scoped by the requested artist'
+        query = queries[0]
         plan = [r[3] for r in conn.execute("EXPLAIN QUERY PLAN " + query)]
     return rows, steps[0], plan
 
@@ -81,13 +85,17 @@ def _measured(store, artist):
 def test_artist_expansion_work_is_bounded_by_requested_catalog(store):
     artist = _catalog(store, 'wanted', 'Wanted', 'Artist', 8)
     before, small, _ = _measured(store, artist)
+    assert len(before) == 8
     _catalog(store, 'other', 'Other', 'Unrelated', 1500)
     after, large, plan = _measured(store, artist)
     assert after == before
     assert large <= small * 2 + 500
-    assert any("ix_entry_artist_subject" in step for step in plan)
-    assert any("ix_entries_recording" in step for step in plan)
-    indexes = [step for step in plan if "ix_entry_artist_subject" in step or "ix_entries_recording" in step]
+    credits = [step for step in plan if 'ix_entry_artist_subject (artist_id=?)' in step]
+    sources = [step for step in plan if '(recording_id=?)' in step
+               and ('ix_entries_recording' in step or 'ix_youtube_recording' in step)]
+    assert credits, '\n'.join(plan)
+    assert sources, '\n'.join(plan)
+    indexes = credits + sources
     print(f"Artist expansion: 8 matches, library 8 to 1508; VM steps {small} to {large}; indexes: {indexes}")
 
 

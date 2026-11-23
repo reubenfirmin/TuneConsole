@@ -12,6 +12,8 @@ from .evidence_ledger import canonical
 
 FORMAT = 'prepared-recommendation-output-1'
 MAX_BYTES = 1024 * 1024
+FILE_KIND = 'recommendation-output'
+FILE_IDENTITY = "json_extract(owner_id,'$[0]')"
 _HOME_SURFACES = frozenset({'home_prepared', 'home_tuned', 'home_choice'})
 _HOME_CACHE_BYTES = 16 * 1024 * 1024
 _home_parts = OrderedDict()
@@ -37,15 +39,27 @@ def encode(surface, chunk_key, value):
     return encoded
 
 
-def decode(encoded, surface=None, chunk_key=None):
+def decode(encoded, surface=None, chunk_key=None, *, require_canonical=True):
     document = json.loads(encoded)
     if (not isinstance(document, dict) or set(document) != {'format', 'surface', 'chunk_key', 'output'}
             or document['format'] != FORMAT or not isinstance(document['surface'], str) or not document['surface']
-            or not isinstance(document['chunk_key'], str) or canonical(document) != encoded
+            or not isinstance(document['chunk_key'], str) or require_canonical and canonical(document) != encoded
             or surface is not None and document['surface'] != surface
             or chunk_key is not None and document['chunk_key'] != chunk_key):
         raise ValueError('Unsupported prepared output document or owner')
     return document
+
+
+def read_preview_part(filename, size, chunk_key):
+    if type(size) is not int or not 0 < size <= MAX_BYTES:
+        raise ValueError('Invalid preview part size')
+    encoded = fao.read_cache(filename, max_bytes=size)
+    if len(encoded) != size:
+        raise ValueError('Incomplete preview part')
+    value = decode(encoded, 'adaptive_group_preview', chunk_key, require_canonical=False)['output']
+    if not isinstance(value, str):
+        raise ValueError('Invalid preview part')
+    return value
 
 
 def describe(encoded):
@@ -79,7 +93,10 @@ def read(filename, digest, size, *, surface, chunk_key):
     if type(size) is not int or not 0 < size <= MAX_BYTES:
         raise ValueError('Invalid prepared output byte range')
     def output():
-        return decode(read_encoded(filename, digest, size, validate_document=False), surface, chunk_key)['output']
+        encoded = read_encoded(filename, digest, size, validate_document=False)
+        # Home parts have already been canonicalized at publication and matched
+        # to their receipt above. Check the envelope without serializing it again.
+        return decode(encoded, surface, chunk_key, require_canonical=surface not in _HOME_SURFACES)['output']
     if surface not in _HOME_SURFACES:
         return output()
     identity = _file_identity(filename)

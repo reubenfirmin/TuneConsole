@@ -13,7 +13,7 @@ from tests.derived_rating_support import seed_dislike
 from tests.genre_catalog_support import bound_catalog
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
-from yt_playlist.core import listening
+from yt_playlist.core import listening, recommendation_chunks
 from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.core.store import Store
 from yt_playlist.rec import (candidate_refresh, discover, home_prepared,
@@ -59,7 +59,7 @@ def _seed_ranker_inputs(store):
              'video_id': 'new', 'genre': 'Jazz', 'year': '2001', 'duration_s': 200}
     seed_publication_subjects(store, [*tracks, fresh], discoveries=[fresh['key']], now=1800)
     with atomic_write(store):
-        account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+        account = store.accounts.upsert_account('Listener', None, True)
         entries = store.tracks.track_ids_for_videos([track['video_id'] for track in tracks])
         for index, members in enumerate((tracks[:6], tracks[3:])):
             playlist = store.playlists.upsert_playlist(account, f'p{index}', f'Playlist {index}', 6, '', 1)
@@ -86,7 +86,7 @@ def playback_library(store):
     # These cases coordinate captured rankings with listening writes. Three
     # owned recordings and one discovery retain every mutation below. The
     # independent concurrent-ranker case uses real scoring and file publication.
-    account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+    account = store.accounts.upsert_account('Listener', None, True)
     tracks = [{'key': f'song {index:03}|artist {index}', 'title': f'Song {index:03}',
                'artist': f'Artist {index}', 'video_id': f'v{index}', 'genre': genre}
               for index, genre in ((0, 'Techno'), (10, 'Jazz'), (11, 'Rock'))]
@@ -94,7 +94,7 @@ def playback_library(store):
              'artist': 'New artist 0', 'genre': 'Techno', 'year': '1990', 'duration_s': 200}
     seed_publication_subjects(store, [*tracks, fresh], discoveries=[fresh['key']], now=1800)
     store.history.import_play_events(account, [('song 000|artist 0', 'v0', 1000)], source='takeout')
-    other = store.accounts.upsert_account('Other listener', 'other fixture', None, False)
+    other = store.accounts.upsert_account('Other listener', None, False)
     store.history.import_play_events(other, [('song 011|artist 11', 'v11', 500)], source='takeout')
     store.rec_model.replace_rec_content_vectors([
         ('song 000|artist 0', np.array([1., 0.], dtype=np.float32).tobytes())])
@@ -112,7 +112,8 @@ def completed_rankings(reader, now=None, policies=None):
     keys = ['song 000|artist 0', 'song 010|artist 10']
     tracks = reader.rec_query.tracks_by_keys(keys)
     fresh = [{'key': 'new song 0|new artist 0', 'video_id': 'new0',
-              'title': 'New song 0', 'artist': 'New artist 0', 'genre': 'Techno'}]
+              'title': 'New song 0', 'artist': 'New artist 0', 'genre': 'Techno',
+              'reason': 'Ranked for Discovery'}]
     lanes = {'wheelhouse': [{'key': keys[0], **tracks[keys[0]]}],
              'temporal': [{'key': keys[1], **tracks[keys[1]], 'year': '1990'}],
              'fresh': fresh}
@@ -121,7 +122,7 @@ def completed_rankings(reader, now=None, policies=None):
     return {'all': lanes, '_meta': {'full_pools': True}}, lanes['fresh']
 
 
-def completed_policy(reader, now, ranker='lane'):
+def completed_policy(reader, now, ranker='lane', *, mix_tape_listening=None):
     # Fingerprinting every model and listening signal belongs to measurement's
     # own tests. Keep real policy identities, files and publication here.
     return 'fixture', {'ranker': ranker, 'source': 'playback-publication-fixture'}
@@ -188,11 +189,11 @@ def playback_change(store, change):
     else:
         with store.conn:
             if change == 'calendar-update':
-                store.conn.execute("UPDATE play_event_calendar SET day='1970-01-02' WHERE event_id=?", (event,))
+                store.conn.execute("UPDATE play_events SET day='1970-01-02' WHERE id=?", (event,))
             elif change == 'calendar-delete':
-                store.conn.execute('DELETE FROM play_event_calendar WHERE event_id=?', (event,))
+                store.conn.execute('UPDATE play_events SET day=NULL WHERE id=?', (event,))
             elif change == 'source-update':
-                store.conn.execute("UPDATE play_event_sources SET source='renamed' WHERE event_id=?", (event,))
+                store.conn.execute("UPDATE play_events SET sources=json_array('renamed') WHERE id=?", (event,))
             else:
                 raise AssertionError(change)
 
@@ -275,7 +276,41 @@ def test_discovery_publishes_usable_tiles_during_listening_updates(library, monk
     assert result is not None
     assert result['discovery_albums'][0]['browse_id'] == 'new-album'
     assert result['discovery_artists'][0]['artist'] == 'New artist'
+    assert result['discovery_tracks'][0]['key'] == 'new song 0|new artist 0'
     assert home_prepared.load_discovery(library) == result
+
+
+@pytest.mark.parametrize('change', ['selected-display', 'track-explanations'])
+def test_discovery_preserves_current_tiles_when_a_consumed_receipt_changes(library, monkeypatch, change):
+    surface = home_prepared.DISCOVERY_SURFACE
+    previous = home_prepared.prepare_discovery(library, 2000)
+    track = previous['discovery_tracks'][0]
+    assert track['reason'] == 'Ranked for Discovery'
+    newer = {**previous, 'discovery_tracks': []}
+    library.discovery.upsert_discovered_album('new-album', 'New artist', 'New album',
+                                             '2026', None, 2000, genre='Jazz')
+    pick = discover.pick_discovered_albums
+    calculated = []
+
+    def pick_then_change_receipt(reader, *args, **kwargs):
+        rows = pick(reader, *args, **kwargs)
+        calculated.extend(row['browse_id'] for row in rows)
+        if change == 'selected-display':
+            library.rec_proposals.put_proposals(surface, newer, 2101)
+        else:
+            context = track['serving_context']
+            with atomic_write(library):
+                chunk = library.conn.execute('''SELECT id FROM recommendation_chunks
+                    WHERE generation_id=? AND pool_id=? AND ? BETWEEN first_rank AND last_rank''',
+                    (context['recommendation_generation_id'], context['recommendation_pool_id'],
+                     track['pool_rank'])).fetchone()
+                recommendation_chunks.relocate(library.conn, chunk[0], 'moved-display-chunk')
+        return rows
+
+    monkeypatch.setattr(discover, 'pick_discovered_albums', pick_then_change_receipt)
+    assert home_prepared.prepare_discovery(library, 2100) is None
+    assert calculated == ['new-album']
+    assert home_prepared.load_discovery(library) == (newer if change == 'selected-display' else previous)
 
 
 @pytest.mark.parametrize('change', ['feedback', 'preferences', 'model', 'schema', 'external-writer'])
@@ -300,7 +335,7 @@ def test_captured_rankings_finish_despite_input_changes_but_preserve_the_schema_
                 library.conn.execute('CREATE TABLE unrelated_new_schema (value TEXT)')
         else:
             with closing(sqlite3.connect(library._db_path)) as other, other:
-                other.execute("UPDATE play_event_calendar SET day='1970-01-03'")
+                other.execute("UPDATE play_events SET day='1970-01-03'")
         return result
 
     monkeypatch.setattr(mode_inputs, '_calculate_bundles', superseded)
@@ -323,13 +358,17 @@ def test_default_snapshot_publication_still_rejects_listening_projection_changes
 
 
 def test_real_rankers_finish_from_pinned_inputs_while_playback_arrives(ranker_library, monkeypatch, record_property):
+    from tests.group_support import publish_keyed
     from yt_playlist.rec import vibe_pools
 
     library = ranker_library
     assert not library.recommendations.heads()
-    modes = library.modes.list_modes(active_only=True)
-    assert modes
-    record_property('prepared_mode_count', len(modes))
+    by_genre = {}
+    for library_key, (genre, _year) in library.rec_query.track_content().items():
+        by_genre.setdefault(genre, []).append(library_key)
+    membership = publish_keyed(library, [(genre, keys, index * .3)
+                                         for index, (genre, keys) in enumerate(sorted(by_genre.items()))])
+    record_property('prepared_group_count', len(set(membership.values())))
     account = library.accounts.get_accounts()[0].id
     key = library.tracks.identity_key_for_video('v1')
     calculating, first_play, stopped = threading.Event(), threading.Event(), threading.Event()
@@ -378,7 +417,8 @@ def test_real_rankers_finish_from_pinned_inputs_while_playback_arrives(ranker_li
     assert result is not None and result['all']['wheelhouse']
     assert result['all']['temporal'] and result['all']['fresh']
     assert fresh == result['all']['fresh']
-    assert result['1']['wheelhouse'] and result['1']['temporal']
+    version = membership[key]
+    assert result[version]['wheelhouse'] and result[version]['temporal']
     assert not library.recommendations.heads()
     assert not library.conn.in_transaction
     assert not library.conn.execute('PRAGMA foreign_key_check').fetchall()
@@ -390,6 +430,8 @@ def test_real_rankers_finish_from_pinned_inputs_while_playback_arrives(ranker_li
 
 
 def test_published_rankings_apply_later_explicit_suppression(ranker_library, monkeypatch):
+    from yt_playlist.rec.eligibility import home_exclusions
+
     library = ranker_library
     account = library.accounts.get_accounts()[0].id
     played = library.tracks.identity_key_for_video('v1')
@@ -426,7 +468,7 @@ def test_published_rankings_apply_later_explicit_suppression(ranker_library, mon
     excluded = before[0]['tracks'][0]['key']
     seed_dislike(library, excluded, until=None, now=2001)
     with library.read_view() as reader:
-        assert excluded in mode_surfaces.home_exclusions(reader, {excluded}, 2001)
+        assert excluded in home_exclusions(reader, {excluded}, 2001)
         after = mode_surfaces.assemble_cards(reader, 2001, 0)
     assert after
     assert excluded not in {item['key'] for card in after for item in card['tracks']}

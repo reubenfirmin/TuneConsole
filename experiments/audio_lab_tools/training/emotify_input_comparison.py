@@ -13,7 +13,7 @@ from statistics import median
 import numpy as np
 from threadpoolctl import threadpool_limits
 
-from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files, vibe_versions
+from yt_playlist.core import audio_embedding, audio_vibe_metadata, sample_files
 from experiments.audio_lab_tools.legacy import audio_vibe_external, audio_vibe_model
 from yt_playlist.rec import home_vibe, musical_profiles
 
@@ -50,6 +50,36 @@ def families(attributes, embedding, moods, shared):
             'attributes_embedding_moods': np.column_stack([attributes, embedding, moods])}
 
 
+def frozen_features(row):
+    names = list(audio_vibe_model.FEATURES)
+    if len(row['values']) == len(names) + 2:
+        # The frozen comparison dataset predates retirement of this pair.
+        for prefix in ('base.', 'base.present.'):
+            names.insert(names.index(prefix + 'bpm') + 1, prefix + 'energy')
+    return dict(zip(names, row['values'], strict=True))
+
+
+def frozen_provider_baseline(row):
+    # Reproduce the selected-field baseline from the archived comparison.
+    # These columns contain selected scalars with no recording-source lineage.
+    dimensions = {}
+    fields = {'bpm': 'tempo', 'energy': 'intensity', 'danceability': 'groove',
+              'instrumental': 'instrumental', 'mood_acoustic': 'acoustic',
+              'mood_relaxed': 'relaxed', 'mood_happy': 'happiness',
+              'mood_sad': 'sadness', 'mood_aggressive': 'aggression'}
+    for field, dimension in fields.items():
+        value = musical_profiles.number(row.get('base.' + field), low=30 if field == 'bpm' else 0,
+                                        high=300 if field == 'bpm' else 1)
+        if value is None:
+            continue
+        if field == 'bpm':
+            value = (value - 30) / 270
+        if field == 'energy':
+            value = .5 + (value - .5) * (.35 / .6)
+        dimensions[dimension] = {'value': value, 'support': .35}
+    return [home_vibe.heuristic_affinity({'dimensions': dimensions}, vibe) for vibe in VIBES]
+
+
 def gold_inputs(snapshot, conn, attribute_names, mood_names, *, sample_root, sample_index):
     rows, attributes, moods, shared, files = [], [], [], [], []
     missing = []
@@ -75,7 +105,7 @@ def gold_inputs(snapshot, conn, attribute_names, mood_names, *, sample_root, sam
         if not np.allclose(audio_embedding.vector(samples), row['embedding_values'], atol=1e-12, rtol=0):
             raise ValueError('Frozen gold embedding does not replay from its immutable samples')
         values, traits = capture_inputs(samples, attribute_names, mood_names)
-        frozen = dict(zip(audio_vibe_model.FEATURES, row['values'], strict=True))
+        frozen = frozen_features(row)
         provider = [frozen['base.' + key] for key in SHARED]
         rows.append(row)
         attributes.append(values)
@@ -199,15 +229,10 @@ def summarize(db):
     lookup = {row['video_id']: row for row in snapshot['gold']}
     gold = [lookup[video] for video in saved['video_ids']]
     target = np.array([[int(vibe in row['labels']) / len(row['labels']) for vibe in VIBES] for row in gold])
-    frozen = [dict(zip(audio_vibe_model.FEATURES, row['values'], strict=True)) for row in gold]
+    frozen = [frozen_features(row) for row in gold]
     provider_x = np.array([[np.nan if (value := row['base.' + key]) is None else value for key in SHARED]
                            for row in frozen], dtype=float)
-    provider_scores = []
-    for row in frozen:
-        metadata = {key: row['base.' + key] for key in audio_vibe_metadata.NUMERIC}
-        profile = musical_profiles.resolve([], selected=metadata)
-        provider_scores.append([home_vibe.heuristic_affinity(profile, vibe) for vibe in VIBES])
-    provider_scores = np.array(provider_scores)
+    provider_scores = np.array([frozen_provider_baseline(row) for row in frozen])
     report['provider_eligible_subsets'] = {}
     for name, mask in (('any_shared_field', np.isfinite(provider_x).any(axis=1)),
                        ('all_shared_fields', np.isfinite(provider_x).all(axis=1))):
@@ -224,8 +249,9 @@ def summarize(db):
         conn.row_factory = sqlite3.Row
         conn.execute('PRAGMA query_only=ON')
         conn.execute('BEGIN')
-        library = conn.execute('SELECT recording_id,MIN(video_id) video_id FROM tracks '
-                               'WHERE video_id IS NOT NULL GROUP BY recording_id').fetchall()
+        from yt_playlist.core.catalog_query import LIBRARY_RECORDINGS_SQL, PLAYABLE_LIBRARY_SQL
+
+        library = conn.execute(f'SELECT recording_id,video_id FROM ({PLAYABLE_LIBRARY_SQL})').fetchall()
         availability = {key: 0 for key in SHARED}
         all_shared = any_shared = 0
         for row in library:
@@ -235,16 +261,16 @@ def summarize(db):
             for key, valid in zip(SHARED, present): availability[key] += int(valid)
             all_shared += all(present)
             any_shared += any(present)
-        counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM recording_vibes '
-                              'WHERE recording_id IN (SELECT recording_id FROM tracks) GROUP BY source').fetchall()
-        version = vibe_versions.expression(conn, 'recording_vibes', 'v')
-        version_counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM recording_vibes v '
-            'WHERE recording_id IN (SELECT recording_id FROM tracks) AND '+version+' LIKE ? GROUP BY source',
+        counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM vibe_recording_fits '
+                              f'WHERE recording_id IN (SELECT recording_id FROM ({LIBRARY_RECORDINGS_SQL})) GROUP BY source').fetchall()
+        version_counts = conn.execute('SELECT source,COUNT(DISTINCT recording_id) n FROM vibe_recording_fits '
+            f'WHERE recording_id IN (SELECT recording_id FROM ({LIBRARY_RECORDINGS_SQL})) '
+            'AND inputs_version LIKE ? GROUP BY source',
             ('%/' + model_hash,)).fetchall()
         runs = conn.execute('WITH complete AS (SELECT recording_id,video_id,run_id,MAX(captured_at) captured '
             'FROM sample_attributes GROUP BY recording_id,video_id,run_id HAVING COUNT(*)=3), ranked AS ('
             'SELECT *,ROW_NUMBER() OVER (PARTITION BY recording_id ORDER BY captured DESC,video_id DESC,run_id DESC) n FROM complete) '
-            'SELECT * FROM ranked WHERE n=1 AND recording_id IN (SELECT recording_id FROM tracks)').fetchall()
+            f'SELECT * FROM ranked WHERE n=1 AND recording_id IN (SELECT recording_id FROM ({LIBRARY_RECORDINGS_SQL}))').fetchall()
         compatible = matched = stale = invalid = 0
         maximum_error = 0.
         for run in runs:
@@ -256,8 +282,8 @@ def summarize(db):
                 invalid += 1
                 continue
             compatible += 1
-            current = conn.execute('SELECT vibe,score,source,'+version+' AS inputs_version '
-                                   'FROM recording_vibes v WHERE recording_id=?',
+            current = conn.execute('SELECT vibe,score,source,inputs_version '
+                                   'FROM vibe_recording_fits WHERE recording_id=?',
                                    (run['recording_id'],)).fetchall()
             current = [row for row in current if row['vibe'] in model['labels']]
             if {row['vibe'] for row in current} == set(model['labels']) and all(

@@ -10,7 +10,7 @@ from tests.store_fixture_support import bounded_consumer_schema
 from yt_playlist.core.store import Store
 from yt_playlist.controllers.playback_observations import player_snapshot
 from yt_playlist.library.generated_composition import commands
-from yt_playlist.web.first_sounds import FirstSounds, KEY, _saved_position
+from yt_playlist.web.first_sounds import FirstSounds, _saved_position
 from yt_playlist.web.radio_playback import PlaybackObservation, RadioPlayback
 
 
@@ -21,7 +21,7 @@ def _pristine_current_schema():
 
 
 def setup_stream(store, monkeypatch):
-    identity = store.accounts.upsert_account('Main', 'bridge', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     client = FakeClient(tracks={'source': [_track(f'v{i}', f'Song {i}', 'Artist') for i in range(6)]})
     tracks = []
     for i in range(3):
@@ -100,7 +100,7 @@ def test_lost_append_reply_survives_file_reopen_without_replaying_the_addition(
     monkeypatch.setattr(client, 'get_playlist', readback)
     with pytest.raises(ConnectionError):
         stream.maintain()
-    saved = json.loads(store.settings.get_setting(KEY))
+    saved = store.radio_checkpoints.first_sounds()
     assert saved['pending_sent'] and saved['pending']['video_id'] == 'v3'
     reopened = Store(store._db_path)
     reopened._bind_repositories()
@@ -138,7 +138,7 @@ def test_external_playlist_edit_settles_across_heartbeats_without_overwriting_it
     clock[0] += CONFIRM_TIMEOUT + 1
     stream.prepare()
     assert stream.state['stopped']
-    assert json.loads(store.settings.get_setting(KEY))['stopped']
+    assert store.radio_checkpoints.first_sounds()['stopped']
     assert client.get_playlist(playlist)['tracks'] == before
     assert client.added == writes
 

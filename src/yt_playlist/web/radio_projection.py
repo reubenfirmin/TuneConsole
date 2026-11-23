@@ -1,6 +1,6 @@
 """Client views of live and saved radio state; no lifecycle transitions or I/O."""
 from yt_playlist.rec import radio_tuning
-from yt_playlist.rec.radio_directions import decay_progress
+from yt_playlist.rec.radio_directions import DEPTH, decay_progress
 from yt_playlist.web.radio_state import Session, selected_slot
 from yt_playlist.web.radio_recovery import observed_queue, resume_player
 
@@ -39,7 +39,7 @@ def history_tracks(tracks, heard, position, furthest):
     prefix = tracks[:end]
     history, seen, cursor = [], set(), 0
 
-    def append(track):
+    def append_prefix(track):
         if track["video_id"] not in seen:
             history.append(track)
             seen.add(track["video_id"])
@@ -48,11 +48,14 @@ def history_tracks(tracks, heard, position, furthest):
         index = indices.get(track.get('_radio_queue_video_id', track['video_id']))
         if index is not None:
             for previous in prefix[cursor:index]:
-                append(previous)
+                append_prefix(previous)
             cursor = max(cursor, index + 1)
-        append(track)
+        # Observations are consecutive-playback occurrences. A return to an
+        # earlier song after another listen belongs in the timeline as well.
+        history.append(track)
+        seen.add(track['video_id'])
     for track in prefix[cursor:]:
-        append(track)
+        append_prefix(track)
     return history
 
 
@@ -62,6 +65,8 @@ def status_view(s: Session | None, *, active: bool, connected: bool, now: float)
     selected = selected_slot(s) if s else None
     for branch in directions:
         branch["active"] = branch["slot"] == selected
+        # The plan-wide flag identifies menu exposures. Progress depends on the rows still missing here.
+        branch["more_pending"] = branch["filling"] and len(branch["tracks"]) < DEPTH
     return {
         "can_play_songs": True,
         "song_play_version": 4,
@@ -98,6 +103,7 @@ def saved_view(saved: dict, *, active: bool) -> dict:
     scheduled = {t["video_id"] for t in tracks[max(0, saved.get("furthest", -1)) + 1:]}
     replacement = saved.get("requested_direction") or saved.get("replacement")
     selected = replacement["slot"] if replacement else plan.get("active", 0)
+    filling = bool(plan.get("filling"))
     return {"active": active, "stopped": bool(saved.get("stopped")),
         "launch_id": saved.get("launch_id"),
         "can_play_songs": True, "song_play_version": 4,
@@ -111,6 +117,7 @@ def saved_view(saved: dict, *, active: bool) -> dict:
         "history": history, "history_count": len(history),
         "updating": bool(replacement), "pending_slot": replacement["slot"] if replacement else None,
         "directions": [{**branch, "slot": slot, "active": slot == selected,
+            "filling": filling, "more_pending": filling and len(branch["tracks"]) < DEPTH,
             **decay_progress(branch, plan.get("decay", {}).get(str(slot)), saved.get("transition", 0)),
             "tracks": [{**t, "saved": t["video_id"] in scheduled} for t in branch["tracks"]]}
             for slot, branch in enumerate(plan.get("slots", [])) if branch]}

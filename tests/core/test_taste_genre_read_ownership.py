@@ -1,6 +1,7 @@
 """Taste reporting reads committed edits privately, without blocking writers."""
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import re
 import threading
 
 from fastapi.testclient import TestClient
@@ -14,7 +15,7 @@ from tests.home_fixture_support import (
 from tests.core.test_predecessor_writes import consumer_installed as installed
 from tests.store_fixture_support import reuse_reporting_reader, without_query_timing
 from yt_playlist.core import catalog, genre_identity
-from yt_playlist.rec import home_cards, home_prepared, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, taste_viz
+from yt_playlist.rec import choice_evidence, home_cards, mix_tuning, onboarding, rec_params, surfaces, taste_analysis, taste_viz
 from yt_playlist.web.app import create_app
 
 
@@ -22,7 +23,7 @@ pytestmark = pytest.mark.usefixtures('without_query_timing')
 
 
 def _library(store):
-    account = store.accounts.upsert_account('Main', 'credentials', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     with store.conn:
         for family in ('pop', 'jazz', 'house'):
             store.conn.execute('INSERT INTO genre_family VALUES (?,?) ON CONFLICT DO NOTHING',
@@ -73,7 +74,6 @@ def _families(name, result):
 @pytest.fixture
 def live_tuning_input(installed, monkeypatch, home_page_bytecode):
     from tests.test_home import _publish_existing_listener_mix
-    from tests.recommendation_support import publish_bundles
     from yt_playlist.web import app as webapp
 
     store, _ = installed
@@ -82,11 +82,6 @@ def live_tuning_input(installed, monkeypatch, home_page_bytecode):
     with reuse_reporting_reader(store, monkeypatch):
         account, _ = _library(store)
         _publish_existing_listener_mix(store)
-        pool = [{'key': key, **{field: track[field] for field in
-                 ('title', 'artist', 'album', 'video_id', 'thumbnail', 'genre')}} for key, track in
-                store.rec_query.group_candidates(store.rec_query.library_keys()).items()]
-        publish_bundles(store, {'all': {'wheelhouse': pool, 'explore': pool, 'comfort': pool},
-                               '_meta': {'full_pools': True, 'unmodeled': True}}, 1000)
     templates = webapp.Jinja2Templates
 
     def compiled_templates(*args, **kwargs):
@@ -100,19 +95,19 @@ def live_tuning_input(installed, monkeypatch, home_page_bytecode):
 
 @pytest.mark.parametrize('installed', [107], indirect=True)
 @pytest.mark.parametrize('commit', [False, True], ids=['rollback', 'commit'])
-def test_live_home_tuning_calculates_privately_then_publishes(
+def test_live_home_tuning_calculates_privately_then_presents(
         installed, live_tuning_input, monkeypatch, caplog, commit,
         home_control_routes, without_metadata_providers):
     store, _ = installed
     account = live_tuning_input
-    assert not store.rec_proposals.get_proposals('home_tuned')
+    surface = 'choice_window:mixes'
+    assert store.rec_proposals.get_proposals(surface) is None
     client = TestClient(create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000,
                                   background_work=False),
                         base_url='http://127.0.0.1')
     start, entered, release = (threading.Event() for _ in range(3))
-    observed, published = [], []
-    cards, remember = home_cards.HomeCards.cards, home_prepared.remember
-    calculating = False
+    observed, selected = [], []
+    cards = home_cards.HomeCards.cards
 
     def writer():
         assert start.wait(10)
@@ -128,30 +123,22 @@ def test_live_home_tuning_calculates_privately_then_publishes(
                 store.conn.rollback()
 
     def calculate(service, request):
-        nonlocal calculating
         assert service.store._read_only
         assert not store._lock.held_by_current_thread
+        assert rec_params.get_param(service.store, 'breadth_bias') == .5
         assert service.store.genres.feature_axes(['Owned Seed'])['Owned Seed'][0] == 'pop'
         start.set()
         assert entered.wait(10)
-        calculating = True
         try:
             observed.append(service.store.genres.feature_axes(['Owned Seed'])['Owned Seed'][0])
-            return cards(service, request)
+            result = cards(service, request)
+            selected.extend(proto['experiment_id'] for proto in result.protos)
+            return result
         finally:
-            calculating = False
             release.set()
             work.result(5)
 
-    def publish(owner, payload, result, now, *, tuning=None):
-        assert owner is store and not calculating
-        assert tuning is not None and result.protos
-        value = remember(owner, payload, result, now, tuning=tuning)
-        published.append((tuning, [p['experiment_id'] for p in result.protos]))
-        return value
-
     monkeypatch.setattr(home_cards.HomeCards, 'cards', calculate)
-    monkeypatch.setattr(home_prepared, 'remember', publish)
     with ThreadPoolExecutor(max_workers=1) as pool:
         work = pool.submit(writer)
         try:
@@ -162,10 +149,14 @@ def test_live_home_tuning_calculates_privately_then_publishes(
         work.result(5)
     assert response.status_code == 200
     assert 'home cards render failed' not in caplog.text
-    assert observed == ['jazz' if commit else 'pop'] and len(published) == 1
-    tuned = store.rec_proposals.get_proposals('home_tuned')
-    assert tuned['built_at'] == 1000 and tuned['tuning'] == published[0][0]
-    assert [p['experiment_id'] for p in tuned['menus'][0]['protos']] == published[0][1]
+    assert observed == ['pop']
+    assert len(selected) == 4
+    assert sorted(re.findall(r'data-choice-option="([^"]+)"', response.text)) == sorted(selected)
+    identities = set(re.findall(r'data-choice-opportunity="([^"]+)"', response.text))
+    identity, = identities
+    assert store.rec_proposals.get_proposals(surface)['opportunity_id'] == identity
+    offer = choice_evidence.opportunity(store, identity)
+    assert sorted(option['id'] for option in offer['options']) == sorted(selected)
     assert rec_params.get_param(store, 'breadth_bias') == .5
     assert store.genres.feature_axes(['Owned Seed'])['Owned Seed'][0] == ('jazz' if commit else 'pop')
 
@@ -262,7 +253,7 @@ def test_taste_workflows_reuse_callers_uncommitted_view(installed):
 def test_facets_pin_membership_before_loading_track_metadata(installed, monkeypatch, commit):
     store, _ = installed
     _, playlist = _library(store)
-    seed = store.conn.execute("SELECT id FROM tracks WHERE video_id='seed'").fetchone()[0]
+    seed = store.conn.execute("SELECT id FROM catalog_tracks WHERE video_id='seed'").fetchone()[0]
     start, entered, release = (threading.Event() for _ in range(3))
 
     def writer():

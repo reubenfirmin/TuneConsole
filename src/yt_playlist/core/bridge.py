@@ -23,6 +23,14 @@ class BridgeError(Exception):
         self.outcome = outcome
 
 
+class PreparedNavigation(dict):
+    """A navigation with a local durability step before it can be queued."""
+    def __init__(self, payload, prepare, cancelled):
+        super().__init__(payload)
+        self.prepare = prepare
+        self.cancelled = cancelled
+
+
 class BridgeReply(tuple):
     """Keep the two-value transport API; only Retry-After may cross from headers."""
     def __new__(cls, status, text, headers=None):
@@ -165,6 +173,10 @@ class Bridge:
         with self._lock:
             return intent == self._playback_intent
 
+    def current_playback_intent(self):
+        with self._lock:
+            return self._playback_intent
+
     def send_control(self, payload: dict, *, intent=None) -> bool:
         """Fire-and-forget: push an unsolicited control frame to the extension (e.g. a navigate
         request). No response is expected, so nothing is registered in _pending."""
@@ -172,15 +184,35 @@ class Bridge:
             if payload.get("type") == "navigate":
                 if intent is None:
                     self._playback_intent += 1
+                    intent = self._playback_intent
                 elif intent != self._playback_intent:
                     return False
             if self._send is None:
-                raise BridgeError("no extension connected")
-            send, loop = self._send, self._loop
-            # Queue under the intent lock: an older handoff cannot pass its check,
-            # then submit after a newer navigation has already been queued.
-            asyncio.run_coroutine_threadsafe(send(payload), loop)
+                raise BridgeError("no extension connected", outcome='not-dispatched')
+            if not isinstance(payload, PreparedNavigation):
+                self._queue_control(payload)
+                return True
+            connection = self._conn_id
+
+        # Storage can block. Leave the response pump and newer Play intents free.
+        if not payload.prepare():
+            return False
+        with self._lock:
+            if intent != self._playback_intent or payload.cancelled():
+                return False
+            if self._conn_id != connection:
+                raise BridgeError('extension connection changed', outcome='not-dispatched')
+            self._queue_control(dict(payload))
             return True
+
+    def _queue_control(self, payload):
+        # Called with the intent lock so older handoffs cannot overtake newer Play.
+        sending = self._send(payload)
+        try:
+            asyncio.run_coroutine_threadsafe(sending, self._loop)
+        except RuntimeError:
+            sending.close()
+            raise BridgeError('player command could not be queued', outcome='not-dispatched') from None
 
     async def request_control(self, payload: dict, timeout: float = 5.0):
         """Await a control acknowledgement while leaving the WebSocket response pump free."""

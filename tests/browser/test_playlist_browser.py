@@ -19,6 +19,7 @@ def assert_header_layout(page):
       const style = getComputedStyle(hero);
       return {hero: hero.getBoundingClientRect().toJSON(), title: box('h1'),
         actions: box('.pl-actions'), tools: box('.head-tools'), meta: box('.pl-generated-meta'),
+        recovery: box('[data-generated-playback]'),
         left: parseFloat(style.paddingLeft), right: parseFloat(style.paddingRight),
         top: parseFloat(style.paddingTop), bottom: parseFloat(style.paddingBottom)};
     }''')
@@ -33,12 +34,16 @@ def assert_header_layout(page):
         assert meta['right'] < tools['left']
         assert meta['y'] + meta['height'] / 2 == pytest.approx(tools['y'] + tools['height'] / 2, abs=1)
         top_row_bottom = max(top_row_bottom, meta['bottom'])
-    assert title['y'] + title['height'] / 2 == pytest.approx((top_row_bottom + actions['top']) / 2, abs=1)
+    recovery = boxes['recovery']
+    if recovery:
+        assert title['bottom'] < recovery['top'] < recovery['bottom'] < actions['top']
+    center_row_bottom = recovery['top'] if recovery else actions['top']
+    assert title['y'] + title['height'] / 2 == pytest.approx((top_row_bottom + center_row_bottom) / 2, abs=1)
 
 
 @pytest.fixture
 def live_playlist_app(store):
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 2, "h", 1.0)
     tracks = [store.tracks.upsert_track(f"v{i}", title, artist, "Alb", 200, 1)
               for i, title, artist in [(0, "Song A", "Artist X"), (1, "Song B", "Artist Y")]]
@@ -51,6 +56,54 @@ def live_playlist_app(store):
         server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))
         with LiveServer(server, sockets=[sock]):
             yield {"base": f"http://127.0.0.1:{port}", "pid": pid, "store": store, "client": client}
+
+
+def test_playlist_columns_stay_at_the_viewport_edge_while_scrolling(live_playlist_app, page, tmp_path):
+    base, pid, store = (live_playlist_app[key] for key in ('base', 'pid', 'store'))
+    tracks = [store.tracks.upsert_track(f'pin{i}', f'Song {i:02}', 'Artist', 'Album', 200, 1)
+              for i in range(36)]
+    store.playlists.set_playlist_tracks(pid, tracks)
+    page.set_viewport_size({'width': 1000, 'height': 900})
+    page.goto(f'{base}/playlist/{pid}')
+    head = page.locator('.playlist-track-card thead')
+    first_row = page.locator('#playlist-track-body tr').first
+    expect(first_row).to_contain_text('Song 00')
+    for width in (1000, 1180, 1600):
+        page.set_viewport_size({'width': width, 'height': 900})
+        # A short fixed navigation rail takes up no space above the content.
+        page.locator('.topbar').evaluate('''bar => {
+          bar.style.bottom = getComputedStyle(bar).position === 'fixed' ? '8px' : '';
+          dispatchEvent(new Event('resize'));
+        }''')
+        at_start = head.bounding_box()
+        assert at_start['y'] + at_start['height'] <= first_row.bounding_box()['y'] + 1
+
+        for distance in (240, 530, 110):
+            page.evaluate('(y) => window.scrollTo({top: y, behavior: "instant"})', at_start['y'] + distance)
+            pinned = head.bounding_box()
+            top = page.evaluate('''() => Math.max(0, ...Array.from(document.querySelectorAll('.setup-status, .topbar'))
+              .filter(element => getComputedStyle(element).position === 'sticky' && element.offsetHeight)
+              .map(element => element.getBoundingClientRect().bottom))''')
+            assert pinned['y'] == pytest.approx(top, abs=1), width
+            assert pinned['height'] == pytest.approx(at_start['height'], abs=1)
+            song = head.get_by_role('button', name='Song', exact=True).bounding_box()
+            assert song['y'] < pinned['y'] + pinned['height']
+            assert song['x'] == pytest.approx(first_row.locator('td').nth(3).bounding_box()['x'], abs=1)
+            assert page.locator('#playlist-track-body').evaluate('''(body, bottom) => {
+              const button = Array.from(body.querySelectorAll('.rowmenu button')).find(button => {
+                const {top, bottom: end, width, height} = button.getBoundingClientRect();
+                return width && height && top > bottom + 2 && end < innerHeight - 100;
+              });
+              if (!button) return false;
+              const {x, y, width, height} = button.getBoundingClientRect();
+              return button.contains(document.elementFromPoint(x + width / 2, y + height / 2));
+            }''', pinned['y'] + pinned['height'])
+        page.screenshot(path=tmp_path / f'pinned-playlist-header-{width}.png')
+
+        page.evaluate('window.scrollTo({top: 0, behavior: "instant"})')
+        table = page.locator('.playlist-track-card table').bounding_box()
+        assert head.bounding_box()['y'] == pytest.approx(table['y'], abs=1)
+        assert head.bounding_box()['y'] > top
 
 
 @pytest.mark.parametrize('failed_first', [False])
@@ -214,8 +267,7 @@ def test_metadata_reads_cancel_on_navigation_and_resume_after_page_restore(
     assert page.evaluate('originalDock === document.querySelector(".global-now-playing")')
 
 
-@pytest.mark.parametrize('width', [1280, 1920])
-def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, page, width):
+def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, page):
     case = live_playlist_app
     store, provider, base = case['store'], case['client'], case['base']
     ordinary = store.playlists.get_playlist(case['pid'])
@@ -242,17 +294,23 @@ def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, p
 
     def loaded(response):
         name = response.url.split('?')[0].rsplit('/', 1)[-1]
-        if name in {'library-entities.css', 'library-playlists.js'}:
+        if name in {'library-entities.css', 'library-playlists.js', 'generated-playback.js'}:
             served[name] = response.body()
 
+    def check_header(label):
+        for width in (1920, 1280):
+            page.set_viewport_size({'width': width, 'height': 1000})
+            assert_header_layout(page)
+            page.screenshot(path=f'/tmp/tuneconsole-1205-{label}-{width}.png')
+
     page.on('response', loaded)
-    page.set_viewport_size({'width': width, 'height': 1000})
+    page.route('**/bridge/status', lambda route: route.fulfill(json={'connected': False}))
+    page.set_viewport_size({'width': 1280, 'height': 1000})
     page.goto(f'{base}/playlist/{ordinary.id}')
     heading = page.locator('#pl-title h1')
     expect(heading).to_have_text('Mix')
     expect(page.locator('.pl-generated-meta')).to_have_count(0)
-    assert_header_layout(page)
-    page.screenshot(path=f'/tmp/tuneconsole-1205-ordinary-{width}.png')
+    check_header('ordinary')
 
     page.goto(f'{base}/playlists')
     page.get_by_role('button', name='Generated playlists').click()
@@ -264,8 +322,30 @@ def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, p
     expect(page.locator('.pl-version')).to_have_text('Version 143')
     expect(page.locator('.pl-generated-date')).to_have_text('November 9, 2026')
     assert page.locator('.pl-generated-meta').bounding_box()['y'] < heading.bounding_box()['y']
+    check_header('generated')
+
+    page.evaluate('''() => {
+      sessionStorage.setItem('tc-generated-playback', JSON.stringify({
+        playlist: 'PLG', at: Date.now(), redirecting: true
+      }));
+      dispatchEvent(new Event('generated-playback-pending'));
+    }''')
+    page.evaluate('window.playbackStatus.refresh()')
+    recovery = page.locator('.release-hero [data-generated-playback]')
+    expect(recovery).to_contain_text('Your mix is saved. Playback has not started.')
+    link = recovery.get_by_role('link', name='open it on YouTube Music')
+    expect(link).to_have_attribute('href', 'https://music.youtube.com/watch?list=PLG')
+    check_header('recovery')
+    link.focus()
+    page.evaluate('window.playbackStatus.refresh()')
+    expect(link).to_be_focused()
+    for playlist, paused in [('OTHER', False), ('PLG', True), ('PLG', False)]:
+        page.evaluate('''([playlist, paused]) => dispatchEvent(new CustomEvent('bridge-status', {
+          detail: {connected: true, now_playing: {playlist_ytm_id: playlist, paused}}
+        }))''', [playlist, paused])
+        expect(recovery).to_have_count(1 if playlist != 'PLG' or paused else 0)
     assert_header_layout(page)
-    page.screenshot(path=f'/tmp/tuneconsole-1205-generated-{width}.png')
+
     heading.click()
     editor = page.locator('input.title-input')
     expect(editor).to_be_visible()
@@ -287,8 +367,7 @@ def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, p
     editor.press('Enter')
     expect(heading).to_have_text(custom)
     expect(page.locator('.pl-generated-meta')).to_have_count(0)
-    assert_header_layout(page)
-    page.screenshot(path=f'/tmp/tuneconsole-1205-renamed-{width}.png')
+    check_header('renamed')
     page.goto(f'{base}/playlists')
     page.get_by_role('link', name=custom, exact=True).click()
     expect(heading).to_have_text(custom)
@@ -299,5 +378,5 @@ def test_mix_name_matches_table_editor_and_ordinary_heading(live_playlist_app, p
     page.reload()
     expect(heading).to_have_text(custom)
     assert store.playlists.get_playlist(mix).title == custom
-    assert set(served) == {'library-entities.css', 'library-playlists.js'}
+    assert set(served) == {'library-entities.css', 'library-playlists.js', 'generated-playback.js'}
     assert all(content == (assets / name).read_bytes() for name, content in served.items())

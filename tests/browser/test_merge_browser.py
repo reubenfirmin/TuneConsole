@@ -26,7 +26,7 @@ def _free_port():
 def live_merge_app(monkeypatch, tmp_path, store):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     s = store
-    iid = s.accounts.upsert_account("Main", "c1", None, True)
+    iid = s.accounts.upsert_account("Main", None, True)
     a = s.playlists.upsert_playlist(iid, "PLA", "Mix A", 2, "h", 1.0)
     b = s.playlists.upsert_playlist(iid, "PLB", "Mix B", 1, "h", 1.0)
     t1 = s.tracks.upsert_track("v1", "Alpha Song", "X", None, None, 1)

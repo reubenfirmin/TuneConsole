@@ -46,6 +46,21 @@ def test_backup_read_keeps_validated_bytes_and_physical_age(tmp_path):
         files._read(filename, digest, size, surface='home_choice', chunk_key='0', with_age=True)
 
 
+def test_preview_parts_skip_digests_and_a_missing_part_makes_the_preview_unavailable(tmp_path, monkeypatch):
+    surface = 'adaptive_group_preview'
+    encoded = files.encode(surface, '0', '{}')
+    filename, _, size = files.publish(tmp_path, encoded)
+
+    def unexpected_hash(*args, **kwargs):
+        pytest.fail('Serving the adaptive group preview must not hash its files')
+
+    monkeypatch.setattr(fao.hashlib, 'sha256', unexpected_hash)
+    manifest = ('unused', 2, [('0', filename, 'unused', size)])
+    assert home_outputs.read_manifest(surface, *manifest) == '{}'
+    Path(filename).unlink()
+    assert home_outputs.read_manifest(surface, *manifest) is None
+
+
 @pytest.mark.parametrize('change', ['replace', 'tamper', 'delete'])
 def test_home_part_reuse_rechecks_the_physical_file(tmp_path, monkeypatch, change):
     encoded = files.encode('home_prepared', '0', 'A complete prepared menu')

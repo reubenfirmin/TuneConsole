@@ -30,6 +30,7 @@ from yt_playlist.core import db_diagnostics, db_snapshot
 from yt_playlist.core.db_snapshot import ReadSnapshot
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
+from yt_playlist.core.model_state import ArtistModelUpdate, RecordingModelUpdate
 from yt_playlist.rec import embedding_training as training, mode_surfaces, model_refresh, trend_rollups
 from yt_playlist.repos.rec_model import RecModelRepo
 from yt_playlist.util.matching import identity_key
@@ -114,8 +115,9 @@ def measure(path, *, full_generation=False, refresh=None, projection=None, inlin
         # Only the disposable backup is changed. Force all model spaces and modes
         # through production preparation/publication, including unchanged inputs.
         if full_generation:
-            for key in ("rec_fit_inputs", "rec_content_inputs", "rec_artist_fit_inputs", "rec_mode_fit_inputs"):
-                store.settings.delete_setting(key)
+            store.rec_model.publish_model_state(recording=RecordingModelUpdate(fit_fingerprint=None, input_fingerprint=None),
+                                                artist=ArtistModelUpdate(fit_fingerprint=None))
+            store.settings.delete_setting("rec_mode_fit_inputs")
         original_publish = ReadSnapshot.publish
 
         def publish(snapshot, target):
@@ -256,13 +258,13 @@ def _backup_library(source, destination):
     import shutil
     from types import SimpleNamespace
     from tests.prepared_fixture_support import PreparedTemplate, coordinates, roots
-    from yt_playlist.core.db_rebuild import job
+    from tests.file_custody_support import retained_readers
     with closing(sqlite3.connect(source.resolve().as_uri() + "?mode=ro", uri=True)) as reader:
         reader.row_factory = sqlite3.Row
         reader.execute('PRAGMA query_only=ON')
         # Pin a WAL read transaction: a busy live writer otherwise keeps restarting
         # SQLite's paged backup, which can take arbitrarily long to finish.
-        with job._files(reader):
+        with retained_readers(reader):
             reader.execute("BEGIN")
             source_schema = reader.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
             # Old action exports may retain an absolute human export name.
@@ -418,7 +420,7 @@ def test_compare_saved_library_publication_boundaries(tmp_path, monkeypatch, sce
             call(stages, "content_pair", lambda: store.rec_model.publish_content_generation(
                 vectors["rec_content_vectors"], vectors["rec_discovered_content_vectors"],
                 content["model"], content["revision"], content["inputs"],
-                store.settings.get_setting("rec_content_generation")))
+                store.rec_model.recording_state().generation))
             call(stages, "artist_collaborative", lambda: store.rec_model.replace_rec_artist_vectors(
                 vectors["rec_artist_vectors"]))
             call(stages, "artist_content", lambda: store.rec_model.replace_rec_artist_content_vectors(

@@ -78,7 +78,7 @@ def test_protocol_drains_admitted_http_before_storage_and_capture_close(
         observations['published'] = True
         return {'published': True}
 
-    server = uvicorn.Server(uvicorn.Config(app, log_level='warning',
+    server = uvicorn.Server(uvicorn.Config(app, log_config=None,
         ws='none', loop='asyncio', http='h11', lifespan='off'))
     live = None
     if phase == 'pace':

@@ -1,5 +1,5 @@
 """Recording aliases and their stored references, without document I/O."""
-from yt_playlist.core import album_tracklists, listening_summaries
+from yt_playlist.core import album_tracklists, legacy_mode_payloads, mood, recommendation_impressions
 from yt_playlist.core.catalog_keys import resolve_recording
 from yt_playlist.repos.base import Repo, synchronized, snapshot_read, lookup_read
 
@@ -16,32 +16,21 @@ class RecordingKeysRepo(Repo):
     def rekey_inputs(self, recording):
         return {'feedback': [dict(row) for row in self.conn.execute(
             'SELECT rowid,* FROM rec_feedback WHERE recording_id=?', (recording,))],
-            'modes': [dict(row) for row in self.conn.execute('SELECT mode_id,rep_keys FROM taste_modes')]}
+            'modes': [dict(row) for row in self.conn.execute(f'SELECT mode_id,rep_keys FROM {legacy_mode_payloads.VIEW}')]}
 
     @synchronized
     def apply_rekey(self, old_key, new_key, recording, feedback, modes, *, previous=None, association=None):
         subject = recording if previous is None else previous
         with self.conn.atomic(join=True):
-            if album_tracklists.available(self.conn):
-                album_tracklists.reassociate(self.conn, subject, recording)
-            else:
-                self.conn.execute('UPDATE album_tracks SET recording_id=? WHERE entry_id IS NULL AND recording_id=?',
-                                  (recording, subject))
-            for table in ('rec_served_impressions', 'rec_lane_impressions'):
-                self.conn.execute(f'UPDATE {table} SET identity_key=?,recording_id=? WHERE recording_id=?', (new_key, recording, subject))
-            typed = listening_summaries.available(self.conn)
+            album_tracklists.reassociate(self.conn, subject, recording)
+            self.conn.execute('UPDATE rec_served_impressions SET identity_key=?,recording_id=? WHERE recording_id=?',
+                              (new_key, recording, subject))
             for table in ('play_events', 'listening_observations'):
-                assignment = 'unresolved_subject_key=NULL' if typed else 'identity_key=?'
-                parameters = (recording, subject) if typed else (recording, new_key, subject)
-                self.conn.execute(f'UPDATE main.{table} SET recording_id=?,{assignment} WHERE recording_id=?', parameters)
+                self.conn.execute(f'UPDATE main.{table} SET recording_id=?,unresolved_subject_key=NULL '
+                                  'WHERE recording_id=?', (recording, subject))
             if previous is not None:
                 self.conn.execute('DELETE FROM rec_feedback WHERE recording_id=?', (previous,))
-                if not self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='rec_mood'").fetchone():
-                    self.conn.execute('INSERT INTO mood_event_recordings '
-                        'SELECT mood_event_id,?,position FROM mood_event_recordings WHERE recording_id=? '
-                        'ON CONFLICT(mood_event_id,recording_id) DO UPDATE SET position=min(position,excluded.position)',
-                        (recording, previous))
-                    self.conn.execute('DELETE FROM mood_event_recordings WHERE recording_id=?', (previous,))
+                mood.move_recording(self.conn, previous, recording)
             for row in feedback:
                 self.conn.execute('DELETE FROM rec_feedback WHERE rowid=?', (row['rowid'],))
                 self.conn.execute('INSERT INTO rec_feedback(surface,item_key,kind,reason,scope,until,created_at,'
@@ -51,11 +40,8 @@ class RecordingKeysRepo(Repo):
                     'WHERE excluded.created_at>=COALESCE(rec_feedback.created_at,0)',
                     (row['surface'], new_key, row['kind'], row['reason'], row['scope'], row['until'],
                      row['created_at'], row['target_type'], recording))
-            self.conn.execute('INSERT INTO rec_impressions SELECT surface,?,views,last_shown FROM rec_impressions '
-                'WHERE item_key=? ON CONFLICT(surface,item_key) DO UPDATE SET views=views+excluded.views,'
-                'last_shown=MAX(COALESCE(last_shown,0),COALESCE(excluded.last_shown,0))', (new_key, old_key))
-            self.conn.execute('DELETE FROM rec_impressions WHERE item_key=?', (old_key,))
-            self.conn.executemany('UPDATE taste_modes SET rep_keys=? WHERE mode_id=?', modes)
+            recommendation_impressions.rekey(self.conn, old_key, new_key)
+            self.conn.executemany('UPDATE taste_groups SET mode_rep_keys=? WHERE legacy_mode_id=?', modes)
             if previous is None:
                 self.conn.execute('UPDATE recordings SET identity_key=? WHERE id=?', (new_key, recording))
             from yt_playlist.core.association_work import complete
@@ -70,22 +56,11 @@ class RecordingKeysRepo(Repo):
 
     @synchronized
     def resolve_mood_seeds(self, key, recording, reason):
-        if self.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='rec_mood'").fetchone():
-            return
         with self.conn.atomic(join=True):
-            if recording is None:
-                self.conn.execute('UPDATE mood_event_unresolved_seeds SET reason=? WHERE legacy_key=?', (reason, key))
-            else:
-                self.conn.execute('INSERT INTO mood_event_recordings '
-                    'SELECT mood_event_id,?,position FROM mood_event_unresolved_seeds WHERE legacy_key=? '
-                    'ON CONFLICT(mood_event_id,recording_id) DO UPDATE SET position=min(position,excluded.position)',
-                    (recording, key))
-                self.conn.execute('DELETE FROM mood_event_unresolved_seeds WHERE legacy_key=?', (key,))
+            mood.resolve_key(self.conn, key, recording, reason)
 
     @lookup_read
     def listening_keys(self, recording):
-        if not listening_summaries.available(self.conn):
-            return []
         return [row[0] for row in self.conn.execute('SELECT alias FROM recording_aliases WHERE recording_id=? '
             'UNION SELECT identity_key FROM recordings WHERE id=?', (recording, recording))]
 
@@ -103,6 +78,6 @@ class RecordingKeysRepo(Repo):
 
     @synchronized
     def invalidate_catalog(self):
-        from yt_playlist.core.catalog import invalidate_derived
+        from yt_playlist.core import recommendation_invalidation
         with self.conn.atomic(join=True):
-            invalidate_derived(self.conn)
+            recommendation_invalidation.catalog_changed(self.conn)

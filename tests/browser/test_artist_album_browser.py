@@ -30,8 +30,8 @@ class AlbumClient(FakeClient):
 
 @pytest.fixture
 def live_artist_app(store):
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
-    other = store.accounts.upsert_account("Other", "cred", "other", False)
+    iid = store.accounts.upsert_account("Main", None, True)
+    other = store.accounts.upsert_account("Other", "other", False)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", 1, "h", 1.0)
     track = store.tracks.upsert_track("v1", "SongA", "Artist X", "The Album", 200, 1, album_browse_id="MPREb_x")
     store.playlists.set_playlist_tracks(pid, [track])

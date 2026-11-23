@@ -1,6 +1,7 @@
 """Temporary fully Themed backfill must outlive finite prepared Home lists (#286)."""
 import json
 import time
+from dataclasses import replace
 from tests.derived_rating_support import seed_dislike
 
 import numpy as np
@@ -15,6 +16,7 @@ from yt_playlist.core.db_writes import atomic_write
 from yt_playlist.util.matching import identity_key
 from tests.radio_candidate_support import catalog_inputs, intensity_inputs
 from tests.genre_catalog_support import bound_shipped_catalog
+from tests.group_support import publish, recordings
 from tests.recommendation_support import seed_publication_subjects
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer
 
@@ -60,22 +62,23 @@ def catalog_track(store, video, label="Downtempo", *, artist=None, duration=200,
     with atomic_write(store):
         seed_publication_subjects(store, [{'key': key, 'video_id': video, 'title': video,
             'artist': artist, 'genre': label, 'year': '2001', 'duration_s': duration}])
-        tid = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (video,)).fetchone()[0]
+        tid = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?', (video,)).fetchone()[0]
         store.artists.observe(tid, artist, source='fixture')
         if available is not None:
-            store.conn.execute('UPDATE youtube_items SET available=? WHERE video_id=?', (available, video))
+            store.conn.execute('UPDATE track_sources SET available=? WHERE video_id=?', (available, video))
     return dict(key=key, video_id=video, title=video, artist=artist, genre=label), tid
 
 
 def seed_catalog(store):
     from tests.recommendation_support import publish_bundles
     track, entry = catalog_track(store, "seed")
-    account = store.accounts.upsert_account('Main','credential',None,True)
+    account = store.accounts.upsert_account('Main',None,True)
     playlist = store.playlists.upsert_playlist(account,'LIBRARY','Library',1,'hash',1)
     store.playlists.set_playlist_tracks(playlist,[entry])
-    store.modes.replace_modes([dict(mode_id=1, label="Electronic", families=[["electro-synth", 1]],
-        centroid=np.array([1., 0.], dtype=np.float32), size=1, rep_keys=[track["key"]])], [], 1)
-    publish_bundles(store,{"1": {"wheelhouse": [track]}},now=1)
+    sample, = recordings([('Downtempo', 1, .2)])
+    head = publish(store, [replace(sample, key=track['key'])], now=1)
+    version, = store.taste_groups.leaf_members(head['generation']).values()
+    publish_bundles(store, {version: {'wheelhouse': [track]}}, now=1)
     return track
 
 
@@ -90,33 +93,80 @@ def candidates(store, **tuning):
     return result
 
 
-def test_prepared_pool_reuses_the_accounts_verified_playable_upload(store, seed):
-    owner = store.accounts.upsert_account('Main', 'credential', None, True)
+def test_tuning_finds_latest_live_radio_offer_by_recording_identity(store):
+    offered, _ = catalog_track(store, 'offered')
+    other, _ = catalog_track(store, 'other')
+    with store.conn:
+        store.conn.executemany(
+            'INSERT INTO rec_served_impressions '
+            '(request_id,surface,lane,identity_key,rank,model_version,provenance,served_at) '
+            "VALUES (?,?,'radio',?,1,'test',?,?)",
+            [(str(at), surface, key, json.dumps({'policy_kind': kind}), at)
+             for at, surface, key, kind in [
+                 (10, 'radio_seed', offered['key'], 'live'),
+                 (20, 'radio_directions', offered['key'], 'live'),
+                 (30, 'home', offered['key'], 'live'),
+                 (40, 'radio_directions', offered['key'], 'shadow'),
+                 (50, 'home', other['key'], 'live'),
+             ]])
+    statements = []
+    store.conn.set_trace_callback(statements.append)
+    try:
+        ranks = store.radio_catalog.tuning_ranks(1, 'radio', 'membership', fresh_surface='home',
+                                                pinned_genre='downtempo')
+    finally:
+        store.conn.set_trace_callback(None)
+    assert {row['key']: row['last_offered'] for row in ranks} == {offered['key']: 20, other['key']: None}
+    query, = (sql for sql in statements if 'offered AS' in sql)
+    plan = [row[3] for row in store.conn.execute('EXPLAIN QUERY PLAN ' + query)]
+    assert any('ix_rec_served_key_at' in step and 'identity_key=?' in step for step in plan), plan
+
+
+def test_prepared_pool_reuses_the_recordings_preferred_playable_upload(store, seed):
     actual = {**seed, 'video_id': 'playable', 'duration': 200}
     store.tracks.upsert_track('playable', seed['title'], seed['artist'], '', 200)
-    store.tracks.remember_playback_alternate(owner, {**seed, 'duration': 200}, actual,
+    store.tracks.remember_playback_upload({**seed, 'duration': 200}, actual,
         evidence={'playlist': 'PL', 'set_video_id': 'owned'}, now=1)
+    selected = store.radio_catalog.launch_seed(seed['video_id'])
+    assert (selected['video_id'], selected['duration']) == ('playable', 200)
     c = candidates(store)
-    assert [t['video_id'] for t in c._load('1')] == ['playable']
+    assert [t['video_id'] for t in c._load(c.cluster_for(seed))] == ['playable']
     assert c.seed_offer(1)[0]['video_id'] == 'playable'
+    store.tracks.upsert_track('playable', seed['title'], seed['artist'], '', 200, available=False)
+    assert store.radio_catalog.launch_seed(seed['video_id'])['video_id'] == seed['video_id']
 
 
 def test_album_links_survive_prepared_and_catalog_hydration_and_metadata_refresh(store, seed):
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET album='Seed album',album_browse_id='MPREseed' WHERE video_id='seed'")
+        store.conn.execute("UPDATE track_sources SET album='Seed album',album_browse_id='MPREseed' WHERE video_id='seed'")
     c = candidates(store)
-    prepared = c._load('1')[0]
+    prepared = c._load(c.cluster_for(seed))[0]
     assert (prepared['album'], prepared['album_browse_id']) == ('Seed album', 'MPREseed')
     fresh, _ = catalog_track(store, 'catalog-album')
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET album='Catalog album',album_browse_id='MPREcatalog' WHERE video_id='catalog-album'")
+        store.conn.execute("UPDATE track_sources SET album='Catalog album',album_browse_id='MPREcatalog' WHERE video_id='catalog-album'")
     picked = c.next_track([seed])
     assert picked['video_id'] == fresh['video_id']
     assert (picked['album'], picked['album_browse_id']) == ('Catalog album', 'MPREcatalog')
     with store.conn:
-        store.conn.execute("UPDATE youtube_items SET album='Enriched album',album_browse_id='MPREenriched' WHERE video_id='catalog-album'")
+        store.conn.execute("UPDATE track_sources SET album='Enriched album',album_browse_id='MPREenriched' WHERE video_id='catalog-album'")
     assert c.refresh_metadata([picked])
     assert (picked['album'], picked['album_browse_id']) == ('Enriched album', 'MPREenriched')
+
+
+def test_themed_catalog_refill_does_not_downrank_similar_recordings(store, seed):
+    first, _ = catalog_track(store, 'untuned-first')
+    second, _ = catalog_track(store, 'untuned-second')
+    disliked, _ = catalog_track(store, 'disliked-reference', label='Jungle')
+    baseline = candidates(store).next_track([seed])
+    alternate = second if baseline['key'] == first['key'] else first
+    # These candidates have content vectors but no collaborative or prepared ranks.
+    store.rec_model.replace_rec_content_vectors([
+        (key, np.array(vector, dtype=np.float32).tobytes())
+        for key, vector in [(disliked['key'], [1, 0]), (baseline['key'], [1, 0]),
+                            (alternate['key'], [0, 1])]])
+    seed_dislike(store, disliked['key'], until=200_000, now=1)
+    assert candidates(store).next_track([seed])['key'] == baseline['key']
 
 
 def test_themed_fills_all_four_streams_with_unprepared_catalog_tracks(store, seed, monkeypatch):

@@ -6,7 +6,7 @@ from tests.home_fixture_support import returning_listener
 
 
 def _app(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     # This consumer test starts after the listener earned Mix tapes and Discover.
     # Missing current output must still exercise the real busy/cache response.
     returning_listener(store, 'mixes')

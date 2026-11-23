@@ -40,11 +40,11 @@ class Proposal:
 
 
 class Backfill:
-    def __init__(self, repository, files, *, enabled, admission, writer, resolve, retain, release,
+    def __init__(self, repository, files, *, admission, writer, resolve, retain, release,
                  batch_rows=BATCH_ROWS, batch_bytes=BATCH_BYTES, batch_seconds=BATCH_SECONDS,
                  max_record_bytes=MAX_RECORD_BYTES):
         self.repository, self.files = repository, files
-        self.enabled, self.admission, self.writer = enabled, admission, writer
+        self.admission, self.writer = admission, writer
         self.resolve, self.retain, self.release = resolve, retain, release
         self.batch_rows, self.batch_bytes = batch_rows, batch_bytes
         self.batch_seconds, self.max_record_bytes = batch_seconds, max_record_bytes
@@ -89,8 +89,6 @@ class Backfill:
         surface, size, payload, at = row
         value = json.loads(payload)
         data = value if isinstance(value, dict) else {}
-        if surface.startswith('model_pair:') and isinstance(data.get('data'), dict):
-            data = data['data']
         contexts = {}
         for field in FIELDS:
             captured = data.get(field)
@@ -135,8 +133,6 @@ class Backfill:
             self.release('offer', operation)
 
     def step(self):
-        if not self.enabled():
-            return False
         if self.repository.roots_complete():
             return False
         with self.admission():

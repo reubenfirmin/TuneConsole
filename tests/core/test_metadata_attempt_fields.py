@@ -30,7 +30,12 @@ def test_retry_field_merge_cycle_reset_and_old_replay_do_not_roll_frontier_back(
         {'genre': 'Jazz', 'year': '2000', 'mb_release_ids': ['release']}, cycle=1, run_id='first', now=30))
     assert replay == (first, False)
     assert list(store.conn.iterdump()) == before
-    mutate(store, lambda: attempts.record(store.conn, entry, 'a', {}, cycle=2, run_id='new-cycle', now=40))
+    mutate(store, lambda: attempts.record(store.conn, entry, 'a', {'genre': 'Soul'},
+        cycle=1, run_id='completed', now=80))
+    assert attempts.state_fields(store.conn, recording, 'a') == {
+        'genre': 'Soul', 'year': '2000', 'mb_release_ids': ['release'], 'bpm': 120}
+    assert store.conn.execute('SELECT failures,retry_at FROM enrichment_provider_state').fetchone()[:] == (0, 0)
+    mutate(store, lambda: attempts.record(store.conn, entry, 'a', {}, cycle=2, run_id='new-cycle', now=90))
     assert attempts.state_fields(store.conn, recording, 'a') == {}
     assert store.conn.execute('SELECT failures FROM enrichment_provider_state').fetchone()[0] == 0
     assert attempts.completed_genres(store.conn, recording) == {'a': None}
@@ -48,8 +53,11 @@ def test_one_result_supplies_attempt_and_current_fields_without_copying_its_valu
         delivery_id=delivery, observations=observations, cycle=1, now=11))
     assert inserted
     assert store.conn.execute('SELECT count(*) FROM metadata_observations').fetchone()[0] == before
-    assert list(map(tuple, store.conn.execute('SELECT field,observation_id FROM provider_attempt_fields '
-        'WHERE attempt_id=? ORDER BY field', (attempt,)))) == [('bpm', observations['bpm']), ('genre', observations['genre']), ('isrc', None)]
+    attempt_links = store.conn.execute('SELECT field_links FROM provider_attempts WHERE id=?', (attempt,)).fetchone()[0]
+    assert json.loads(attempt_links) == {**observations, 'isrc': None}
+    state_links = store.conn.execute('SELECT field_links FROM enrichment_provider_state').fetchone()[0]
+    assert json.loads(state_links) == {field: [delivery, observation] for field, observation in json.loads(attempt_links).items()}
+    assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name IN ('provider_attempt_fields','provider_state_fields')").fetchone()
     assert attempts.completed_genres(store.conn, recording) == {'a': 'Jazz'}
     assert 'fields_json' not in {row[1] for row in store.conn.execute('PRAGMA table_info(provider_attempts)')}
 
@@ -63,7 +71,7 @@ def test_artist_credits_survive_retry_reuse_and_cycle_reset_with_original_delive
     delivery = store.conn.execute('SELECT delivery_id FROM provider_attempts WHERE id=?', (first,)).fetchone()[0]
     assert attempts.attempt_fields(store.conn, first)['artist_credits'] == credits
     assert attempts.state_fields(store.conn, recording, 'a')['artist_credits'] == credits
-    assert store.conn.execute('SELECT delivery_id FROM provider_state_credits').fetchone()[0] == delivery
+    assert store.conn.execute('SELECT credit_delivery_id FROM enrichment_provider_state').fetchone()[0] == delivery
     mutate(store, lambda: attempts.record(store.conn, entry, 'a', {'bpm': 120},
         cycle=1, retry=True, run_id='later', now=20))
     assert attempts.state_fields(store.conn, recording, 'a') == {
@@ -72,38 +80,14 @@ def test_artist_credits_survive_retry_reuse_and_cycle_reset_with_original_delive
         {'artist_credits': credits, 'genre': 'Jazz'}, cycle=1, run_id='credits', now=30)) == (first, False)
     mutate(store, lambda: attempts.record(store.conn, entry, 'b', {'artist_credits': credits},
         cycle=1, run_id='other', now=31))
-    wrong = store.conn.execute("SELECT delivery_id FROM provider_state_credits WHERE provider='b'").fetchone()[0]
+    wrong = store.conn.execute("SELECT credit_delivery_id FROM enrichment_provider_state WHERE provider='b'").fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='different subject or provider'):
         mutate(store, lambda: store.conn.execute(
-            "UPDATE provider_state_credits SET delivery_id=? WHERE provider='a'", (wrong,)))
+            "UPDATE enrichment_provider_state SET credit_delivery_id=? WHERE provider='a'", (wrong,)))
     mutate(store, lambda: attempts.record(store.conn, entry, 'a', {}, cycle=2, run_id='reset', now=40))
     assert attempts.state_fields(store.conn, recording, 'a') == {}
     assert attempts.attempt_fields(store.conn, first)['artist_credits'] == credits
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
-
-
-def test_provider_credit_upgrade_is_additive_and_preserves_applied_history(catalog):
-    from yt_playlist.core.migrations import regular
-
-    conn = catalog.conn
-    entry, _, _, _ = capture(catalog, fields={})
-    original, _ = mutate(catalog, lambda: attempts.record(conn, entry, 'a', {'bpm': 120},
-                                                        cycle=1, run_id='before-upgrade', now=10))
-    tables = ('schema_migrations', 'provider_attempts', 'provider_attempt_fields', 'provider_state_fields')
-    before = {table: list(map(tuple, conn.execute('SELECT * FROM ' + table))) for table in tables}
-    with conn:
-        conn.execute('DROP TABLE provider_state_credits')
-        conn.execute('DROP TABLE provider_attempt_credits')
-        conn.execute('DELETE FROM schema_changes WHERE version=57')
-    history = list(map(tuple, conn.execute('SELECT * FROM schema_changes')))
-    regular.migrate(conn, clock=lambda: 20)
-    assert {table: list(map(tuple, conn.execute('SELECT * FROM ' + table))) for table in tables} == before
-    assert list(map(tuple, conn.execute('SELECT * FROM schema_changes WHERE version<57'))) == history
-    assert attempts.attempt_fields(conn, original) == {'bpm': 120}
-    assert conn.execute('SELECT count(*) FROM provider_state_credits').fetchone()[0] == 0
-    mutate(catalog, lambda: attempts.record(conn, entry, 'a', {'artist_credits': []},
-                                           cycle=1, run_id='after-upgrade', now=21))
-    assert not conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
 def test_batched_import_selections_keep_overrides_and_roll_back_foreign_evidence(catalog):
@@ -147,7 +131,7 @@ def test_waterfall_accepts_artist_credits_and_reuses_the_completed_provider(cata
             registry={'musicbrainz': provider}, run_id=run, now_fn=lambda: 10, reuse_completed=reuse) == [entry], '\n'.join(
                 event.get('text', '') for event in events)
     assert provider.calls == ['Song']
-    assert store.conn.execute('SELECT count(*) FROM provider_attempt_credits').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM provider_attempts WHERE artist_credits=1').fetchone()[0] == 1
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -156,12 +140,12 @@ def test_provider_state_rejects_cross_provider_evidence_and_cannot_admit_a_bare_
     entry, recording, _, _ = capture(store, fields={})
     mutate(store, lambda: attempts.record(store.conn, entry, 'a', {'bpm': 120}, cycle=1, run_id='a', now=10))
     mutate(store, lambda: attempts.record(store.conn, entry, 'b', {'bpm': 130}, cycle=1, run_id='b', now=11))
-    wrong = store.conn.execute("SELECT delivery_id,observation_id FROM provider_state_fields WHERE provider='b'").fetchone()
+    wrong = store.conn.execute("SELECT field_links FROM enrichment_provider_state WHERE provider='b'").fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='different subject'):
-        mutate(store, lambda: store.conn.execute("UPDATE provider_state_fields SET delivery_id=?,observation_id=? WHERE provider='a'",
-                                                 tuple(wrong)))
+        mutate(store, lambda: store.conn.execute("UPDATE enrichment_provider_state SET field_links=? WHERE provider='a'", (wrong,)))
     with pytest.raises(sqlite3.IntegrityError):
-        mutate(store, lambda: store.conn.execute("UPDATE provider_state_fields SET observation_id=NULL WHERE provider='a'"))
+        mutate(store, lambda: store.conn.execute("UPDATE enrichment_provider_state SET field_links="
+            "json_set(field_links,'$.bpm[1]',NULL) WHERE provider='a'"))
     assert attempts.state_fields(store.conn, recording, 'a') == {'bpm': 120}
 
 
@@ -175,9 +159,9 @@ def test_result_consumers_share_exact_evidence_and_identifier_lineage(catalog):
     store.enrichment.apply_provider_fields(entry, 'a', fields, providers=('a',), delivery_id=delivery)
     mutate(store, lambda: attempts.record(store.conn, entry, 'a', fields, cycle=1, run_id='run',
                                           delivery_id=delivery, now=11))
-    selected = dict(store.conn.execute('SELECT field,observation_id FROM recording_metadata_selections '
+    selected = dict(store.conn.execute('SELECT field,observation_id FROM current_metadata_selections '
                                        'WHERE recording_id=?', (recording,)))
-    selected.update(store.conn.execute('SELECT field,observation_id FROM entry_metadata_selections '
+    selected.update(store.conn.execute('SELECT field,observation_id FROM current_metadata_selections '
                                        "WHERE entry_id=? AND field='mb_year'", (entry,)))
     assert selected == observations
     identifiers = list(map(tuple, store.conn.execute('SELECT value,delivery_id,observation_id '
@@ -221,12 +205,12 @@ def test_waterfall_links_conflicts_and_attempts_to_the_one_result_per_provider(c
     assert list(map(tuple, store.conn.execute("SELECT provider,count(*) FROM metadata_deliveries "
         "WHERE provider IN ('a','b') GROUP BY provider ORDER BY provider"))) == [('a', 1), ('b', 1)]
     candidates = list(map(tuple, store.conn.execute('SELECT d.provider,o.field,o.number_value,o.text_value '
-        'FROM metadata_conflict_candidates c JOIN metadata_observations o ON o.id=c.observation_id '
+        'FROM metadata_conflicts c,json_each(c.candidate_positions) p JOIN metadata_observations o ON o.id=CAST(p.key AS INTEGER) '
         'JOIN metadata_deliveries d ON d.id=o.delivery_id ORDER BY d.provider,o.field')))
     assert candidates == [('a', 'bpm', 120, None), ('a', 'genre', None, 'Jazz'),
                           ('b', 'bpm', 130, None), ('b', 'genre', None, 'Rock')]
-    assert not store.conn.execute('SELECT 1 FROM provider_attempts a JOIN provider_attempt_fields f ON f.attempt_id=a.id '
-        'JOIN metadata_observations o ON o.id=f.observation_id WHERE a.delivery_id<>o.delivery_id').fetchone()
+    assert not store.conn.execute('SELECT 1 FROM provider_attempts a,json_each(a.field_links) f '
+        'JOIN metadata_observations o ON o.id=f.atom WHERE a.delivery_id<>o.delivery_id').fetchone()
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()
 
 
@@ -263,12 +247,12 @@ def test_genre_refresh_selects_the_existing_alternative_observation(catalog):
         store.enrichment.apply_provider_fields(entry, provider, {'genre': genre}, providers=('a', 'b'), delivery_id=delivery)
         mutate(store, lambda: attempts.record(store.conn, entry, provider, {'genre': genre}, cycle=1,
                                               run_id=provider, delivery_id=delivery, now=at))
-    expected = store.conn.execute("SELECT observation_id FROM provider_state_fields WHERE recording_id=? AND provider='b' AND field='genre'",
+    expected = store.conn.execute("SELECT json_extract(field_links,'$.genre[1]') FROM enrichment_provider_state WHERE recording_id=? AND provider='b'",
                                   (recording,)).fetchone()[0]
     counts = tuple(store.conn.execute('SELECT (SELECT count(*) FROM metadata_observations),'
                                       '(SELECT count(*) FROM metadata_deliveries)').fetchone())
     mutate(store, lambda: metadata.refresh_genre(store.conn, recording, {'a': None, 'b': 'Rock'}, ('a', 'b')))
-    assert store.conn.execute("SELECT observation_id FROM recording_metadata_selections WHERE recording_id=? AND field='genre'",
+    assert store.conn.execute("SELECT observation_id FROM current_metadata_selections WHERE recording_id=? AND field='genre'",
                               (recording,)).fetchone()[0] == expected
     assert tuple(store.conn.execute('SELECT (SELECT count(*) FROM metadata_observations),'
                                      '(SELECT count(*) FROM metadata_deliveries)').fetchone()) == counts
@@ -289,15 +273,15 @@ def test_coverage_refresh_keeps_unchanged_provider_candidate_evidence(catalog):
     arguments = {'registry': {'a': a, 'b': b}}
     assert run_waterfall(store, [track], configuration, lambda _: None,
                          run_id='coverage-original', now_fn=lambda: 10, **arguments) == [entry]
-    original = list(map(tuple, store.conn.execute("SELECT o.field,o.id FROM metadata_conflict_candidates c "
-        "JOIN metadata_observations o ON o.id=c.observation_id JOIN metadata_deliveries d ON d.id=o.delivery_id "
+    original = list(map(tuple, store.conn.execute("SELECT o.field,o.id FROM metadata_conflicts c,json_each(c.candidate_positions) p "
+        "JOIN metadata_observations o ON o.id=CAST(p.key AS INTEGER) JOIN metadata_deliveries d ON d.id=o.delivery_id "
         "WHERE d.provider='a' ORDER BY o.field")))
     a_count = store.conn.execute("SELECT count(*) FROM metadata_deliveries WHERE provider='a'").fetchone()[0]
     assert run_waterfall(store, [{**track, 'provider_jobs': ['b']}], configuration, lambda _: None,
                          run_id='coverage-new-provider', now_fn=lambda: 20, **arguments) == [entry]
     assert a.calls == ['Song'] and b.calls == ['Song', 'Song']
     assert store.conn.execute("SELECT count(*) FROM metadata_deliveries WHERE provider='a'").fetchone()[0] == a_count
-    assert list(map(tuple, store.conn.execute("SELECT o.field,o.id FROM metadata_conflict_candidates c "
-        "JOIN metadata_observations o ON o.id=c.observation_id JOIN metadata_deliveries d ON d.id=o.delivery_id "
+    assert list(map(tuple, store.conn.execute("SELECT o.field,o.id FROM metadata_conflicts c,json_each(c.candidate_positions) p "
+        "JOIN metadata_observations o ON o.id=CAST(p.key AS INTEGER) JOIN metadata_deliveries d ON d.id=o.delivery_id "
         "WHERE d.provider='a' ORDER BY o.field"))) == original
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchone()

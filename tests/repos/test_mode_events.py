@@ -29,5 +29,5 @@ def test_picks_idempotent_and_counted_within_window(store):
     assert store.modes.pick_counts(since=150.0) == {2: 1}
     assert store.modes.pick_counts(before=200.0) == {1: 1}
     rows = store.conn.execute(
-        'SELECT membership_ref_id, mode_id, created_at FROM rec_mode_picks ORDER BY membership_ref_id')
+        'SELECT id,picked_mode_id,mode_picked_at FROM playlists WHERE mode_picked_at IS NOT NULL ORDER BY id')
     assert [tuple(row) for row in rows] == [(10, 1, 100.0), (11, 2, 200.0)]

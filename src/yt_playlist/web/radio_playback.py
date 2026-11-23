@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
-from yt_playlist.core.bridge import BridgeError
+from yt_playlist.core.bridge import BridgeError, PreparedNavigation
 
 
 class PlaybackUnavailable(Exception):
@@ -17,6 +17,7 @@ class PlaybackRequest:
     playlist: str
     video_ids: tuple[str, ...]
     refresh: bool = False
+    removed_current: tuple[str, int] | None = None
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,9 @@ class RadioPlayback:
 
     def observe(self, request: PlaybackRequest) -> PlaybackObservation:
         payload = {"playlist": request.playlist, "videoIds": list(request.video_ids), "refresh": request.refresh}
+        if request.removed_current is not None:
+            video, index = request.removed_current
+            payload['removedCurrent'] = {'videoId': video, 'afterIndex': index}
         try:
             status, body = asyncio.run(self.bridge.request_control({"type": "radio-session", **payload}))
             result = json.loads(body)
@@ -58,15 +62,25 @@ class RadioPlayback:
             raise PlaybackUnavailable(str(exc)) from exc
         return PlaybackObservation(result, time.monotonic())
 
-    def navigate(self, playlist: str, video: str, *, intent=None):
-        return self.bridge.send_control({"type": "navigate", "url":
-            "https://music.youtube.com/watch?" + urlencode({"v": video, "list": playlist})}, intent=intent)
+    def navigate(self, playlist: str, video: str, *, intent=None, launch_id=None,
+                 prepare=None, cancelled=None, failed_video=None):
+        frame = {"type": "navigate", "url":
+                 "https://music.youtube.com/watch?" + urlencode({"v": video, "list": playlist})}
+        if launch_id:
+            frame['radioLaunchId'] = launch_id
+        if failed_video is not None:
+            frame['radioRecovery'] = {'playlist': playlist, 'videoId': failed_video}
+        if prepare is not None:
+            frame = PreparedNavigation(frame, prepare, cancelled)
+        return self.bridge.send_control(frame, intent=intent)
 
-    def next(self, video: str, *, brand_id=None):
+    def next(self, video: str, *, brand_id=None, rating_advance=False):
         try:
             frame = {"type": "next", "videoId": video}
             if brand_id is not None:
                 frame['brandId'] = brand_id
+            if rating_advance:
+                frame['ratingAdvance'] = True
             status, body = asyncio.run(self.bridge.request_control(frame, timeout=10))
             return status, json.loads(body)
         except (BridgeError, ValueError) as exc:

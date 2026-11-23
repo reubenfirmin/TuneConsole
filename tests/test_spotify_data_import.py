@@ -49,7 +49,7 @@ def test_plain_audio_json_is_supported_and_bad_upload_is_rejected():
 
 
 def test_import_matches_library_is_idempotent_and_marks_event_source(store):
-    store.accounts.upsert_account("main", "bridge", None, True)
+    store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("yt-song", "Song", "Artist", None, 180)
     raw = json.dumps([_row(), _row("Unknown", "Elsewhere", "2024-01-02T10:00:00Z")])
     report = import_spotify_data(store, raw)
@@ -74,7 +74,7 @@ def test_local_export_uses_configured_main_identity_instead_of_live_player_accou
     rows = [('main', main_brand, True), ('other', other_brand, False)]
     if not main_first:
         rows.reverse()
-    ids = {label:store.accounts.upsert_account(label, 'bridge', brand, main)
+    ids = {label:store.accounts.upsert_account(label, brand, main)
            for label,brand,main in rows}
     store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
     report = import_spotify_data(store, json.dumps([_row()]))
@@ -84,7 +84,7 @@ def test_local_export_uses_configured_main_identity_instead_of_live_player_accou
 
 
 def test_local_export_works_when_the_only_identity_is_a_brand_account(store):
-    iid = store.accounts.upsert_account('My music', 'bridge', 'brand', True)
+    iid = store.accounts.upsert_account('My music', 'brand', True)
     store.tracks.upsert_track('yt', 'Song', 'Artist', None, 180)
     assert import_spotify_data(store, json.dumps([_row()]))['identity_id'] == iid
 
@@ -129,7 +129,7 @@ def test_conflicting_duplicates_are_order_independent_and_private_wins():
 
 
 def test_overlap_and_metadata_changes_use_persistent_spotify_occurrence_id(store):
-    iid = store.accounts.upsert_account('main','bridge',None,True)
+    iid = store.accounts.upsert_account('main',None,True)
     store.tracks.upsert_track('one','Song','Artist',None,180)
     store.tracks.upsert_track('two','Other title','Other artist',None,180)
     first = import_spotify_data(store,json.dumps([_row()]))

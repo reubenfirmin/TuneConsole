@@ -45,7 +45,7 @@ def test_actual_library_background_writers_remain_useful_and_serve_reads(request
     try:
         destination = copy_readonly_library(path, destination, monkeypatch, report)
         store = Store(destination)
-        store.init_schema(defer_metadata=True)
+        store.init_schema()
         before = {table: fingerprint(store.conn, table) for table in ('recordings', 'play_events')}
         history = list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
         radio = radio_storage.load(store.conn)
@@ -93,7 +93,7 @@ def test_actual_library_background_writers_remain_useful_and_serve_reads(request
         assert store.conn.execute('SELECT fingerprint FROM enrichment_provider_config WHERE provider=?',
                                   (provider,)).fetchone()[0] == configuration[provider]['fingerprint']
         report['provider_jobs'] = store.conn.execute(
-            'SELECT count(*) FROM enrichment_provider_jobs WHERE provider=?', (provider,)).fetchone()[0]
+            'SELECT count(*) FROM enrichment_provider_state WHERE provider=? AND queued=1', (provider,)).fetchone()[0]
         assert before == {table: fingerprint(store.conn, table) for table in before}
         assert history == list(map(tuple, store.conn.execute('SELECT * FROM schema_migrations ORDER BY version')))
         assert radio_storage.load(store.conn) == radio

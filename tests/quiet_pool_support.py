@@ -2,17 +2,20 @@
 import json
 import threading
 from contextlib import closing
-from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 
-from tests.home_fixture_support import prepared_client, publish_menu, returning_listener
+from fastapi.testclient import TestClient
+
+from tests.conftest import FakeClient
+from tests.home_fixture_support import returning_listener, seed_menu_cards
+from tests.recommendation_support import publish_bundles
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator
 from yt_playlist.core.store import Store
 from yt_playlist.controllers.pool_preparation import FreshAcquisition
-from yt_playlist.rec import (choice_evidence, home_cache, home_cards,
-                             measurement, mode_inputs, mode_surfaces, road_trip_candidates)
+from yt_playlist.rec import choice_evidence, measurement, mode_inputs, road_trip_candidates, taste_analysis
+from yt_playlist.web.app import create_app
 
 
 DIAGNOSTIC = 'internal-diagnostic-879-fresh: invalid stored ranking document'
@@ -36,28 +39,15 @@ def quiet_pool(quiet_schema, tmp_path, monkeypatch, home_routes_only, without_me
         store.conn.execute('PRAGMA wal_autocheckpoint=0')
         with mock_snapshot_coordinator(store, monkeypatch):
             selected = quiet_input(store)
-            assert {card['lane'] for card in selected} == {'comfort', 'wheelhouse', 'explore'}
-            tracks = [track for card in selected for track in card['tracks']]
-            assert len(tracks) == 3 and all(track['genre'] == 'Jazz' for track in tracks)
-            assert len(store.rec_query.tracks_by_keys([track['key'] for track in tracks])) == 3
+            tracks = [track for ranked in selected.values() for track in ranked]
+            assert len(tracks) == 12 and all(track['genre'] == 'Jazz' for track in tracks)
+            assert len(store.rec_query.tracks_by_keys([track['key'] for track in tracks])) == len(tracks)
             assert store.discovery.get_discovered_tracks() == []
-            assert store.recommendations.head('fresh') is None
+            assert not store.recommendations.page('fresh', 'all', 'fresh')
             yield from quiet_case(store, selected, monkeypatch)
 
 
 def quiet_case(store, selected, monkeypatch):
-    # Job recovery consumes a completed Jazz selection. Keep HomeCards itself
-    # real: it owns job/error slots and must preserve the actual saved request.
-    # Genre filtering and card framing have independent real owners in
-    # test_home_other_genres and test_journeys.
-    def assemble(owner, now, epoch, **parameters):
-        assert parameters.get('include_genres') == {'jazz'}
-        assert not parameters.get('avoid_genres')
-        return deepcopy(selected)
-
-    monkeypatch.setattr(mode_surfaces, 'assemble_cards', assemble)
-    monkeypatch.setattr(home_cards, '_complete_card',
-                        lambda owner, card, *args: deepcopy(card))
     # Retry/error state does not depend on refingerprinting every fitted model
     # or collecting old policies. Their real owners are test_measurement_isolation
     # and test_measurement_storage. Policy records and publication remain real.
@@ -70,7 +60,9 @@ def quiet_case(store, selected, monkeypatch):
     monkeypatch.setattr(choice_evidence, 'present', lambda *args, **kwargs: None)
     # Explicit Fresh jobs remain real. Periodic model/choice workers own
     # separate tests and must not replace this controlled listener's history.
-    http = prepared_client(store, background_work=False, backend_options={'use_uvloop': True})
+    account = store.accounts.get_accounts()[0].id
+    app = create_app(store, lambda: {account: FakeClient()}, now_fn=lambda: 1000, background_work=False)
+    http = TestClient(app, base_url='http://127.0.0.1', backend_options={'use_uvloop': True})
     ctx = http.app.state.ctx
     case = SimpleNamespace(store=store, http=http, ctx=ctx, fault=None, boundary='populate',
         calls=[], calculations=[], refreshes=[], schedules=[], entered=threading.Event(), release=threading.Event())
@@ -78,7 +70,6 @@ def quiet_case(store, selected, monkeypatch):
     local = threading.local()
     populate = FreshAcquisition.populate
     keys = store.discovery.discovered_track_keys
-    completed = home_cache.read(store, 'home_prepared')['menus'][0]['protos']
 
     def fail():
         case.entered.set()
@@ -106,10 +97,7 @@ def quiet_case(store, selected, monkeypatch):
             fail()
         # Error handling coordinates completed rankings; numerical rankers have
         # separate owners. Keep actual policy capture and SQL/file publication.
-        fields = ('key', 'video_id', 'title', 'artist', 'album', 'thumbnail', 'genre')
-        pools = {card['lane']: policies.stamp(
-                    [{field: track[field] for field in fields if field in track}
-                     for track in card['tracks']], card['lane']) for card in completed}
+        pools = {lane: policies.stamp(tracks, lane) for lane, tracks in selected.items()}
         pools['fresh'] = []
         return {'all': pools, '_meta': {'full_pools': True, 'comfort_pool': 0}}, []
 
@@ -135,9 +123,9 @@ def quiet_case(store, selected, monkeypatch):
 
 def quiet_input(source):
     returning_listener(source, 'mixes', now=1000)
-    source.accounts.upsert_account('main', 'cred', None, True)
-    # One subject per lane retains titles and genre selection without fitting
-    # lower recommendation models or copying a second prepared library.
-    payload = publish_menu(source, count=3, tracks_per_card=1, genre='Jazz', mode_ids=(0, 0, 0),
-        genre_options=[{'family': 'jazz', 'label': 'Jazz'}, {'family': 'techno', 'label': 'Techno'}])
-    return payload['menus'][0]['protos']
+    source.accounts.upsert_account('main', None, True)
+    cards = seed_menu_cards(source, count=3, tracks_per_card=4, genre='Jazz')
+    pools = {card['lane']: card['tracks'] for card in cards}
+    publish_bundles(source, {'all': pools}, 1000)
+    taste_analysis.prepare_library_summary(source, 1000)
+    return pools

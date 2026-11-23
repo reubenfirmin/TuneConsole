@@ -35,9 +35,9 @@ def test_checkpoint_waiting_for_writer_leaves_live_status_available(poc, monkeyp
     entered = threading.Event()
     save = controller.persistence.save
 
-    def saving(current):
+    def saving(current, *, store=None, now=None):
         entered.set()
-        return save(current)
+        return save(current, store=store, now=now)
 
     monkeypatch.setattr(controller.persistence, 'save', saving)
     app = FastAPI()
@@ -82,11 +82,11 @@ def test_waiting_checkpoint_cannot_replace_a_later_saved_owner(poc, monkeypatch,
     save = controller.persistence.save
     before = (list(remote.ids), list(remote.adds), list(remote.removes), list(frames))
 
-    def held(current):
+    def held(current, *, store=None, now=None):
         if threading.get_ident() == owner[0]:
             entered.set()
             assert release.wait(5), 'The test did not release the older save'
-        return save(current)
+        return save(current, store=store, now=now)
 
     def older_save():
         owner[0] = threading.get_ident()

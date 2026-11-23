@@ -8,15 +8,17 @@ from yt_playlist.controllers.choice_context import ChoiceContexts
 
 
 class ChoiceEvidence:
-    def __init__(self, ledger, *, publish_mix, retain, roots_enabled):
+    def __init__(self, ledger, *, publish_mix, retain):
         self.ledger, self.publish_mix = ledger, publish_mix
-        self.retain, self.roots_enabled = retain, roots_enabled
+        self.retain = retain
 
     def issue(self, record, context, *, reuse=False):
         identity = record['id']
         if reuse and self.ledger.get('opportunity', identity) is not None:
             return identity
-        context = mix_choices.context(ChoiceContexts(self.ledger).manifest(context), mixes=record['format'] == 'mixes')
+        contexts = ChoiceContexts(self.ledger)
+        context = (contexts.mix(context) if record['format'] == 'mixes'
+                   else mix_choices.context(contexts.manifest(context)))
         record = issued_record(record, context)
         if record['format'] == 'mixes':
             # Descriptor custody is acknowledged before its immutable event file.
@@ -36,8 +38,7 @@ class ChoiceEvidence:
                     opportunity_id, kind, record['option_id']):
                 raise ValueError('Response ID was reused for another action')
             return False
-        if self.roots_enabled():
-            self.retain('response', record['id'], {'artifact': offer['context']}, now)
+        self.retain('response', record['id'], {'artifact': offer['context']}, now)
         return self.ledger.put('response', record['id'], record)
 
 

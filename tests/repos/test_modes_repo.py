@@ -81,7 +81,7 @@ def test_failed_impression_batch_rolls_back_and_leaves_analytics_usable(tmp_path
             store.modes.log_impressions(1, [('wheelhouse', 1), ('explore', 999)], 10)
         assert store.conn.in_transaction == enclosing
         assert [tuple(row) for row in store.conn.execute(
-            'SELECT epoch,lane,mode_id FROM rec_mode_impressions')] == [(0, 'wheelhouse', 1)]
+            'SELECT epoch,lane,mode_id FROM taste_mode_offers')] == [(0, 'wheelhouse', 1)]
         if enclosing:
             assert store.conn.execute("SELECT value FROM settings WHERE key='outer-write'").fetchone()[0] == 'retained'
             # Successful logging must also remain inside the caller's transaction.

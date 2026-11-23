@@ -12,6 +12,50 @@ def prepare_home(store, now=1):
     prepare_current_home(store, now)
 
 
+def test_sync_loads_assets_before_opening_new_default_mix_tab(live_app, store, page, monkeypatch):
+    from playwright.sync_api import expect
+
+    from tests.onboarding_support import publish_live_mix_inputs, publish_personal_album
+    from yt_playlist.rec import account_growth
+
+    returning_listener(store, 'albums')
+    publish_personal_album(store, now=1, count=2)
+    store.settings.set_setting('last_sync_at', '1')
+    monkeypatch.setattr(account_growth.growth_readiness, 'discover', lambda *_: True)
+    active_job, errors = [], []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.route('https://**', lambda route: route.abort())
+    page.route('**/sync/active', lambda route: route.fulfill(json={'job_id': 91} if active_job else {}))
+
+    def complete_sync(route):
+        active_job.clear()
+        route.fulfill(content_type='text/event-stream', body='data: {"type":"end","outcome":"complete"}\n\n')
+
+    page.route('**/sync/events/91', complete_sync)
+
+    page.goto(live_app + '/')
+    expect(page.get_by_role('tab', name='Long play')).to_have_attribute('aria-selected', 'true')
+    expect(page.get_by_role('heading', name='Your next record')).to_be_visible()
+    board_style = page.locator('head link[href*="/static/home-board.css"]')
+    expect(board_style).to_have_count(0)
+    assert page.evaluate('typeof window.genHomeBusy') == 'undefined'
+
+    publish_live_mix_inputs(store, now=2)
+    store.settings.set_setting('last_sync_at', '2')
+    with page.expect_response(lambda response: response.request.headers.get('x-home-refresh') == 'sync'):
+        active_job.append(91)
+
+    expect(page.get_by_role('tab', name='Mix tapes')).to_have_attribute('aria-selected', 'true')
+    expect(page.get_by_role('region', name='Made for your library')).to_be_visible()
+    expect(board_style).to_have_count(1)
+    assert page.evaluate('typeof window.genHomeBusy') == 'function'
+    expect(page.locator('head link[href*="/static/home-discovery.css"]')).to_have_count(0)
+    page.get_by_role('button', name='Tune these mixes', exact=True).click()
+    expect(page.get_by_role('dialog', name='Tune these mixes', exact=True)).to_be_visible()
+    assert page.url == live_app + '/'
+    assert not errors
+
+
 @pytest.fixture(scope='module')
 def genre_home_template(_pristine_current_schema):
     from tests.test_home_other_genres import seed_genres
@@ -102,8 +146,8 @@ def test_expired_pool_stops_polling_and_refreshes_mixes(
         assert len({template.source._evidence_key, store._evidence_key, home_sibling_store._evidence_key}) == 3
         for current in (template.source, store, home_sibling_store):
             assert current.recommendations.heads() == template.source.recommendations.heads()
-            assert list(map(tuple, current.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id'))) == list(map(
-                tuple, template.source.conn.execute('SELECT * FROM taste_modes ORDER BY mode_id')))
+            assert list(map(tuple, current.conn.execute('SELECT * FROM legacy_mode_payloads ORDER BY mode_id'))) == list(map(
+                tuple, template.source.conn.execute('SELECT * FROM legacy_mode_payloads ORDER BY mode_id')))
             assert len(current.modes.list_modes(active_only=True)) == 6
             assert current.conn.execute('PRAGMA foreign_key_check').fetchall() == []
         assert set(template.bundles) == {'all', '_meta', '0', '1', '2', '3', '4', '5'}
@@ -315,9 +359,14 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(prepared_genre_app
     button.click()
     expect(panel.locator("dialog")).not_to_be_visible()
     during_swap = set(page.evaluate("window.shuffledGenresBeforeSettle"))
-    assert len(during_swap) == 4 and not before & during_swap
+    assert during_swap == {"ambient", "classical", "indie rock", "trance"} and not before & during_swap
     after = set(page.evaluate("homeOfferedGenres()"))
     assert after == during_swap
+    cards = page.locator("#home-mode-cards [data-recipe]")
+    expect(cards).to_have_count(4)
+    assert cards.evaluate_all("cards => cards.map(card => card.querySelectorAll('.gen-row[data-vid]').length)") == [12] * 4
+    themes = cards.evaluate_all("cards => cards.flatMap(card => JSON.parse(card.dataset.recipe).facets.genres)")
+    assert len(themes) == 4 and set(themes) == {"ambient", "classical", "rock-indie", "trance"}
     panel.locator(".fp-collapse").click()
     expect(button).to_be_enabled()
     expect(panel.locator("#home-theme-summary")).to_be_empty()
@@ -325,13 +374,24 @@ def test_genre_controls_make_mixes_in_the_tabbed_configurator(prepared_genre_app
     expect(button).to_be_hidden()
     expect(panel.locator(".fp-breadth-slider")).to_be_visible()
     preference_search = dialog.get_by_role("textbox", name="Find a genre to adjust")
+    preference_search.focus()
+    expect(preference_search).to_be_focused()
     preference_search.fill("jazz")
-    assert preference_search.evaluate("""el => {
+    expect(preference_search).to_have_value("jazz")
+    preference_style = preference_search.evaluate("""el => {
         const css = getComputedStyle(el);
-        return css.color === getComputedStyle(el.closest('dialog')).color
-            && css.outlineStyle === 'none' && css.boxShadow === 'none'
-            && css.borderTopWidth === '0px';
+        return {color: css.color, dialogColor: getComputedStyle(el.closest('dialog')).color,
+            outlineStyle: css.outlineStyle, boxShadow: css.boxShadow, borderTopWidth: css.borderTopWidth,
+            borderTopColor: css.borderTopColor};
     }""")
+    assert preference_style == {
+        "color": preference_style["dialogColor"],
+        "dialogColor": preference_style["dialogColor"],
+        "outlineStyle": "none",
+        "boxShadow": "none",
+        "borderTopWidth": "0px",
+        "borderTopColor": preference_style["dialogColor"],
+    }
     capture(page, path=tmp_path / "preferences-search.png")
     page.get_by_role("tab", name="Nerd out", exact=True).press("ArrowLeft")
     expect(page.get_by_role("tab", name="Genre focus", exact=True)).to_be_focused()

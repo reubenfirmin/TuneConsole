@@ -117,8 +117,8 @@
     <p class="generation-deck">These sliders only affect the familiar-music mix. It uses <strong>Deep cuts</strong> plus <strong>Taste matches</strong>, with <strong>Playlist neighbors</strong> standing in until taste matching is ready.</p>
     <dl class="generation-weight-guide">
       <div><dt>What the numbers mean</dt><dd><strong>×1 is the default.</strong> ×2 gives a source about twice as many spots on the shortlist as ×1. The final mix still follows genre choices and artist limits.</dd></div>
-      <div><dt>When you give feedback</dt><dd>“More” adds <strong>15%</strong> to a source’s weight. “Less”, dismissing, or snoozing takes <strong>15%</strong> off. “Already know it” just hides the track.</dd></div>
-      <div><dt>Saving and resetting</dt><dd>Sliders save when you let go. Changes apply at the next recommendation refresh. <strong>Reset takes a source back to ×1.</strong> Left alone, weights drift toward ×1: for example, ×2 becomes ×1.5 after <strong>{{ '%.0f'|format(viz.lane_weight_halflife_days) }} days</strong>, even with learning off. Older weights with no saved date stay put.</dd></div>
+      <div><dt>When you give feedback</dt><dd>“More” raises the source weight for the session. “Less”, dismissing, or snoozing lowers it. “Already know it” hides the track.</dd></div>
+      <div><dt>Session settings</dt><dd>Sliders affect the next picks as soon as you let go. <strong>Reset takes a source back to ×1.</strong> Session adjustments expire when listening ends.</dd></div>
     </dl>
     <div class="generation-source-weights">
       {% for lane in viz.lanes %}

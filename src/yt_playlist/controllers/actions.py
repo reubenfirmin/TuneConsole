@@ -6,7 +6,7 @@ from uuid import uuid4
 from yt_playlist.controllers.action_documents import ActionDocuments
 from yt_playlist.core import action_policy
 from yt_playlist.core.evidence_ledger import canonical
-from yt_playlist.util.action_kinds import UNDO
+from yt_playlist.util.action_kinds import COPY_PLAYLIST, UNDO
 
 
 class Actions:
@@ -14,9 +14,6 @@ class Actions:
         self.repository, self.files, self.backups = repository, files, backups
         self.documents = ActionDocuments(files)
         self.database_identity, self.guard = database_identity, guard
-
-    def has_durable_targets(self):
-        return self.repository.has_durable_targets()
 
     def undo_lock_key(self, action_id):
         return hashlib.sha256(f'{self.database_identity}:{action_id}'.encode()).hexdigest()
@@ -51,30 +48,39 @@ class Actions:
         return self._many(self.repository.pending_actions, kind)
 
     def get_pending_placements(self, membership_id):
-        if self.has_durable_targets():
-            return self._many(self.repository.pending_placements, membership_id)
-        return [action for action in self.get_pending_actions('add_tracks')
-                if json.loads(action.plan_json).get('playlist_id') == membership_id]
+        return self._many(self.repository.pending_placements, membership_id)
 
     def record_action(self, kind, params_json, plan_json, status, undo_json, created_at, *, idempotency_key=None, reviewed_draft=None):
         with self.guard(), self.files.retained():
-            if not self.has_durable_targets():
-                with self.repository.transaction():
-                    return self.repository.insert_action(kind, params_json, plan_json, status, undo_json, created_at)
             prepared = self._prepare_record(kind, params_json, plan_json, status, undo_json, created_at,
                                             idempotency_key=idempotency_key, reviewed_draft=reviewed_draft)
             return prepared['reuse'] if 'reuse' in prepared else self.repository.publish_record(prepared)
 
     def _publish(self, kind, owner, value, *, new_owner=False):
+        return self._write_reserved(*self._reserve(kind, owner, value, new_owner=new_owner))
+
+    def _reserve(self, kind, owner, value, *, new_owner=False):
         integrity = self.files.describe(kind, owner, value)
         file_id = self.repository.reserve_file(kind, owner, integrity, new_owner=new_owner)
+        return file_id, kind, owner, value, integrity
+
+    def _write_reserved(self, file_id, kind, owner, value, integrity):
         reference = self.files.publish_reserved(file_id, kind, owner, value, expected=integrity)
         return file_id, reference
 
-    def _prepare_record(self, kind, params_json, plan_json, status, undo_json, created_at, *, idempotency_key=None, reviewed_draft=None):
+    def reserve_radio_copy(self, params_json, undo_json, now):
+        return self._prepare_record(COPY_PLAYLIST, params_json, '{}', 'executed', undo_json, now, reserve=True)
+
+    def write_radio_copy(self, prepared):
+        return {**prepared, 'publication': self._write_reserved(*prepared['publication'])}
+
+    def _prepare_record(self, kind, params_json, plan_json, status, undo_json, created_at, *,
+                        idempotency_key=None, reviewed_draft=None, reserve=False):
         draft = kind == 'merge_draft'
         params, plan, undo = (action_policy.decode(params_json), action_policy.decode(plan_json, draft=draft),
                               action_policy.decode(undo_json, draft=draft))
+        if draft and (plan is None or status != 'draft'):
+            raise ValueError('A merge draft requires a signature and draft status')
         intent = {'kind': kind, 'params': params, 'plan': plan}
         if reviewed_draft is not None:
             intent['reviewed_draft'] = list(reviewed_draft)
@@ -90,23 +96,25 @@ class Actions:
         reviewed = None
         if reviewed_draft is not None:
             reviewed = self.repository.reviewed_draft(*reviewed_draft)
+            selection = self.documents.draft(reviewed)
             captured['reviewed_draft'] = {'id': reviewed['id'], 'revision': reviewed['revision'],
-                'signature': reviewed['signature'],
-                'params': self.documents.read(reviewed, 'action-draft', reviewed['id'])}
+                'signature': reviewed['draft_signature'],
+                'params': selection['params']}
         undo_of = params.get('undid') if kind == UNDO and isinstance(params, dict) else None
         if undo_of is not None and self.repository.header(undo_of) is None:
             raise ValueError('Undo history refers to a missing action')
         # Validate the full progress shape before reserving or writing any body.
         progress = None if draft else action_policy.progress(kind, params, plan, undo, status)
         key = idempotency_key or 'action:' + uuid4().hex
-        publication = self._publish('action', identity, captured, new_owner=True)
+        publish = self._reserve if reserve else self._publish
+        publication = publish('action-draft' if draft else 'action', identity,
+                              {'params': params_json, 'undo': undo_json} if draft else captured, new_owner=True)
         header = dict(id=identity, idempotency_key=key)
         return dict(identity=identity, revision=revision, kind=kind, status=status, created_at=created_at,
             idempotency_key=key, intent_digest=digest, undo_of=undo_of,
             mode=params.get('mode') if kind == 'plan' and isinstance(params, dict) else None,
             publication=publication, reviewed=reviewed, signature=plan if draft else None,
-            draft=self._publish('action-draft', identity, params_json) if draft else None,
-            progress=None if draft else self._prepare_progress(identity, progress, header, None))
+            progress=(progress if reserve else None if draft else self._prepare_progress(identity, progress, header, None)))
 
     def _prepare_progress(self, identity, prepared, header, now):
         backups = self.repository.backups(identity)
@@ -117,13 +125,10 @@ class Actions:
             if any(filename in (row['filename'], row['retained_filename']) for row in backups):
                 continue
             reference, _ = self.backups.reference(filename)
-            publication, retained = None, None
+            retained = None
             if reference[3] == 'verified':
-                integrity = reference[1:3]
-                file_id = self.repository.reserve_backup_file(identity, position, integrity)
-                durable = self.backups.retain_reserved(file_id, filename, expected=integrity)
-                publication, retained = (file_id, durable), durable[0]
-            added_backups.append((position, reference, publication))
+                retained = self.backups.retain(filename, expected=reference[1:3])
+            added_backups.append((position, reference, retained))
             backups.append(dict(position=position, filename=filename, retained_filename=retained,
                                 digest=reference[1], bytes=reference[2], availability=reference[3]))
             position += 1
@@ -140,15 +145,10 @@ class Actions:
             steps.append(dict(id=step, prior=prior, position=position, operation=operation, value=value,
                               target=target_key, backup=reference, publication=evidence,
                               state=action_policy.step_state(header, operation, value)))
-        return dict(previous_backups=previous_backups, backups=added_backups, targets=targets,
-                    placement=prepared['placement'], resolutions=prepared['resolutions'], steps=steps, now=now)
+        return dict(previous_backups=previous_backups, backups=added_backups, targets=targets, steps=steps, now=now)
 
     def update_action(self, action_id, status, executed_at, undo_json=None, *, params_json=None, expected_revision=None, target_claims=()):
         with self.guard(), self.files.retained():
-            if not self.has_durable_targets():
-                with self.repository.transaction():
-                    self.repository.update_action(action_id, status, executed_at, undo=undo_json, params=params_json)
-                return
             prepared = self._prepare_update(action_id, status, executed_at, undo_json, params_json,
                                             expected_revision, target_claims)
             self.repository.publish_update(prepared)
@@ -175,15 +175,13 @@ class Actions:
 
     def update_draft(self, action_id, params_json):
         with self.guard(), self.files.retained():
-            if not self.has_durable_targets():
-                with self.repository.transaction():
-                    self.repository.update_draft(action_id, params_json, None, None, None)
-                return
             action_policy.decode(params_json)
             row = self.repository.header(action_id)
             if row is None or row['status'] != 'draft' or row['kind'] != 'merge_draft':
                 raise ValueError('Merge draft is no longer editable')
-            publication = self._publish('action-draft', action_id, params_json)
+            draft = self.documents.draft(row)
+            draft['params'] = params_json
+            publication = self._publish('action-draft', action_id, draft)
             self.repository.publish_draft(action_id, row['revision'], uuid4().hex, publication)
 
     def delete_action(self, action_id):
@@ -194,44 +192,25 @@ class Actions:
             action = self.get_action(action_id)
             action_policy.require_undoable(action)
             with self.repository.transaction():
-                self.repository.claim_execution(action_id, 'undoing', now, previous_status=action.status,
+                self.repository.claim_execution(action_id, 'undoing', now,
                     previous_revision=action.revision, token=uuid4().hex, revision=uuid4().hex)
-            return self.get_action(action_id) if self.has_durable_targets() else action
+            return self.get_action(action_id)
 
     def _require_targets(self, claims):
         for target, token in claims:
             self.repository.require_claim(target, token)
 
-    def _require_undo(self, action_id, token):
-        if self.has_durable_targets():
-            self.repository.require_execution(action_id, token)
-        else:
-            row = self.repository.header(action_id)
-            if row is None or row['status'] != 'undoing':
-                raise ValueError('Undo no longer owns this action. Reload the Action Log.')
-
     def save_undo_progress(self, action_id, undo, now, *, failed=False, claim_token=None, target_claims=()):
         with self.guard(), self.files.retained():
             status = 'undo_failed' if failed else 'undoing'
-            if not self.has_durable_targets():
-                with self.repository.transaction():
-                    self._require_undo(action_id, claim_token)
-                    self.update_action(action_id, status, now, undo_json=json.dumps(undo))
-                return
-            self._require_undo(action_id, claim_token)
+            self.repository.require_execution(action_id, claim_token)
             prepared = self._prepare_update(action_id, status, now, json.dumps(undo), target_claims=target_claims)
             self.repository.publish_update(prepared, execution_token=claim_token, require_execution=True)
 
     def finish_undo(self, action_id, undo, now, *, claim_token=None, target_claims=()):
         with self.guard(), self.files.retained():
             params, key = json.dumps({'undid': action_id}), 'undo:' + str(action_id)
-            if not self.has_durable_targets():
-                with self.repository.transaction():
-                    self._require_undo(action_id, claim_token)
-                    self.update_action(action_id, 'undone', now, undo_json=json.dumps(undo))
-                    self.record_action(UNDO, params, '{}', 'executed', '{}', now, idempotency_key=key)
-                return
-            self._require_undo(action_id, claim_token)
+            self.repository.require_execution(action_id, claim_token)
             prepared = self._prepare_update(action_id, 'undone', now, json.dumps(undo), target_claims=target_claims)
             history = self._prepare_record(UNDO, params, '{}', 'executed', '{}', now, idempotency_key=key)
             self.repository.finish_undo(prepared, history, claim_token)
@@ -240,17 +219,16 @@ class Actions:
         target, prior, uncertain = self.repository.claim_facts(identity, action_policy.FINISHED)
         if target is None or target['account_id'] is None or target['playlist_scope_id'] is None:
             raise ValueError('Reconnect and resolve this historical action target before recovery')
-        if prior and prior['lease_until'] > now:
+        if prior and prior['claim_until'] > now:
             raise ValueError('Another action worker owns this playlist target')
         if uncertain is not None and (not reconcile or uncertain != target['action_id']):
             raise ValueError('The prior remote outcome is unknown; reconcile it before another write')
         token = uuid4().hex
-        self.repository.claim_target(identity, target['account_id'], target['playlist_scope_id'], token, now + action_policy.CLAIM_SECONDS)
+        self.repository.claim_target(identity, token, now + action_policy.CLAIM_SECONDS,
+                                     previous=prior['id'] if prior else None)
         return token
 
     def claim_undo_targets(self, action_id, execution_token, now):
-        if not self.has_durable_targets():
-            return []
         with self.guard(), self.repository.transaction():
             self.repository.require_execution(action_id, execution_token)
             claims, scopes = [], set()
@@ -262,21 +240,17 @@ class Actions:
             return claims
 
     def target_lock_keys(self, action_id, role):
-        return self.repository.target_lock_keys(action_id, role) if self.has_durable_targets() else []
+        return self.repository.target_lock_keys(action_id, role)
 
     def require_known_remote_outcome(self, account, remote):
         if self.repository.uncertain_owner(account, remote, action_policy.FINISHED) is not None:
             raise ValueError('The prior remote outcome is unknown; reconcile it before another write')
 
     def claim_forward_targets(self, action_id, role, now):
-        if not self.has_durable_targets():
-            return []
         with self.guard(), self.repository.transaction():
             return [(target['id'], self._claim_target(target['id'], now)) for target in self.repository.targets(action_id, role)]
 
     def begin_deletion(self, action_id, account, remote, now, *, reconcile=False):
-        if not self.has_durable_targets():
-            return None
         with self.guard(), self.files.retained():
             step = self.repository.deletion_step(action_id, account, remote)
             if step is None:

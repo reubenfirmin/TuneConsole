@@ -5,7 +5,6 @@ import threading
 import uuid
 
 from yt_playlist.core.activity import WorkBudgetExceeded, WorkClosing
-from yt_playlist.core.db_space import StorageCompacting
 
 
 class PendingRoots:
@@ -39,7 +38,7 @@ class PendingRoots:
                     with self.admission(blocking=False):
                         self.release(identity)
                         retired = True
-                except (WorkBudgetExceeded, WorkClosing, StorageCompacting):
+                except (WorkBudgetExceeded, WorkClosing):
                     pass  # An unlocked marker lets a later bounded reaper retire the root.
                 except sqlite3.OperationalError as error:
                     if getattr(error, 'sqlite_errorcode', 0) & 255 not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):

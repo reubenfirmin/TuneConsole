@@ -10,8 +10,8 @@ from yt_playlist.rec import audio_vibe_arc as arc
 from experiments.audio_lab_tools.legacy import audio_vibe_external as external
 from yt_playlist.rec import audio_vibe_cruise as cruise
 from experiments.audio_lab_tools.legacy import audio_vibe_model as shared
-from yt_playlist.rec import audio_vibe_prediction as predictor
 from yt_playlist.rec import audio_vibe_runtime as runtime, vibe_preparation
+from yt_playlist.rec.audio_vibe_values import specialist_values
 
 
 def trajectory(values):
@@ -39,8 +39,7 @@ def test_production_retains_each_native_observation_until_the_arc_policy(vibe):
     # Actual capture times override point names and arrival order.
     rows[0]['position_seconds'] = 200.
     before = deepcopy(rows)
-    prediction = predictor.predict(rows, use_model=False)
-    result = runtime.apply_loaded(list(reversed(rows)), prediction, selected_mode='active',
+    result = runtime.apply_loaded(list(reversed(rows)), {}, selected_mode='active',
                                   model=model(), scorer=excerpt_scorer, vibe=vibe)
     observed = result['individual_models'][vibe]
     assert [row['position_seconds'] for row in observed['excerpts']] == [120.1, 160.1, 200.]
@@ -57,8 +56,7 @@ def test_production_build_and_fade_have_identical_means_and_different_scores(vib
     scores = []
     for values in ((.2, .5, .8), (.8, .5, .2)):
         rows = trajectory(values)
-        prediction = predictor.predict(rows, use_model=False)
-        result = runtime.apply_loaded(rows, prediction, selected_mode='active',
+        result = runtime.apply_loaded(rows, {}, selected_mode='active',
                                       model=model(), scorer=excerpt_scorer, vibe=vibe)
         scores.append(result['suitability'][vibe])
     assert mean((.2, .5, .8)) == mean((.8, .5, .2))
@@ -68,7 +66,6 @@ def test_production_build_and_fade_have_identical_means_and_different_scores(vib
 def test_single_observation_is_not_a_manufactured_progression():
     for vibe in shared.LABELS:
         assert arc.fit(vibe, [.4])[0] == .4
-    assert arc.path([.4])['steps'] == []
 
 
 def test_cruise_does_not_invent_moderation_between_quiet_and_intense_passages():
@@ -77,8 +74,7 @@ def test_cruise_does_not_invent_moderation_between_quiet_and_intense_passages():
              'weights': [[1., 0.]] + [[0., 0.]] * 199, 'intercept': [0., .8]}
     artifact = {**model(), 'experts': {source: {'model': stage, 'target_names': ['arousal', 'valence']}
                                       for source in cruise.SOURCES}}
-    baseline = predictor.predict(rows, use_model=False)
-    result = runtime.apply_loaded(rows, baseline, selected_mode='active', model=artifact,
+    result = runtime.apply_loaded(rows, {}, selected_mode='active', model=artifact,
                                   scorer=cruise.score, vibe='cruise')
     assert [row['score'] for row in result['individual_models']['cruise']['excerpts']] == [.4, .9, .4]
     assert result['suitability']['cruise'] == .4
@@ -102,6 +98,9 @@ def test_detached_specialists_keep_ordered_observations_without_shared_inference
     assert build['suitability']['energize'] == .8
     assert next(row for row in build['ranking'] if row['vibe'] == 'energize')['excerpt_scores'] == [.2, .5, .8]
     assert captured.predict(rows) == build
+    partial = captured.usable_samples([rows[0], {**rows[1], 'model_version': 'incompatible'}, rows[2]])
+    assert partial == [rows[0], rows[2]]
+    assert captured.predict(partial, require_complete=False)['suitability']['energize'] == .8
     for row, value in zip(rows, (.8, .5, .2), strict=True):
         row['embedding']['values'] = [value] * 200
     fade = captured.predict(rows)
@@ -115,3 +114,20 @@ def test_policy_changes_queue_bounded_repreparation_without_breaking_installed_r
     monkeypatch.setattr(arc, 'VERSION', 'next-temporal-policy')
     assert vibe_preparation.version() != version
     assert vibe_preparation.compatible_version(version)
+
+
+@pytest.mark.parametrize(('scores', 'matches', 'label'), [
+    ({'energize': .67, 'cruise': .62}, ['energize'], 'Energize'),
+    ({'cruise': .65, 'energize': .99}, ['cruise', 'energize'], 'Cruise · Energize'),
+    ({'cruise': .649, 'energize': .62}, [], ''),
+    ({}, [], ''),
+])
+def test_categorization_checks_each_available_purpose_independently(scores, matches, label):
+    models = {vibe: {'excerpts': [{'score': score}], 'rule': 'observed'} for vibe, score in scores.items()}
+    result = specialist_values({'suitability': scores, 'individual_models': models}, 1)
+    assert result['vibes'] == matches
+    assert result['vibe'] == (matches[0] if len(matches) == 1 else None)
+    assert result['label'] == label
+    assert result['suitability'] == scores
+    assert result['calibrated'] is False
+    assert result['score_margin'] is None

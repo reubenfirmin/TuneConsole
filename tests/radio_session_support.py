@@ -114,6 +114,11 @@ class Playlist:
         self.fail_read = False
         self.after_add = lambda: None
 
+    def create_playlist(self, title, description, *, video_ids=None):
+        self.creations.append(title)
+        self.ids = list(video_ids or ())
+        return 'PLSESSION'
+
     def get_playlist(self, playlist, limit=None):
         assert playlist == "PLSESSION"
         if self.fail_read:
@@ -157,8 +162,8 @@ def radio_controller(monkeypatch, store, pool):
     try:
         identity = store.accounts.get_master_account().id
     except ValueError:
-        identity = store.accounts.upsert_account("main", "ref", None, True)
-    from yt_playlist.core.bridge import Bridge
+        identity = store.accounts.upsert_account("main", None, True)
+    from yt_playlist.core.bridge import Bridge, PreparedNavigation
     ownership = Bridge()
 
     def send_control(frame, *, intent=None):
@@ -166,24 +171,34 @@ def radio_controller(monkeypatch, store, pool):
             return False
         if intent is None and frame.get('type') == 'navigate':
             ownership.begin_playback_intent()
-        frames.append(frame)
+        if isinstance(frame, PreparedNavigation):
+            if (not frame.prepare() or frame.cancelled()
+                    or not ownership.playback_intent_current(intent)):
+                return False
+        frames.append(dict(frame))
         return True
 
     bridge = SimpleNamespace(connected=True, now_playing=None, now_playing_seen_at=None,
                              begin_playback_intent=ownership.begin_playback_intent,
+                             playback_intent_current=ownership.playback_intent_current,
+                             current_playback_intent=ownership.current_playback_intent,
                              send_control=send_control, requests=[], native_ids=[], auto_adopt=True)
 
     async def request_control(frame):
         bridge.requests.append(frame)
         player = dict(bridge.now_playing or {})
-        if frame["refresh"] and bridge.auto_adopt:
-            bridge.native_ids = list(remote.ids)
         video = player.get("video_id")
         expected = frame["videoIds"]
+        hint = frame.get("removedCurrent") or {}
+        retired = (video == hint.get("videoId") and video not in expected and video in bridge.native_ids
+                   and player.get("playlist_ytm_id") == frame["playlist"])
+        index = hint["afterIndex"] if retired else expected.index(video) if video in expected else None
+        if frame["refresh"] and bridge.auto_adopt:
+            bridge.native_ids = [video, *remote.ids[index + 1:]] if retired else list(remote.ids)
         native = bridge.native_ids
         synced = (player.get("playlist_ytm_id") == frame["playlist"]
-                  and video in expected and video in native
-                  and expected[expected.index(video) + 1:] == native[native.index(video) + 1:])
+                  and index is not None and video in native
+                  and expected[index + 1:] == native[native.index(video) + 1:])
         return 200, json.dumps({"ok": True, "player": player, "playback_synced": synced,
             "native": {"available": True, "videoIds": native},
             "refresh": "requested" if frame["refresh"] else "not requested"})
@@ -195,14 +210,13 @@ def radio_controller(monkeypatch, store, pool):
     ctx.radio = controller
     monkeypatch.setattr(controller.work, "start_thread", lambda *args, **kw: workers.append((args, kw)))
     class Candidates:
-        def __init__(self, store, now, tuning=None, *, now_source=None, comparison=None):
+        def __init__(self, store, now, tuning=None, *, now_source=None, initial_queue=False):
             self.store = store
             self.prepared = None
-            self.comparison = getattr(now_source, 'comparison', comparison)
             self.tuning = radio_session.radio_tuning.controls(tuning or radio_session.radio_tuning.DEFAULTS)
             self.now_sampled_at = now
             self.eligibility_at = now
-            self.encoding_model = store.settings.get_setting("rec_content_model")
+            self.encoding_model = store.rec_model.recording_encoder()
             self.now_posterior, self.now_gain = {}, 0.
             self.by_video = {t["video_id"]: t for t in pool}
             self.by_key = {t["key"]: t for t in pool}
@@ -242,17 +256,17 @@ def radio_controller(monkeypatch, store, pool):
             return pool[:n]
 
         def next_track(self, history, *, target=None, feedback=None, excluded=(), current=None,
-                       destination=(), recipe=None, policy='upload'):
+                       destination=(), recipe=None, policy='upload', mix_position=None, reserved=()):
             used = {t["video_id"] for t in history} | set(excluded)
             ordered = list(reversed(pool)) if self.tuning["comfort"] < .5 else pool
             return next((t for t in ordered if t["video_id"] not in used and t['key'] not in self.blocked), None)
 
-        def direction_anchor(self, history, anchors, *, excluded=(), feedback=None):
+        def direction_anchor(self, history, anchors, *, excluded=(), feedback=None, mix_position=None):
             return self.next_track(history + anchors, excluded=excluded)
 
     monkeypatch.setattr(radio_session, "RadioCandidates", Candidates)
 
-    def create(store, title, tracks, client, now, identity, *, recipe=None):
+    def create(store, title, tracks, client, now, identity, *, recipe=None, radio_readback=None, **options):
         assert title.startswith("Radio Session · ")
         assert identity == store.accounts.get_master_account().id
         remote.ids = [t["video_id"] for t in tracks]
@@ -261,7 +275,10 @@ def radio_controller(monkeypatch, store, pool):
         pid = store.playlists.upsert_playlist(identity, "PLSESSION", title, len(tracks), "", now)
         track_ids = store.tracks.track_ids_for_videos(remote.ids)
         store.playlists.set_playlist_tracks(pid, [track_ids[video] for video in remote.ids])
-        return {"new_ytm": "PLSESSION", "pid": pid, "added": len(tracks)}
+        store.radio_checkpoints.remember_playlists(['PLSESSION'], identity)
+        snapshot = radio_readback(client, 'PLSESSION', remote.ids) if radio_readback is not None else None
+        return {"new_ytm": "PLSESSION", "pid": pid, "added": len(tracks), "tracks": tracks,
+                "initial_snapshot": snapshot}
 
     monkeypatch.setattr(generated_acquisition, "create_generated_playlist", create)
     yield controller, remote, frames, workers, pool
@@ -279,3 +296,24 @@ def play(controller, video, playlist="PLSESSION", **extra):
     controller.ctx.bridge.now_playing_seen_at = time.monotonic()
     controller.listening.observe(controller.session)
     controller.advance(controller.session)
+
+
+def replace_native_future(controller, remote):
+    """Switch streams while Music retains a shortened copy of the previous queue."""
+    assert controller.start()["ok"]
+    for video in ("v1", "v2", "v3"):
+        play(controller, video)
+    assert remote.ids == ["v1", "v2", "v3", "v4"]
+    bridge = controller.ctx.bridge
+    bridge.auto_adopt = False
+    bridge.native_ids = remote.ids[2:]
+    state = controller.status()
+    branch = state["directions"][1]
+    successor = branch["tracks"][0]["video_id"]
+    assert successor != "v4"
+    assert controller.select(branch["id"], state["menu_id"])["ok"]
+    controller.advance(controller.session)
+    assert remote.ids == ["v1", "v2", "v3", successor]
+    assert controller.status()["updating"]
+    assert bridge.native_ids == ["v3", "v4"]
+    return successor

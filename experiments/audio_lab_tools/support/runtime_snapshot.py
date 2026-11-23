@@ -14,10 +14,11 @@ from .external_experiment import LAB, OUT, ROOT, digest, save
 NAMES = ('model_worker.js', 'audio_attributes.js', 'features.js',
          'embedding_graph.js', 'runtime_loader.js')
 SNAPSHOT = LAB / 'local/runtime-checkpoint-530'
+EXTRACTOR_REVISION = 'c75775d7cda221542d3535eb13529fc6e646fabf'
 
 
 def original(name):
-    return subprocess.check_output(['git', 'show', 'HEAD:' + name], cwd=ROOT)
+    return subprocess.check_output(['git', 'show', EXTRACTOR_REVISION + ':' + name], cwd=ROOT)
 
 
 def ensure():

@@ -15,7 +15,7 @@ def track_album_browse_ids(conn, memberships, entry_ids):
             'SELECT t.id,MIN(p.provider_id) browse FROM catalog_tracks t '
             f'JOIN {memberships} m ON m.entry_id=t.id '
             'JOIN albums a ON a.id=m.album_id AND a.title=t.album '
-            "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' AND p.is_primary=1 "
             'WHERE t.id IN (' + ','.join('?' for _ in batch) + ") AND p.provider_id<>'' "
             'GROUP BY t.id HAVING COUNT(DISTINCT a.id)=1', batch).fetchall()
         result.update((row['id'], row['browse']) for row in rows)

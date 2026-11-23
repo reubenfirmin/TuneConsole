@@ -12,39 +12,26 @@ from yt_playlist.rec import autotune_run, eval_recs, scorecard
 
 
 @pytest.mark.parametrize('width', [1440])
-def test_historical_production_comparison_reports_formats_and_pause_without_overflow(live_app, store, page, width, tmp_path):
-    from tests.rec.test_product_comparison import favorable
-    from yt_playlist.rec import product_comparison as product
-    current = {'phase': 'observing', 'attempt': 1, 'seed': 'balanced', 'policy': dict(product.POLICY),
-        'alpha': .025, 'previous': {'method': 'svd', 'dim': 48},
-        'challenger': {'method': 'svd', 'dim': 64}, 'generation': 'serving',
-        'started_at': 0, 'exposure_until': 28 * product.DAY, 'decision_at': 29 * product.DAY,
-        'constraints': product.constraints(store)}
-    run = {'kind': 'product', 'ran_at': 0, 'status': 'running', 'phase': 'observing',
-        'previous': current['previous'], 'selected': current['previous'],
-        'challenger': current['challenger'], 'grid': []}
-    current['run_id'] = store.model_selection.start_selection(0, run)
-    store.rec_proposals.put_proposals(product.SURFACE, current, 0)
-    report = favorable(current)
-    run.update(status='retained', reason='Historical menu comparison completed.', product_report=report)
-    store.model_selection.save_selection(current['run_id'], run)
+def test_taste_health_and_history_show_daily_selection_without_retired_trials(
+        live_app, store, page, width):
+    setup = {'method': 'svd', 'dim': 48}
+    result = {'kind': 'daily', 'ran_at': 0, 'status': 'retained', 'phase': 'complete',
+              'previous': setup, 'selected': setup, 'grid': [],
+              'baseline': {'trials': 60, 'windows': 1, 'active_days': 8}, 'evidence_end': 0}
+    daily = store.model_selection.start_selection(0, result)
     page.set_viewport_size({'width': width, 'height': 1000})
     page.goto(live_app + '/taste#health')
-    # Daily model selection owns current health; old menu experiments remain in history.
+    expect(page.get_by_role('heading', name='Latest 30-day comparison')).to_be_visible()
     expect(page.get_by_role('table', name='Observed choices and listening by format and setup')).to_have_count(0)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
-    page.locator('#autotune-status').screenshot(path=str(tmp_path / f'production-comparison-{width}.png'))
     page.get_by_role('button', name='Pause automatic selection', exact=True).click()
     expect(page.get_by_role('button', name='Resume automatic selection', exact=True)).to_be_visible()
     page.get_by_role('button', name='Resume automatic selection', exact=True).click()
     expect(page.get_by_role('button', name='Pause automatic selection', exact=True)).to_be_visible()
     page.get_by_role('link', name='History and test details', exact=True).click()
-    table = page.get_by_role('table', name='Listening outcomes by format', exact=True)
-    expect(table).to_be_visible()
-    expect(table.get_by_role('row')).to_have_count(7)
-    expect(page.get_by_text('Controlled menus and Radio episodes:', exact=False)).to_contain_text(
-        f"{report['overall']['days']['incumbent']} observed days with the current setup")
-    expect(page.get_by_text('Challenger: Playlist patterns (SVD), 64 features.', exact=True)).to_be_visible()
+    expect(page.locator(f'#selection-run-{daily}')).to_contain_text('60 comparable first-play tracks across 8 active days')
+    expect(page.locator('section[id^="selection-run-"]')).to_have_count(1)
+    expect(page.get_by_role('table', name='Listening outcomes by format', exact=True)).to_have_count(0)
     assert page.evaluate('document.documentElement.scrollWidth <= innerWidth')
 
 
@@ -149,8 +136,8 @@ def test_model_health_groups_results_and_explains_tuning(health_live_app, store,
     sound = page.locator("#taste-recent-sound")
     sound.scroll_into_view_if_needed()
     expect(sound.locator(".chain-row .vb-name")).to_have_count(2)
-    expect(sound.locator(".chain-head")).to_contain_text("Session")
-    expect(sound.locator(".chain-head")).to_contain_text("Recent")
+    expect(sound.locator(".chain-head")).to_contain_text("TODAY")
+    expect(sound.locator(".chain-head")).to_contain_text("RECENT")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
     sound.locator("..").screenshot(path=str(tmp_path / f"recent-sound-{width}.png"))
     sound.get_by_role("link", name="Listening styles in Taste profile", exact=True).click()

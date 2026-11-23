@@ -12,9 +12,8 @@ class RadioInputs:
     def feedback(self, started_at, now):
         with self.read_view() as reader:
             return {'likes': reader.rec_model.recent_liked_with_ts(limit=200),
-                'dislikes': reader.rec_model.disliked_with_ts(),
-                'exits': reader.player_events.player_events_since(max(started_at, now - 45), kind='track_exit'),
-                'blocked': reader.rec_model.disliked_identity_keys() | reader.rec_model.suppressed_keys('for_you', now),
+                'exits': reader.player_events.listening_exits(max(started_at, now - 45)),
+                'blocked': reader.rec_model.suppressed_keys('for_you', now),
                 'muted': {artist.casefold() for artist in reader.rec_model.muted_artists()}}
 
     def taxonomy(self, labels=()):
@@ -29,7 +28,7 @@ class RadioInputs:
 
     @staticmethod
     def exclusions(reader, now):
-        return (reader.rec_model.disliked_identity_keys() | reader.rec_model.suppressed_keys('for_you', now),
+        return (reader.rec_model.suppressed_keys('for_you', now),
                 {artist.casefold() for artist in reader.rec_model.muted_artists()})
 
 

@@ -10,6 +10,7 @@ import json
 import sqlite3
 
 from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.core.artist_keys import canonical_id
 
 MAX_MEMBERS = 128
 MAX_BYTES = 1024 * 1024
@@ -100,15 +101,10 @@ def prepare(conn, display_credit, structured, source, *, artist_ids=None):
 
 
 def read(conn, credit_id):
-    row = conn.execute('SELECT display_credit,member_count FROM artist_credits WHERE id=? AND complete=1', (credit_id,)).fetchone()
+    row = conn.execute('SELECT display_credit,members_json FROM artist_credits WHERE id=?', (credit_id,)).fetchone()
     if row is None:
-        raise ValueError('Unknown complete artist credit')
-    members = tuple(Member(*row) for row in conn.execute(
-        'SELECT artist_id,credit_text,provider,raw_id,raw_browse_id,role,presence '
-        'FROM artist_credit_members WHERE credit_id=? ORDER BY position', (credit_id,)))
-    if not 1 <= len(members) <= MAX_MEMBERS or len(members) != row[1]:
-        raise ValueError('Invalid stored ordered artist credit')
-    return Credit(row[0], members)
+        raise ValueError('Unknown artist credit')
+    return Credit(row[0], tuple(Member(*value) for value in json.loads(row[1])))
 
 
 def intern(conn, credit):
@@ -120,14 +116,9 @@ def intern(conn, credit):
         if read(conn, row[0]) != credit:
             raise sqlite3.IntegrityError('Artist credit digest collision or incomplete content')
         return row[0]
-    credit_id = conn.execute('INSERT INTO artist_credits(display_credit,content_digest,member_count) VALUES (?,?,?)',
-                             (credit.display_credit, digest, len(credit.members))).lastrowid
-    conn.executemany('INSERT INTO artist_credit_members(credit_id,position,artist_id,credit_text,provider,'
-                     'raw_id,raw_browse_id,role,presence) VALUES (?,?,?,?,?,?,?,?,?)',
-                     ((credit_id, i, m.artist_id, m.credit_text, m.provider, m.raw_id, m.raw_browse_id, m.role, m.presence)
-                      for i, m in enumerate(credit.members)))
-    conn.execute('UPDATE artist_credits SET complete=1 WHERE id=?', (credit_id,))
-    return credit_id
+    members = json.dumps(credit.document()[2], ensure_ascii=False, separators=(',', ':'))
+    return conn.execute('INSERT INTO artist_credits(display_credit,content_digest,members_json) VALUES (?,?,?)',
+                        (credit.display_credit, digest, members)).lastrowid
 
 
 def _clock(now):
@@ -139,12 +130,8 @@ def _same_delivered_credit(conn, previous, current):
     """An identity redirect cannot turn a replay into changed source evidence."""
     old, new = read(conn, previous), read(conn, current)
     def canonical(credit):
-        members = []
-        for member in credit.members:
-            row = conn.execute('SELECT artist_id FROM artist_redirects WHERE retired_id=?',
-                               (member.artist_id,)).fetchone()
-            members.append(replace(member, artist_id=row[0]) if row else member)
-        return replace(credit, members=tuple(members))
+        return replace(credit, members=tuple(replace(member, artist_id=canonical_id(conn, member.artist_id))
+                                              for member in credit.members))
     return canonical(old) == canonical(new)
 
 
@@ -163,85 +150,74 @@ def capture(conn, entry_id, credit_id, source, now, *, delivery_key=None, kind='
     if not isinstance(source, str) or not source or (delivery_key is not None and
             (not isinstance(delivery_key, str) or not delivery_key or len(delivery_key.encode()) > 4096)):
         raise ValueError('Invalid artist credit source delivery')
-    from . import credit_retention
+    old = None
     if delivery_key is not None:
-        replay = conn.execute('SELECT observation_id,credit_id,metadata_bound FROM artist_credit_replays '
+        old = conn.execute('SELECT id,credit_id,metadata_bound,metadata_delivery_id,retired FROM artist_credit_observations '
             'WHERE entry_id=? AND source=? AND delivery_key=?', (entry_id, source, delivery_key)).fetchone()
-        if replay:
-            if metadata_delivery_id is not None and not replay['metadata_bound']:
+        if old:
+            if metadata_delivery_id is not None and not old['metadata_bound']:
                 raise sqlite3.IntegrityError('Artist replay has no verified metadata delivery binding')
-            if replay['credit_id'] != credit_id and not _same_delivered_credit(conn, replay['credit_id'], credit_id):
+            if old['credit_id'] != credit_id and not _same_delivered_credit(conn, old['credit_id'], credit_id):
                 raise sqlite3.IntegrityError('A provider delivery cannot change its artist credit')
-            if (not conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (replay['observation_id'],)).fetchone()
-                    or metadata_delivery_id is not None and replay['metadata_bound'] and not conn.execute(
-                        'SELECT 1 FROM metadata_deliveries WHERE id=?', (metadata_delivery_id,)).fetchone()):
-                # A compact receipt outlives the disposable capture/delivery
-                # graph. It never creates another capture or changes a head.
-                return replay['observation_id'], False
+            if old['retired']:
+                return old['id'], False
     if metadata_delivery_id is not None:
         delivery = conn.execute('SELECT input_entry_id,provider FROM metadata_deliveries WHERE id=?',
                                 (metadata_delivery_id,)).fetchone()
+        if delivery is None and old:
+            return old['id'], False
         if delivery is None or tuple(delivery) != (entry_id, source):
             raise ValueError('Artist credit metadata delivery has a different input or provider')
-    head = conn.execute('SELECT o.id,o.credit_id FROM artist_credit_capture_heads h '
-        'JOIN artist_credit_observations o ON o.id=h.observation_id WHERE h.entry_id=? AND h.source=?',
-        (entry_id, source)).fetchone()
     if delivery_key is not None:
-        old = conn.execute('SELECT id,credit_id' + (',metadata_delivery_id' if metadata_delivery_id is not None else '') +
-            ' FROM artist_credit_observations '
-            'WHERE entry_id=? AND source=? AND delivery_key=?', (entry_id, source, delivery_key)).fetchone()
-        if old and (old['credit_id'] != credit_id and not _same_delivered_credit(conn, old['credit_id'], credit_id)
-                    or metadata_delivery_id is not None
-                    and old['metadata_delivery_id'] != metadata_delivery_id):
+        if old and metadata_delivery_id is not None and old['metadata_delivery_id'] != metadata_delivery_id:
             raise sqlite3.IntegrityError('A provider delivery cannot change its artist credit')
     else:
+        head = conn.execute('SELECT id,credit_id FROM artist_credit_observations '
+                            'WHERE entry_id=? AND source=? AND is_capture_head=1', (entry_id, source)).fetchone()
         old = head if head and head['credit_id'] == credit_id else None
     if old:
-        if delivery_key is not None:
-            observation = conn.execute('SELECT * FROM artist_credit_observations WHERE id=?', (old['id'],)).fetchone()
-            credit_retention.prepare_receipt(conn, observation)
-        conn.execute('UPDATE artist_credit_observations SET '
+        selected = conn.execute('UPDATE artist_credit_observations SET '
             'first_seen=CASE WHEN first_seen IS NULL THEN ? ELSE min(first_seen,?) END,'
             'last_seen=CASE WHEN last_seen IS NULL THEN ? ELSE max(last_seen,?) END,'
-            'processing_count=processing_count+1 WHERE id=?', (now, now, now, now, old['id']))
+            'processing_count=processing_count+1 WHERE id=? RETURNING is_selected',
+            (now, now, now, now, old['id'])).fetchone()
         # Another provider or an identity reconciliation may have supplied a
         # newer selection while this source's capture head stayed unchanged.
-        selected = conn.execute('SELECT observation_id FROM entry_artist_selections WHERE entry_id=?',
-                                (entry_id,)).fetchone()
-        return old['id'], selected is not None and selected[0] == old['id']
+        return old['id'], bool(selected[0])
+    conn.execute('UPDATE artist_credit_observations SET is_capture_head=0 '
+                 'WHERE entry_id=? AND source=? AND is_capture_head=1', (entry_id, source))
     observation = conn.execute('INSERT INTO artist_credit_observations('
-        'entry_id,credit_id,source,delivery_key,first_seen,last_seen,processing_count,capture_kind'
-        + (',metadata_delivery_id' if metadata_delivery_id is not None else '') + ') '
-        'VALUES (?,?,?,?,?,?,1,?' + (',?' if metadata_delivery_id is not None else '') + ')',
+        'entry_id,credit_id,source,delivery_key,first_seen,last_seen,processing_count,capture_kind,is_capture_head,'
+        'metadata_delivery_id,metadata_bound) VALUES (?,?,?,?,?,?,1,?,1,?,?)',
         (entry_id, credit_id, source, delivery_key, now, now,
          'provider_delivery' if delivery_key is not None and kind == 'capture' else kind,
-         *((metadata_delivery_id,) if metadata_delivery_id is not None else ()))).lastrowid
-    conn.execute('INSERT INTO artist_credit_capture_heads(entry_id,source,observation_id) VALUES (?,?,?) '
-        'ON CONFLICT(entry_id,source) DO UPDATE SET observation_id=excluded.observation_id',
-        (entry_id, source, observation))
-    if delivery_key is not None:
-        credit_retention.receipt(conn, entry_id, source, delivery_key, observation, credit_id,
-                                 metadata_bound=metadata_delivery_id is not None)
+         metadata_delivery_id, int(metadata_delivery_id is not None))).lastrowid
     return observation, True
 
 
 def select(conn, entry_id, observation_id):
-    row = conn.execute('SELECT credit_id,source FROM artist_credit_observations WHERE id=? AND entry_id=?',
+    row = conn.execute('SELECT credit_id,source,is_selected,retired FROM artist_credit_observations WHERE id=? AND entry_id=?',
                        (observation_id, entry_id)).fetchone()
     if row is None:
-        if conn.execute(
-                'SELECT 1 FROM artist_credit_replays WHERE observation_id=? AND entry_id=?',
-                (observation_id, entry_id)).fetchone():
-            raise ValueError('Artist credit capture expired; refresh the selection')
         raise ValueError('Selected artist evidence belongs to another entry')
+    if row['retired']:
+        raise ValueError('Artist credit capture expired; refresh the selection')
     credit = read(conn, row['credit_id'])
     if any(m.artist_id is None for m in credit.members):
         raise ValueError('Selected artist credit contains unresolved historical identities')
     desired = [(i, m.artist_id, m.credit_text, row['source']) for i, m in enumerate(credit.members)]
     update_projection(conn, entry_id, desired)
-    conn.execute('INSERT INTO entry_artist_selections(entry_id,observation_id) VALUES (?,?) '
-        'ON CONFLICT(entry_id) DO UPDATE SET observation_id=excluded.observation_id '
-        'WHERE observation_id<>excluded.observation_id', (entry_id, observation_id))
+    if not row['is_selected']:
+        _select_observation(conn, entry_id, observation_id)
+
+
+def _select_observation(conn, entry_id, observation_id):
+    conn.execute('UPDATE artist_credit_observations SET is_selected=0 WHERE entry_id=? AND is_selected=1 AND id<>?',
+                 (entry_id, observation_id))
+    changed = conn.execute('UPDATE artist_credit_observations SET is_selected=1 WHERE id=? AND entry_id=?',
+                           (observation_id, entry_id)).rowcount
+    if changed != 1:
+        raise ValueError('Selected artist evidence belongs to another entry')
 
 
 def update_projection(conn, entry_id, desired):
@@ -268,8 +244,8 @@ def reconcile_current(conn, previous, target, source, now):
             break
         for entry, in rows:
             check_cancellable_work()
-            selected = conn.execute('SELECT o.credit_id FROM entry_artist_selections s '
-                'JOIN artist_credit_observations o ON o.id=s.observation_id WHERE s.entry_id=?', (entry,)).fetchone()
+            selected = conn.execute('SELECT credit_id FROM artist_credit_observations WHERE entry_id=? AND is_selected=1',
+                                    (entry,)).fetchone()
             if selected is None:
                 raise ValueError('Current artist projection has no selected evidence')
             credit = read(conn, selected[0])
@@ -283,5 +259,5 @@ def reconcile_current(conn, previous, target, source, now):
             current = conn.execute('SELECT position,artist_id,credit,source FROM entry_artists '
                                    'WHERE entry_id=? ORDER BY position', (entry,)).fetchall()
             update_projection(conn, entry, [(p, target if a == previous else a, c, s) for p, a, c, s in current])
-            conn.execute('UPDATE entry_artist_selections SET observation_id=? WHERE entry_id=?', (observation, entry))
+            _select_observation(conn, entry, observation)
         after = rows[-1][0]

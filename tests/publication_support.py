@@ -2,6 +2,7 @@
 from dataclasses import replace
 
 from yt_playlist.core import recommendation_outputs as outputs, recommendation_pools as pools
+from yt_playlist.core.track_sources import folded, save_to_library
 from yt_playlist.repos import recommendation_publication as publication
 
 
@@ -15,20 +16,23 @@ def _subjects(store, count):
     existing = dict(store.conn.execute(
         "SELECT identity_key,id FROM recordings WHERE identity_key LIKE 'staged-%'"))
     first_recording = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM recordings').fetchone()[0]
-    first_entry = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM catalog_entries').fetchone()[0]
+    first_entry = store.conn.execute('SELECT coalesce(max(id),0)+1 FROM track_sources').fetchone()[0]
     missing = [n for n in range(count) if f'staged-{n}' not in existing]
     rows = [(first_recording + offset, first_entry + offset, f'staged-{n}',
              f'staged-video-{n}', f'Café {n}', f'Artist {n}') for offset, n in enumerate(missing)]
     with store.conn:
         store.conn.executemany('INSERT INTO recordings(id,identity_key,title,artist) VALUES (?,?,?,?)',
             [(rid, key, title, artist) for rid, _, key, _, title, artist in rows])
-        store.conn.executemany('INSERT INTO youtube_items(video_id,recording_id,title,artist,orig_title,orig_artist) '
-            'VALUES (?,?,?,?,?,?)', [(video, rid, title, artist, title, artist)
-                                   for rid, _, _, video, title, artist in rows])
-        store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
-            [(entry, rid, video) for rid, entry, _, video, _, _ in rows])
-        store.conn.executemany("INSERT INTO library_memberships VALUES (?,'fixture',NULL)",
-            [(entry,) for _, entry, _, _, _, _ in rows])
+        columns = 'video_id,recording_id,title,artist,orig_title,orig_artist'
+        uploads = [(video, rid, title, artist, title, artist) for rid, _, _, video, title, artist in rows]
+        if folded(store.conn):
+            store.conn.executemany(f'INSERT INTO track_sources(id,{columns}) VALUES (?,?,?,?,?,?,?)',
+                [(row[1], *upload) for row, upload in zip(rows, uploads)])
+        else:
+            store.conn.executemany(f'INSERT INTO youtube_items({columns}) VALUES (?,?,?,?,?,?)', uploads)
+            store.conn.executemany('INSERT INTO catalog_entries(id,recording_id,video_id) VALUES (?,?,?)',
+                [(entry, rid, video) for rid, entry, _, video, _, _ in rows])
+        save_to_library(store.conn, (entry for _, entry, _, _, _, _ in rows), None, origin='fixture')
     existing.update((key, rid) for rid, _, key, _, _, _ in rows)
     return [pools.Candidate(existing[f'staged-{n}'], n / max(count, 1)) for n in range(count)]
 
@@ -37,7 +41,7 @@ def plan(store, key, *, count=2, policy='fixture', value=None):
     if store.rec_ledger.policy_configuration(policy) is None:
         store.rec_ledger.record_serving_policy(policy, {'ranker': policy}, 1)
     subjects = _subjects(store, count)
-    pool = pools.prepare('fixture', policy, None, 'a' * 64, 'card', subjects)
+    pool = pools.prepare('fixture', policy, 'a' * 64, 'card', subjects)
     body = {'title': key} if value is None else value
     return publication.Plan(key, policy, None, 1, 10,
         (publication.Slot('home', 'all', 'wheelhouse', pool),

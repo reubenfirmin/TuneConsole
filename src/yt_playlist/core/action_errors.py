@@ -22,6 +22,7 @@ MESSAGES = {
     'playlist_sources_required': 'Choose at least one source playlist.',
     'playlist_name_required': "Name can't be empty",
     'playlist_tracks_required': 'Select at least one version to add.',
+    'mix_tracks_unavailable': 'The songs in this mix are no longer available. Try regenerating it.',
     'playlist_copy_account_mismatch': 'Choose a destination on the same account as the source playlists.',
     'merge_unavailable': 'Choose at least two existing playlists to merge.',
     'merge_keeper_required': 'Choose one of these playlists to keep, or update all of them.',

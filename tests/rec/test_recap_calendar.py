@@ -18,7 +18,7 @@ def test_recap_podium_personality_and_details_share_account_calendar(store, zone
     first = datetime.fromtimestamp(since, timezone.utc).replace(tzinfo=None)
     end = datetime.fromtimestamp(until, timezone.utc).replace(tzinfo=None)
     for index, zone in enumerate(zones):
-        iid = store.accounts.upsert_account(f"Account {index}", f"bridge{index}", None, index == 0)
+        iid = store.accounts.upsert_account(f"Account {index}", None, index == 0)
         video = f"video{index}"
         store.tracks.upsert_track(video, video, f"Artist {index}", None, 200)
         key = store.tracks.identity_key_for_video(video)
@@ -53,7 +53,7 @@ def test_shared_playlist_creation_uses_the_earliest_observers_calendar(store):
     store.tracks.upsert_track("v", "Song", "Artist", None, 200)
     key = store.tracks.identity_key_for_video("v")
     for index, zone in enumerate(("America/Costa_Rica", "Pacific/Kiritimati")):
-        iid = store.accounts.upsert_account(str(index), f"bridge{index}", None, index == 0)
+        iid = store.accounts.upsert_account(str(index), None, index == 0)
         store.history.record_play_event(iid, key, "v", created, source_timezone=zone)
         store.playlists.upsert_playlist(iid, "shared", "Shared", index + 2, "hash", created,
                                         created_at=created + index * 3600)

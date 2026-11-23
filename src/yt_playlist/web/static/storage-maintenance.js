@@ -8,10 +8,10 @@
         const response = await fetch('/storage-maintenance/status', {cache: 'no-store'});
         if (!response.ok) return;
         const state = await response.json();
-        document.documentElement.dataset.storageCompacting = state.active ? 'true' : 'false';
+        document.documentElement.dataset.libraryWritesPaused = state.active ? 'true' : 'false';
         const banner = document.getElementById('storage-maintenance');
         if (banner) {
-          const message = state.warning || state.phase === 'recovery_required' ? '' : state.banner_message || '';
+          const message = state.warning ? '' : state.banner_message || '';
           if (banner.getAttribute('role') !== 'status') banner.setAttribute('role', 'status');
           if (banner.getAttribute('aria-live') !== 'polite') banner.setAttribute('aria-live', 'polite');
           banner.dataset.warning = 'false';

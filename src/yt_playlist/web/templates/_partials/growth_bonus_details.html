@@ -18,7 +18,7 @@
   <ul class="growth-achievements">
     <template x-for="achievement in growth.achievements" :key="achievement.id"><li>
       <strong x-text="achievement.label"></strong>
-      <span class="tag" x-text="achievement.complete ? 'Earned' : Math.min(achievement.count, achievement.goal) + ' of ' + achievement.goal"></span>
+      <span class="tag" x-show="achievement.count !== null" x-text="achievement.complete ? 'Earned' : Math.min(achievement.count, achievement.goal) + ' of ' + achievement.goal"></span>
       <p x-text="achievement.detail"></p>
       <a class="btn btn-primary" :href="({playlist: '/#directions', likes: '/playlists', audio: '/playlists'})[achievement.id]"
          x-text="({playlist: 'Find a mix to save', likes: 'Find songs to rate', audio: 'Find music to play'})[achievement.id]"></a>

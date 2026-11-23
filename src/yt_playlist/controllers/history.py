@@ -29,7 +29,7 @@ class History:
         current = self.repository.calendar_facts(account_id)
         if current is None or (explicit and not current['confirmed']):
             name = source_timezone if explicit else machine_timezone()
-            event_days = [(row['id'], day_at(row['played_at'], name), name)
+            event_days = [(row['id'], day_at(row['played_at'], name))
                 for row in self.repository.calendar_events(account_id)] if current is not None else None
             self.repository.set_calendar(account_id, name, confirmed=explicit, event_days=event_days)
             if current is not None:
@@ -100,31 +100,41 @@ class History:
 
     def record_play_event(self, account_id, identity_key, video_id, played_at,
                           playlist_ytm_id=None, like_status=None, *, source_timezone=None,
-                          context_choice=False):
+                          context_choice=False, report_observation=False, verified_album=None):
         with self.guard():
             calendar = self._calendar(account_id, source_timezone)
             quarantined = self.repository.playlist_quarantined(account_id, playlist_ytm_id, GENERATED_GROUP)
             transient = (playlist_ytm_id or '').removeprefix('RDAMPL') in self.transient_playlists()
             subject, recording = self._subject(identity_key, video_id)
+            verified_playlist = verified_album['playlist'] if verified_album else None
+            selected_at = verified_album['at'] if verified_album else None
             with self.repository.transaction():
-                row = self.repository.matching_event(account_id, subject, video_id, played_at, EXACT_TOLERANCE_S)
+                row = self.repository.matching_event(account_id, subject, video_id, played_at, EXACT_TOLERANCE_S,
+                                                     verified_playlist=verified_playlist, selected_at=selected_at)
                 if row is None:
                     latest = self.repository.latest_event(account_id)
-                    if repeats_live_event(latest, subject, video_id, played_at):
+                    if repeats_live_event(latest, subject, video_id, played_at,
+                                          verified_playlist=verified_playlist, selected_at=selected_at):
                         row = latest
                 generated = int(bool(quarantined or context_choice or transient))
                 if row is None:
-                    event = self.repository.append_event(account_id, identity_key, played_at, video_id=video_id,
+                    self.repository.append_event(account_id, identity_key, played_at, video_id=video_id,
                         playlist_ytm_id=playlist_ytm_id, like_status=like_status, is_generated=generated,
-                        subject=subject, recording=recording)
+                        subject=subject, recording=recording, day=day_at(played_at, calendar), source='live')
                     timestamp = played_at
                 else:
                     event, timestamp = row['id'], row['played_at']
-                    self.repository.update_event(event, account_id, video_id, playlist_ytm_id, like_status, generated)
-                self.repository.project_event(event, day_at(timestamp, calendar), calendar, 'live')
-                self.repository.invalidate_first_play()
+                    corroborated = context_choice and (not row['live'] or timestamp == played_at)
+                    # Retain the initial browse-only observation for delayed
+                    # native actions that carry no playlist ID.
+                    playlist = (None if verified_album and row['live'] and row['is_generated']
+                                and row['playlist_ytm_id'] is None else playlist_ytm_id)
+                    self.repository.update_event(event, account_id, video_id, playlist, like_status, generated,
+                                                 context_choice=corroborated)
+                    self.repository.project_event(event, day_at(timestamp, calendar), 'live')
             self.calendar.reconcile(account_id, events={(subject, timestamp)})
-            return row is None
+            new = row is None
+            return (new, new or not row['live']) if report_observation else new
 
     def import_listening_events(self, account_id, rows, *, source='takeout', source_timezone=None):
         with self.guard():
@@ -138,18 +148,18 @@ class History:
                     event, timestamp, new = self._import_event(account_id, key, subject, recording, video, timestamp, source, calendar)
                     added += new
                     affected.add((subject, timestamp))
-                self.repository.invalidate_first_play()
             self.calendar.reconcile(account_id, events=affected)
             return max(0, self.repository.day_count(account_id) - before), added
 
     def _import_event(self, account, key, subject, recording, video, timestamp, source, calendar):
         row = self.repository.matching_event(account, subject, video, timestamp, EXACT_TOLERANCE_S)
         if row is None:
-            event = self.repository.append_event(account, key, timestamp, video_id=video, subject=subject, recording=recording)
+            event = self.repository.append_event(account, key, timestamp, video_id=video, subject=subject,
+                recording=recording, day=day_at(timestamp, calendar), source=source)
         else:
             event, timestamp = row['id'], row['played_at']
             self.repository.update_event(event, account, video, None, None, None)
-        self.repository.project_event(event, day_at(timestamp, calendar), calendar, source)
+            self.repository.project_event(event, day_at(timestamp, calendar), source)
         return event, timestamp, row is None
 
     def import_plays(self, account_id, plays, *, source='takeout', source_timezone=None):
@@ -181,7 +191,6 @@ class History:
                         added += new
                         affected.add((subject, timestamp))
                     self.repository.store_spotify_receipt(account_id, uri, at, event, artist)
-                self.repository.invalidate_first_play()
             self.calendar.reconcile(account_id, events=affected)
             return max(0, self.repository.day_count(account_id) - before), added, listens_added
 
@@ -211,14 +220,45 @@ class History:
     def recent_plays_with_ts(self, limit=None, exclude_list_ids=None):
         return self.repository.recent_plays_with_ts(limit, exclude_list_ids)
 
+    def recent_calendar_evidence(self, first_day, last_day, now, excluded):
+        return self.repository.recent_calendar_evidence(first_day, last_day, now, excluded)
+
     def last_plays_for(self, keys):
         return self.repository.last_plays_for(keys)
 
     def listening_comparison_coverage(self, since, until, *, exclude_list_ids=()):
         return self.repository.listening_comparison_coverage(since, until, exclude_list_ids=exclude_list_ids)
 
-    def play_events_since(self, since_ts, exclude_list_ids=None, *, taste_only=False):
-        return self.repository.play_events_since(since_ts, exclude_list_ids, taste_only=taste_only)
+    def latest_dated_listening(self):
+        return self.repository.latest_dated_listening()
+
+    def browse_playback_onset(self, account, video, since, until):
+        return self.repository.browse_playback_onset(account, video, since, until)
+
+    def play_events_since(self, since_ts, exclude_list_ids=None, *, taste_only=False, include_live=False):
+        return self.repository.play_events_since(since_ts, exclude_list_ids, taste_only=taste_only,
+                                                 include_live=include_live)
+
+    def listening_calendars(self):
+        return self.repository.listening_calendars()
+
+    def live_play_activity(self, since, until):
+        return self.repository.live_play_activity(since, until)
+
+    def taste_replay_page(self, after, until, *, limit):
+        return self.repository.taste_replay_page(after, until, limit=limit)
+
+    def taste_rating_page(self, after, until, *, limit):
+        return self.repository.taste_rating_page(after, until, limit=limit)
+
+    def taste_rating_revision(self):
+        return self.repository.taste_rating_revision()
+
+    def taste_play_extent(self, through):
+        return self.repository.taste_play_extent(through)
+
+    def next_taste_like(self, after):
+        return self.repository.next_taste_like(after)
 
     def record_takeout_import(self, fingerprint, account_id, imported_at, parsed, unparsed_dates):
         return self.repository.record_takeout_import(fingerprint, account_id, imported_at,

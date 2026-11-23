@@ -11,26 +11,11 @@ belongs to each owner's implementation.
 
 ## Preparation and verification
 
-Regular installation creates empty owners and bounded guards. The supported
-release cutoff and reset policy are defined in [database maintenance](README.md).
-Current-schema rebuilds use resumable copies and preserve applied migration
-history; ordinary migrations do not perform library-sized conversion.
-
-A retained copy preserves installed schema, indexes, views, triggers, IDs,
-implicit row IDs, sequence high-water marks and SQLite application/user versions.
-Its plan names every table, predicate and retained key set. Retention includes
-all FK parents and complete owned child relations. Preserve catalog, accounts,
-personal evidence, training inputs, published output, provider completion state,
-pending work and recovery state unless an explicit domain rule permits omission.
-Preserve exact external input bytes and the evidence ledger and playback inbox
-when present. A smaller SQL file does not establish correctness.
-
-Verify retained values and types, relationships, current selections, model inputs,
-file custody and recovery independently. Report SQL/index allocation, file logical
-and allocated bytes, recovery copies and phase timings separately. Capture queues
-before startup to distinguish existing backlog from conversion-induced work.
-Experiments use isolated private copies and retain a pristine comparison baseline.
-Historical experiment omissions do not authorize production deletion.
+Regular migrations apply to the installed SQLite database and preserve applied
+history. The [database maintenance guide](README.md) defines the supported release
+cutoff, reset policy and explicit audit. Domain retention must preserve catalog,
+accounts, listening evidence, training inputs, published output, provider completion
+state, pending work and owned files unless the domain has an explicit expiry rule.
 
 ## Runtime metadata
 
@@ -42,9 +27,9 @@ text, number and canonical genre. Provider cycle, completion time, failures and
 retry deadline preserve scheduling; its compatibility error column contains no
 error body. Field codes are append-only and genre redirects preserve identity.
 
-Runtime SQL contains no response body or candidate list. `metadata_file_writes`
-owns immutable file IDs, integrity digests, sizes and pending/ready status;
-kind/owner/revision references select ready receipts. Existing pack offsets and
+Runtime SQL contains no response body or candidate list. The shared
+`collection_file_writes` store records file addresses, integrity digests,
+sizes and pending/ready status. Kind, owner and revision select ready receipts. Existing pack offsets and
 historical adapters remain supported until their own cutover. Model/input
 identity and invalidation digests have distinct purposes.
 
@@ -65,22 +50,23 @@ documents fail verification. Collection respects reader and backup snapshots.
 
 ## Artist credits and taste modes
 
-Artist retention preserves immutable ordered credit content, current capture heads,
-entry selections and their source agreement. Permanent `artist_credit_replays`
+Artist credit observations identify the most recent capture for each source and
+the selected capture for each track source. They point to immutable ordered
+credit content. Permanent `artist_credit_replays`
 receipts identify `(entry_id, source, delivery_key)`, original observation ID,
 credit ID and verified metadata binding. Replay checks ordered credit content
 through artist redirects, returns the original ID and cannot reselect an expired
 capture. A matching key spelling alone is not metadata-binding proof.
 
-Explicit preparation audits all SQL references to observations and rechecks current
-heads/selections before each deletion. Unreferenced `legacy_capture` and
+Preparation only deletes observations marked as neither the current capture nor
+the selected credit. Unreferenced `legacy_capture` and
 `selection_snapshot` conversion history can retire even with unknown times.
 Other unreferenced captures expire after 30 days from last-seen processing time;
 replay does not renew a retired capture. Protect current selections, explicit
 identity reconciliation and unknown-time new evidence. Create receipts before
 deletion; normalized credit content stays. No additional cold archive is needed.
-Only explicit activation enables resumable daily maintenance; older formats keep
-their existing read/write path.
+Explicit activation enables resumable daily maintenance. The checkpoint is stored
+in `settings`.
 
 Taste-mode retention keeps every ID, label, size, original time, space and active
 flag, and preserves active vectors/families/representatives exactly. Inactive
@@ -141,8 +127,7 @@ inputs to superseded predictions. The normalized format interns only measurement
 model, prediction policy and current-result input versions in immutable
 `vibe_versions`; APIs resolve the exact original text. Measurement uniqueness
 includes version identity, and equal scores do not imply equivalent versions.
-Populated installed text owners keep read/write support until an explicit bounded
-rebuild verifies every decoded value/type and FK before installation.
+The release upgrade interns existing version strings in the installed database.
 
 Superseded prediction summaries expire 180 days after known `predicted_at`;
 current predictions and unknown-age imports remain. Contributor detail files have

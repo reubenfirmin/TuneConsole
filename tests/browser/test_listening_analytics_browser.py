@@ -11,7 +11,7 @@ from tests.conftest import seed_catalog_track
 from tests.home_fixture_support import publish_menu
 from tests.prepared_fixture_support import prepared_template
 from tests.visual_support import capture
-from yt_playlist.core import radio_provenance
+from yt_playlist.core import radio_provenance, recommendation_impressions
 from yt_playlist.rec import listening_analytics
 from yt_playlist.library import ratings
 
@@ -59,15 +59,14 @@ def prepare(store):
 def charts_history_template(_pristine_current_schema):
     def build(source):
         started = time.perf_counter()
-        identity = source.accounts.upsert_account('main', 'cred', None, True)
+        identity = source.accounts.upsert_account('main', None, True)
         assert identity == 1
         source.playlists.upsert_playlist(identity, 'PLZ', 'Old Mix', 3, 'h', 0.0)
         with pytest.MonkeyPatch.context() as patch:
             patch.setenv('YT_PLAYLIST_LISTENING_CHARTS', '1')
             prepare(source)
-        assert source.conn.execute('SELECT COUNT(*) FROM catalog_entries').fetchone()[0] == 144
-        assert not source.conn.execute(
-            "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+        assert source.conn.execute('SELECT COUNT(*) FROM track_sources').fetchone()[0] == 144
+        assert not recommendation_impressions.counts(source.conn, recommendation_impressions.EDITORIAL)
         return {'build_seconds': time.perf_counter() - started,
                 'plays': source.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0]}
 
@@ -83,15 +82,13 @@ def prepared_charts_app(request, store, charts_history_template, listening_enabl
     record_property('charts_source_build_seconds', receipt['build_seconds'])
     record_property('charts_source_identity', str(charts_history_template.source.conn._policy_memory_key))
     assert store.conn.execute('SELECT COUNT(*) FROM play_events').fetchone()[0] == receipt['plays']
-    assert not store.conn.execute(
-        "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+    assert not recommendation_impressions.counts(store.conn, recommendation_impressions.EDITORIAL)
     # Account, confirmed playlist and retained files are restored before startup.
     live_app = request.getfixturevalue('live_app')
     started = time.perf_counter()
     yield live_app
     record_property('charts_live_consumer_seconds', time.perf_counter() - started)
-    assert not charts_history_template.source.conn.execute(
-        "SELECT 1 FROM rec_impressions WHERE surface='listening_editorial'").fetchone()
+    assert not recommendation_impressions.counts(charts_history_template.source.conn, recommendation_impressions.EDITORIAL)
 
 
 @pytest.mark.parametrize('width', [1440])
@@ -337,18 +334,134 @@ def test_imported_sightings_have_their_own_history(live_app,store,page):
     expect(charts.locator('.lp-history-row')).to_have_count(0)
 
 
-def test_preparing_retry_and_empty_state(live_app,page):
+@pytest.mark.parametrize('pending', ['preparing', 'read-pending'])
+def test_preparing_retry_and_empty_state(live_app,page,pending):
     state = {'ready':False}
     empty = {'schema':2,'today':'2026-10-24','built_at':NOW,'timezone':'UTC',
         'columns':['day','artist','genre','format',*listening_analytics.FIELDS,'track','artist_id'],'chunks':[]}
-    page.route('**/charts/listening-data',lambda route:route.fulfill(
-        status=200 if state['ready'] else 202,json=empty if state['ready'] else {'status':'preparing'}))
+
+    def respond(route):
+        if state['ready']:
+            route.fulfill(json=empty)
+        elif pending == 'preparing':
+            route.fulfill(status=202, json={'status':'preparing'})
+        else:
+            route.fulfill(status=503, headers={'X-Read-Pending':'true', 'Retry-After':'1'})
+
+    page.route('**/charts/listening-data', respond)
     page.goto(live_app + '/charts?view=analytics')
     charts = page.locator('[data-listening-analytics]')
-    expect(charts.get_by_role('status')).to_contain_text('Preparing listening charts')
+    message = 'Preparing listening charts' if pending == 'preparing' else 'Loading listening history'
+    expect(charts.get_by_role('status')).to_contain_text(message)
     state['ready'] = True
     expect(charts.locator('.lp-empty')).to_be_visible(timeout=10000)
     expect(charts.locator('.lp-summary')).to_contain_text('0 recorded plays')
+
+
+@pytest.mark.parametrize('resource,failure', [
+    ('manifest', 'http-503'), ('manifest', 'connection-reset'), ('chunk', 'http-503'),
+])
+@pytest.mark.parametrize('already_loaded', [False, True], ids=['initial', 'refresh'])
+def test_listening_read_recovers_quietly(live_app, store, page, resource, failure, already_loaded):
+    seed_catalog_track(store, 'recovery-track', 'Saved song', 'Local artist', video_id='recovery-video')
+    store.history.record_play_event(1, 'recovery-track', 'recovery-video', NOW - 3600)
+    assert listening_analytics.build(store, NOW)
+    requests = []
+
+    def fail_once(route):
+        requests.append(route.request.url)
+        if len(requests) != (2 if already_loaded else 1):
+            route.continue_()
+        elif failure == 'http-503':
+            route.fulfill(status=503)
+        else:
+            route.abort('connectionreset')
+
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    page.clock.install(time=NOW)
+    # Keep the observation window open while Playwright waits for the read to settle.
+    page.clock.pause_at(NOW + 60)
+    path = '/charts/listening-chunk/' if resource == 'chunk' else '/charts/listening-data'
+    page.route('**' + path + ('*' if resource == 'chunk' else ''), fail_once)
+    charts = page.locator('[data-listening-analytics]')
+    summary = charts.locator('.lp-summary')
+    seven_days = charts.get_by_role('button', name='7 days', exact=True)
+    url = live_app + '/charts?view=analytics&window=7d'
+
+    def is_listening_read(request):
+        return path in request.url
+
+    if already_loaded:
+        page.goto(url)
+        expect(summary).to_contain_text('1 recorded plays')
+        store.history.record_play_event(1, 'recovery-track', 'recovery-video', NOW - 1800)
+        assert listening_analytics.build(store, NOW + 1)
+
+    failed_read = (page.expect_response(is_listening_read) if failure == 'http-503'
+                   else page.expect_event('requestfailed', predicate=is_listening_read))
+    unavailable = 'chart' if resource == 'chunk' else 'data'
+    with failed_read as failed, page.expect_event('console', predicate=lambda message:
+            message.text.startswith(f'[Listening analytics] {unavailable} read unavailable')):
+        if already_loaded:
+            page.clock.fast_forward(120000)
+        else:
+            page.goto(url)
+    failed_reads = 2 if already_loaded else 1
+    if failure == 'http-503':
+        assert failed.value.status == 503
+    else:
+        assert failed.value.failure == 'net::ERR_CONNECTION_RESET'
+    page.clock.run_for(50)  # Deliver the status visibility update before the one-second retry.
+    expect(charts).not_to_have_attribute('aria-busy', 'true')
+    expect(charts.get_by_role('status')).not_to_be_visible()
+    expect(charts.get_by_role('button', name='Try again', exact=True)).not_to_be_visible()
+    expect(seven_days).to_have_attribute('aria-pressed', 'true')
+    if already_loaded:
+        expect(summary).to_contain_text('1 recorded plays')
+    assert len(requests) == failed_reads
+    with page.expect_response(is_listening_read) as retry:
+        page.clock.fast_forward(950)
+    assert retry.value.ok
+    assert retry.value.url == failed.value.url
+    expect(summary).to_contain_text('2 recorded plays' if already_loaded else '1 recorded plays')
+    expect(charts).not_to_have_attribute('aria-busy', 'true')
+    expect(seven_days).to_have_attribute('aria-pressed', 'true')
+    expect(charts.locator('.lp-history-row a')).to_have_text('Local artist')
+    assert len(requests) == failed_reads + 1
+
+
+@pytest.mark.parametrize('resource', ['manifest', 'chunk'])
+def test_leaving_listening_analytics_cancels_read_retry(live_app, store, page, resource):
+    seed_catalog_track(store, 'recovery-track', 'Saved song', 'Local artist', video_id='recovery-video')
+    store.history.record_play_event(1, 'recovery-track', 'recovery-video', NOW - 3600)
+    assert listening_analytics.build(store, NOW)
+    requests = []
+
+    def fail_once(route):
+        requests.append(route.request.url)
+        if len(requests) == 1:
+            route.fulfill(status=503)
+        else:
+            route.continue_()
+
+    page.clock.install()
+    pattern = '**/charts/listening-chunk/*' if resource == 'chunk' else '**/charts/listening-data'
+    page.route(pattern, fail_once)
+    page.goto(live_app + '/charts?view=songs&window=7d')
+    views = page.locator('.chart-views')
+    analytics = views.get_by_role('button', name='Listening analytics', exact=True)
+    with page.expect_response(pattern):
+        analytics.click()
+    charts = page.locator('[data-listening-analytics]')
+    expect(charts).not_to_have_attribute('aria-busy', 'true')
+    views.get_by_role('button', name='Top songs', exact=True).click()
+    expect(charts).not_to_be_visible()
+    page.clock.fast_forward(30000)
+    assert len(requests) == 1
+    analytics.click()
+    expect(charts.locator('.lp-summary')).to_contain_text('1 recorded plays')
+    expect(charts.get_by_role('button', name='7 days', exact=True)).to_have_attribute('aria-pressed', 'true')
+    assert len(requests) == 2
 
 
 def test_home_has_no_journal_and_hidden_charts_stories_do_not_count(prepared_charts_app,store,page,unlocked_home_controls):

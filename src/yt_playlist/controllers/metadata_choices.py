@@ -121,7 +121,7 @@ class MetadataChoices:
             if inputs['layout'] == 'runtime':
                 self.select(inputs['target_entry'], field, inputs['before'][field], inputs['sources'].get(field) or 'legacy_unknown')
             else:
-                self.repository.copy_recording_selection(inputs['layout'], previous, target, field)
+                self.repository.copy_recording_selection(previous, target, field)
 
     def fill_import(self, entry, fields, source, *, hint_source, now=None):
         at = clock(now)
@@ -132,12 +132,10 @@ class MetadataChoices:
                 self.select(entry, field, value, source, now=at)
             if value is None or inputs['layout'] == 'runtime' or field in inputs['hints']:
                 continue
-            observation = None
-            if inputs['layout'] == 'evidence':
-                delivery = self.deliveries.capture_state(entry, 'catalog_import', 'hint:' + field + ':' + hint_source,
-                    {'format': 'catalog-import-hint-1', 'source': hint_source, 'field': field, 'value': value}, now=at)
-                observation = self.repository.store_observations(delivery, {field: prepared[field]})[field]
-            self.repository.store_hint(inputs['layout'], entry, field, hint_source, value, observation)
+            delivery = self.deliveries.capture_state(entry, 'catalog_import', 'hint:' + field + ':' + hint_source,
+                {'format': 'catalog-import-hint-1', 'source': hint_source, 'field': field, 'value': value}, now=at)
+            observation = self.repository.store_observations(delivery, {field: prepared[field]})[field]
+            self.repository.store_hint(entry, field, hint_source, observation)
 
     def restore(self, entry, field, value, *, now=None):
         self.select(entry, field, value, 'youtube', now=now)

@@ -1,15 +1,22 @@
 import numpy as np
 from types import SimpleNamespace
-from yt_playlist.rec import content_model, embedding_vectors as vectors
+from yt_playlist.rec import content_model, embedding_vectors as vectors, musical_profiles
 
 
 class FakeDao:
-    def __init__(self, content, audio=None):
+    def __init__(self, content, audio=None, *, profiles=None):
         self._c = content
         self._a = audio or {}
+        self._profiles = profiles or {}
+        self.musical_profiles = SimpleNamespace(
+            by_keys=lambda keys: {key: self._profiles[key] for key in keys if key in self._profiles})
+
+    @property
+    def rec_query(self):
+        return self
 
     def library_keys(self):
-        return set(self._c) | set(self._a)
+        return set(self._c) | set(self._a) | set(self._profiles)
 
     def track_content(self):
         return self._c
@@ -33,7 +40,7 @@ def test_content_features_tokens(monkeypatch):
 
 def test_build_content_vectors_normalized_and_filtered():
     content = {"s|a": ("Techno", "1995"), "t|b": ("Techno", "1990")}
-    s = SimpleNamespace(rec_query=FakeDao(content))
+    s = FakeDao(content)
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     assert set(keys) == {"s|a", "t|b"}
     norms = np.linalg.norm(V, axis=1)
@@ -43,21 +50,22 @@ def test_build_content_vectors_normalized_and_filtered():
 
 
 def test_build_content_vectors_excludes_untagged():
-    s = SimpleNamespace(rec_query=FakeDao({}))   # no genre, no audio anywhere
+    s = FakeDao({})   # no genre, no audio anywhere
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     assert keys == [] and V.shape[0] == 0
 
 
 def test_audio_features_sharpen_within_genre():
-    """Same genre, but audio (energy/bpm) separates: a high-energy track should be MORE similar to
-    another high-energy track than to a low-energy one, even though all three share the genre."""
+    """Tracks with similar measured intensity and tempo stay close within one genre."""
     content = {k: ("Techno", "2000") for k in ("hi1", "hi2", "lo")}
-    audio = {
-        "hi1": {"energy": 0.95, "bpm": 150.0, "danceability": 0.9},
-        "hi2": {"energy": 0.92, "bpm": 148.0, "danceability": 0.88},
-        "lo":  {"energy": 0.10, "bpm": 90.0,  "danceability": 0.2},
+    measurements = {
+        "hi1": {"intensity": 0.95, "bpm": 150.0, "danceability": 0.9},
+        "hi2": {"intensity": 0.92, "bpm": 148.0, "danceability": 0.88},
+        "lo": {"intensity": 0.10, "bpm": 90.0, "danceability": 0.2},
     }
-    s = SimpleNamespace(rec_query=FakeDao(content, audio))
+    profiles = {key: musical_profiles.resolve([], overrides=values)
+                for key, values in measurements.items()}
+    s = FakeDao(content, profiles=profiles)
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     idx = {k: i for i, k in enumerate(keys)}
     sim_hi = float(V[idx["hi1"]] @ V[idx["hi2"]])
@@ -66,14 +74,22 @@ def test_audio_features_sharpen_within_genre():
 
 
 def test_track_with_audio_but_no_genre_is_included():
-    """A track with only audio (no genre) still gets a content vector from its audio block."""
+    """A sparse audio-only track keeps an evidence-weighted content vector."""
     content = {"g1": ("Techno", "2000"), "g2": ("Techno", "2000")}
-    audio = {"g1": {"energy": 0.9, "bpm": 150.0}, "g2": {"energy": 0.85, "bpm": 145.0},
-             "x":  {"energy": 0.88, "bpm": 148.0}}     # x has audio but no genre
-    s = SimpleNamespace(rec_query=FakeDao(content, audio))
-    keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
+    measurements = {"g1": {"intensity": 0.9, "bpm": 150.0},
+                    "g2": {"intensity": 0.85, "bpm": 145.0},
+                    "x": {"intensity": 0.88, "bpm": 148.0}}
+    profiles = {key: musical_profiles.resolve([], overrides=values)
+                for key, values in measurements.items()}
+    s = FakeDao(content, profiles=profiles)
+    inputs = vectors.content_inputs(s)
+    keys, V, _ = content_model.build_library_content(inputs)
     assert "x" in keys
-    assert np.isclose(np.linalg.norm(V[keys.index("x")]), 1.0)
+    assert 0 < np.linalg.norm(V[keys.index("x")]) < 1
+    previous = content_model.build_content_model(inputs.content, inputs.audio,
+        policy=inputs.policy.replace('content-character-2/', 'content-character-1/'))
+    legacy = content_model.encode_content(previous, None, None, inputs.audio['x'])
+    assert np.isclose(np.linalg.norm(legacy), 1.)
 
 
 def test_music_scale_is_a_categorical_feature():
@@ -81,7 +97,7 @@ def test_music_scale_is_a_categorical_feature():
     content = {k: ("Techno", "2000") for k in ("m1", "m2", "maj")}
     audio = {"m1": {"music_scale": "minor"}, "m2": {"music_scale": "minor"},
              "maj": {"music_scale": "major"}}
-    s = SimpleNamespace(rec_query=FakeDao(content, audio))
+    s = FakeDao(content, audio)
     keys, V, _ = content_model.build_library_content(vectors.content_inputs(s))
     idx = {k: i for i, k in enumerate(keys)}
     assert float(V[idx["m1"]] @ V[idx["m2"]]) > float(V[idx["m1"]] @ V[idx["maj"]])

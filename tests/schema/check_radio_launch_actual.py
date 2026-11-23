@@ -12,7 +12,8 @@ from tests.schema.actual_library import copy_readonly_library
 from tests.library_image.fixtures import report_file
 
 
-def test_actual_library_radio_launches(request, tmp_path, monkeypatch):
+@pytest.mark.parametrize('tuning_and_vibes', [False, True], ids=['on_air', 'with_tuning_and_vibes'])
+def test_actual_library_radio_launches(request, tmp_path, monkeypatch, tuning_and_vibes):
     option = request.config.getoption('--schema-source-db')
     if not option:
         pytest.skip('Supply a read-only source for an isolated actual-library replay')
@@ -22,7 +23,9 @@ def test_actual_library_radio_launches(request, tmp_path, monkeypatch):
     report = {'source': str(path), 'source_access': 'SQLite mode=ro; files read only',
               'python': sys.version, 'status': 'copying', 'source_hashes': {}}
     for name in ('web/routes/radio_session.py', 'web/routes/home_access.py', 'rec/account_growth.py',
-                 'web/radio_session.py', 'web/static/radio.js'):
+                 'web/radio_session.py', 'web/radio_launch.py', 'web/static/radio.js',
+                 'rec/radio_startup.py', 'rec/radio_candidate_inputs.py', 'rec/radio_candidates.py',
+                 'rec/radio_directions.py', 'repos/radio_catalog.py', 'library/radio_launch_publication.py'):
         source = Path(__file__).resolve().parents[2] / 'src/yt_playlist' / name
         report['source_hashes'][name] = hashlib.sha256(source.read_bytes()).hexdigest()
     try:
@@ -36,7 +39,8 @@ def test_actual_library_radio_launches(request, tmp_path, monkeypatch):
         try:
             asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
             uvloop.run(check(destination, report_file('/tmp/tuneconsole-633-actual-launch.json'),
-                             launch_radio=True, check_ownership=True))
+                             launch_radio=True, check_ownership=True, tuning_and_vibes=tuning_and_vibes,
+                             trace_schema=tuning_and_vibes))
         finally:
             asyncio.set_event_loop_policy(policy)
         report['status'] = 'passed'

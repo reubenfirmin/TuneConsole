@@ -223,7 +223,7 @@ def test_failed_manifest_keeps_head_unacknowledged(publications):
 
 
 def test_pool_resume_appends_bounded_prefix_then_verifies_before_attachment(publications):
-    pool = recommendation_pools.prepare('fresh', 'policy', None, '1' * 64, 'fresh',
+    pool = recommendation_pools.prepare('fresh', 'policy', '1' * 64, 'fresh',
         tuple(recommendation_pools.Candidate(index + 1, .5) for index in range(300)))
     plan = recommendation_plan.Plan('test', 'policy', None, 0, 100,
         slots=(recommendation_plan.Slot('home', 'all', 'fresh', pool),))
@@ -238,7 +238,7 @@ def test_pool_resume_appends_bounded_prefix_then_verifies_before_attachment(publ
 
 
 def test_failed_pool_verification_does_not_attach_or_mark_ready(publications):
-    pool = recommendation_pools.prepare('fresh', 'policy', None, '1' * 64, 'fresh', [])
+    pool = recommendation_pools.prepare('fresh', 'policy', '1' * 64, 'fresh', [])
     plan = recommendation_plan.Plan('test', 'policy', None, 0, 100,
         slots=(recommendation_plan.Slot('home', 'all', 'fresh', pool),))
     publications.repository.begin_pool.return_value = (9, True, None)
@@ -250,7 +250,7 @@ def test_failed_pool_verification_does_not_attach_or_mark_ready(publications):
 
 
 def test_shared_pool_is_verified_once_across_slot_batches_and_again_on_retry(publications):
-    pool = recommendation_pools.prepare('fresh', 'policy', None, '1' * 64, 'fresh',
+    pool = recommendation_pools.prepare('fresh', 'policy', '1' * 64, 'fresh',
         (recommendation_pools.Candidate(1, .5),))
     plan = recommendation_plan.Plan('test', 'policy', None, 0, 100, slots=tuple(
         recommendation_plan.Slot('home', f'mode-{index}', 'fresh', pool)
@@ -285,7 +285,6 @@ def test_changed_plan_is_rejected_before_any_staging_write(publications):
 def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool(publications):
     repository = publications.repository
     repository.is_private_reader.return_value = True
-    repository.supports_pool_revalidation.return_value = True
     repository.recording_ids.return_value = {'one': 1}
     repository.policy_families.return_value = {'new': 'shared'}
     repository.recent_pools.return_value = {}
@@ -293,10 +292,10 @@ def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool
     options = dict(external_key='prepared', policy_version='new', input_revision=2, created_at=100)
     first = publications.prepare_bundles(value, None, previous=publications, **options)
     original = first.slots[0].pool
-    old = recommendation_pools.prepare(original.pool_key, 'old', original.group_version_id,
+    old = recommendation_pools.prepare(original.pool_key, 'old',
         original.input_fingerprint, original.purpose, original.candidates)
     repository.recent_pools.return_value = {('home', 'all', 'fresh'): [
-        (9, old.pool_key, old.policy_version, old.group_version_id, old.input_fingerprint,
+        (9, old.pool_key, old.policy_version, old.input_fingerprint,
          old.purpose, len(old.candidates), old.content_digest)]}
     repository.pool_matches.return_value = True
     prepared = publications.prepare_bundles(value, None, previous=publications, **options)
@@ -312,7 +311,6 @@ def test_bundle_preparation_uses_explicit_identities_and_revalidates_reused_pool
 def test_bundle_preparation_rejects_policy_family_before_publication(publications):
     repository = publications.repository
     repository.is_private_reader.return_value = True
-    repository.supports_pool_revalidation.return_value = False
     repository.recording_ids.return_value = {'one': 1}
     repository.policy_families.return_value = {'root': 'root', 'foreign': 'foreign'}
     with pytest.raises(ValueError, match='different input generations'):

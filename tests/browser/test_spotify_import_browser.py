@@ -30,8 +30,8 @@ def spotify_app(store, record_property):
             record_property('spotify_browser_' + name + '_seconds', time.perf_counter() - began)
 
     began = time.perf_counter()
-    first = store.accounts.upsert_account("First account", "first", None, True)
-    second = store.accounts.upsert_account("Destination account", "second", None, False)
+    first = store.accounts.upsert_account("First account", None, True)
+    second = store.accounts.upsert_account("Destination account", None, False)
     first_song = _track("first-song", "Song", "Artist")
     chosen_song = _track("chosen-song", "Song", "Artist")
     first_client = FakeClient(search_results=[first_song], catalog={"first-song": first_song})

@@ -13,6 +13,7 @@ from yt_playlist.controllers.model_health import ModelHealth
 from yt_playlist.controllers.model_preparation import ModelPreparation
 from yt_playlist.controllers.taste import Taste
 from yt_playlist.core.activity import WorkClosing
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.rec import layers, rec_params
 
 pytestmark = pytest.mark.usefixtures('no_database')
@@ -20,31 +21,30 @@ pytestmark = pytest.mark.usefixtures('no_database')
 
 @pytest.mark.parametrize('accepted', [True, False])
 def test_model_publication_obeys_snapshot_and_acknowledges_only_captured_revision(accepted):
-    model = Mock(spec_set=['publish_training_generation'])
-    settings = Mock(spec_set=['publish_values'])
-    modes = Mock(spec_set=['publish_generation'])
-    refresh = Mock(spec_set=['revision', 'acknowledge'])
+    model = Mock(spec_set=['publish_training_generation', 'publish_model_state'])
+    refresh = Mock(spec_set=['revision', 'complete_fit'])
     refresh.revision.return_value = 'captured-revision'
     read_model = Mock(spec_set=['prepare_training_changes'])
     read_model.prepare_training_changes.return_value = 'files-prepared'
     reader = SimpleNamespace(rec_model=read_model)
     snapshot = SimpleNamespace(store=reader)
     snapshot.publish_ordered = Mock(side_effect=lambda publish: (publish() or True) if accepted else False)
-    batch = {'vectors': {'tracks': [('key', b'vector')]}, 'settings': {'fit': 'new'}, 'modes': (['mode'], [])}
+    recording = RecordingModelUpdate(fit_fingerprint='new')
+    batch = {'vectors': {'tracks': [('key', b'vector')]}, 'recording': recording, 'artist': None}
     prepare = Mock(return_value=batch)
     controller = ModelPreparation(snapshot=lambda: nullcontext(snapshot), refresh=refresh,
-        model=model, settings=settings, modes=modes, prepare=prepare)
+        model=model, prepare=prepare)
     order = Mock()
-    for name, operation in [('vectors', model.publish_training_generation), ('settings', settings.publish_values),
-                            ('modes', modes.publish_generation), ('ack', refresh.acknowledge)]:
+    for name, operation in [('vectors', model.publish_training_generation), ('state', model.publish_model_state),
+                            ('ack', refresh.complete_fit)]:
         order.attach_mock(operation, name)
     result = controller.rebuild(100, keep_collaborative=True)
     prepare.assert_called_once_with(reader, 100, keep_collaborative=True)
-    read_model.prepare_training_changes.assert_called_once_with(batch['vectors'], batch['settings'])
+    read_model.prepare_training_changes.assert_called_once_with(batch['vectors'], recording=recording, artist=None)
     if accepted:
         assert result is batch
-        assert order.mock_calls == [call.vectors('files-prepared'), call.settings({'fit': 'new'}),
-                                    call.modes(['mode'], []), call.ack('captured-revision')]
+        assert order.mock_calls == [call.vectors('files-prepared'),
+            call.state(recording=recording, artist=None), call.ack('captured-revision')]
     else:
         assert result is None and not order.mock_calls
 
@@ -52,15 +52,15 @@ def test_model_publication_obeys_snapshot_and_acknowledges_only_captured_revisio
 def test_cancelled_model_calculation_never_prepares_files_or_attempts_publication():
     read_model = Mock(spec_set=['prepare_training_changes'])
     snapshot = SimpleNamespace(store=SimpleNamespace(rec_model=read_model), publish_ordered=Mock())
-    refresh = Mock(spec_set=['revision', 'acknowledge'])
+    refresh = Mock(spec_set=['revision', 'complete_fit'])
     prepare = Mock(side_effect=WorkClosing('stopping'))
     controller = ModelPreparation(snapshot=lambda: nullcontext(snapshot), refresh=refresh,
-        model=None, settings=None, modes=None, prepare=prepare)
+        model=None, prepare=prepare)
     with pytest.raises(WorkClosing):
         controller.rebuild(100)
     read_model.prepare_training_changes.assert_not_called()
     snapshot.publish_ordered.assert_not_called()
-    refresh.acknowledge.assert_not_called()
+    refresh.complete_fit.assert_not_called()
 
 
 @pytest.mark.parametrize('failure', [None, 'conflict', 'cancel'])
@@ -90,24 +90,24 @@ def test_health_report_publishes_only_completed_current_calculation(failure):
 
 def test_taste_checkpoints_before_edits_and_preserves_genre_mute_bounds():
     settings = Mock(spec_set=['set_setting', 'delete_setting'])
-    model = Mock(spec_set=['save_taste_settings', 'set_weight', 'reset_weights', 'restore_taste_settings'])
+    model = Mock(spec_set=['save_taste_settings', 'set_session_weight', 'clear_session_weights',
+                           'reset_weights', 'restore_taste_settings'])
     taste = Taste(settings, model)
     order = Mock()
     order.attach_mock(model.save_taste_settings, 'checkpoint')
-    order.attach_mock(model.set_weight, 'weight')
+    order.attach_mock(settings.set_setting, 'parameter')
     taste.set_weight('genre:jazz', 0., 100)
-    assert order.mock_calls == [call.checkpoint(rec_params.CHECKPOINT_SETTING, rec_params.checkpoint_keys(),
-                                               100, replace=False),
-                                call.weight('genre:jazz', 0., now=100, lo=0., hi=2.)]
+    model.set_session_weight.assert_called_once_with('genre:jazz', 0., 100, lo=0., hi=2.)
     taste.set_param('now_min_events', -20, 101)
-    settings.set_setting.assert_called_once_with('rec_param:now_min_events',
-        str(rec_params.PARAMS_BY_NAME['now_min_events'].min))
+    assert order.mock_calls == [call.checkpoint(rec_params.checkpoint_keys(), 101, replace=False),
+                                call.parameter('rec_param:now_min_events',
+                                    str(rec_params.PARAMS_BY_NAME['now_min_events'].min))]
     taste.reset_all(102)
     assert settings.delete_setting.call_args_list == [call(rec_params.SETTING_PREFIX + spec.name)
                                                       for spec in rec_params.PARAMS]
     model.reset_weights.assert_called_once_with()
     taste.restore_checkpoint()
-    model.restore_taste_settings.assert_called_once_with(rec_params.CHECKPOINT_SETTING, rec_params.checkpoint_keys())
+    model.restore_taste_settings.assert_called_once_with(rec_params.checkpoint_keys())
 
 
 def graduation_inputs():
@@ -177,14 +177,15 @@ def test_slider_receipt_and_bounded_nudge_preserve_effective_preference():
 def test_listening_controller_reuses_supplied_evidence_and_deduplicates_tilt_inputs():
     captured = layers.RecentEvidence({'one': 100., 'two': 100.}, [], None, {})
     evidence = Mock(side_effect=AssertionError('supplied evidence must be reused'))
-    plays = Mock(return_value=[{'identity_key': 'one', 'played_at': -1000.},
-                              {'identity_key': 'one', 'played_at': 100.}])
-    controller = ListeningLayers(parameter={'now_window_h': 6, 'now_min_events': 1,
-                                            'session_halflife_h': 4}.__getitem__,
+    plays = Mock(return_value=layers.LayerPlays({'one': 100.}, {'one': 100., 'two': 90.}))
+    controller = ListeningLayers(parameter={'now_gain': 1, 'now_min_events': 1,
+                                            'session_alpha': 1, 'session_halflife_h': 4}.__getitem__,
                                  evidence=evidence, plays=plays)
     assert controller.now_mode_mix(100, evidence=captured)[:2] == (None, 0)
     assert controller.session_mode_mix(100, evidence=captured)[:2] == (None, 0)
     assert controller.evidence_coverage(100, evidence=captured)['now']['total'] == 2
     evidence.assert_not_called()
-    np.testing.assert_allclose(controller.session_tilt(100, np.array([[2., 0.]]), {'one': 0}), [1., 0.])
-    plays.assert_called_once_with(100 - 24 * 3600)
+    current, today = controller.track_tilts(100, np.array([[2., 0.], [0., 2.]]), {'one': 0, 'two': 1})
+    np.testing.assert_allclose(current, [1., 0.])
+    np.testing.assert_allclose(today, [0., 2 ** (-10 / (4 * 3600))])
+    plays.assert_called_once_with(100)

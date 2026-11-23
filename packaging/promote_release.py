@@ -46,20 +46,23 @@ def restore_channels(backend, previous, image, tag):
         ) from exc
 
 
+def release_payload_names(version):
+    return {"TuneConsole.flatpak", "TuneConsole-aarch64.flatpak", "TuneConsole-macos.dmg",
+            "TuneConsole-macos-arm64.dmg", "TuneConsole-macos-x86_64.dmg",
+            "appcast-macos-arm64.xml", "appcast-macos-x86_64.xml",
+            "container-amd64.json", "container-arm64.json", f"yt_playlist-{version}-py3-none-any.whl"}
+
+
 def validate(directory, tag, image, *, require_repository=True):
     release = classify(tag)
     root = Path(directory)
-    names = {"TuneConsole.flatpak", "TuneConsole-aarch64.flatpak", "TuneConsole-macos.dmg",
-             "TuneConsole-macos-arm64.dmg", "TuneConsole-macos-x86_64.dmg",
-             "appcast-macos-arm64.xml", "appcast-macos-x86_64.xml",
-             "container-amd64.json", "container-arm64.json"}
+    names = release_payload_names(release.version)
     wheels = list(root.glob("yt_playlist-*.whl"))
     if len(wheels) != 1:
         raise ValueError("Expected exactly one release wheel")
     wheel = wheels[0]
-    if wheel.name != f"yt_playlist-{release.version}-py3-none-any.whl":
+    if wheel.name not in names:
         raise ValueError("Wheel filename does not match the release version")
-    names.add(wheel.name)
     repo = root / "flatpak-repo"
     if require_repository:
         for arch in ("x86_64", "aarch64"):
@@ -76,9 +79,11 @@ def validate(directory, tag, image, *, require_repository=True):
         metadata = archive.read(f"yt_playlist-{release.version}.dist-info/METADATA").decode()
         if f"\nVersion: {release.version}\n" not in metadata:
             raise ValueError("Wheel metadata version does not match")
+    checksums = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     for arch in ("arm64", "x86_64"):
-        verify(root / f"appcast-macos-{arch}.xml", root / f"TuneConsole-macos-{arch}.dmg", tag, arch)
-    if (root / "TuneConsole-macos.dmg").read_bytes() != (root / "TuneConsole-macos-arm64.dmg").read_bytes():
+        dmg_name = f"TuneConsole-macos-{arch}.dmg"
+        verify(root / f"appcast-macos-{arch}.xml", root / dmg_name, tag, arch)
+    if checksums["TuneConsole-macos.dmg"] != checksums["TuneConsole-macos-arm64.dmg"]:
         raise ValueError("Default macOS download must match the validated ARM64 archive")
     digests = []
     for arch in ("amd64", "arm64"):
@@ -88,7 +93,6 @@ def validate(directory, tag, image, *, require_repository=True):
                 or not re.fullmatch(re.escape(image) + r"@sha256:[a-f0-9]{64}", digest)):
             raise ValueError(f"Invalid tested container digest for {arch}")
         digests.append(digest)
-    checksums = {name: hashlib.sha256((root / name).read_bytes()).hexdigest() for name in sorted(names)}
     repository_checksums = {str(path.relative_to(repo)): hashlib.sha256(path.read_bytes()).hexdigest()
                             for path in sorted(repo.rglob("*")) if path.is_file()}
     return release, digests, {"tag": tag, "version": release.version, "sha256": checksums,

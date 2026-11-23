@@ -64,7 +64,7 @@ def _tracks(store, spec):
 
 def _owned_tracks(store, spec):
     """spec: (title, artist, genre, year) tuples -> genre-attached items, as a card carries them."""
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     pid = store.playlists.upsert_playlist(iid, "PL1", "Mix", len(spec), "h", 1.0)
     ids = []
     for title, artist, genre, year in spec:

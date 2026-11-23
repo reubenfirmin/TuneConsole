@@ -1,6 +1,4 @@
 """Exercise the serving/outcome ledger through real HTTP actions, including failed writes."""
-import json
-
 import numpy as np
 import pytest
 from fastapi.testclient import TestClient
@@ -12,7 +10,7 @@ from yt_playlist.web.app import create_app
 
 @pytest.fixture
 def measured(store):
-    iid = store.accounts.upsert_account("Main", "cred", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     ids, vectors = [], []
     for vid, title, xy in [("seed", "Seed", [1., 0.]), ("near", "Near", [.9, .1]),
                            ("far", "Far", [0., 1.])]:
@@ -47,7 +45,7 @@ def test_final_recommendations_preserve_scores_order_context_and_policy(measured
     assert [r["identity_key"] for r in rows] == [i.key for i in expected]
     assert [r["score"] for r in rows] == [i.score for i in expected]
     assert all(r["score"] is not None for r in rows)
-    assert json.loads(rows[0]["provenance"])["playlist_id"] == pid
+    assert store.rec_ledger.impressions.facts(rows[0]["id"])["provenance"]["playlist_id"] == pid
 
     response = http.get("/track/seed/similar")
     assert response.status_code == 200 and "Near" in response.text

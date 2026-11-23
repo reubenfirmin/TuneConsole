@@ -36,8 +36,6 @@ def library(store):
                 policies=lambda now: measurement.PoolPolicies(reader, now), recommendations=reader.recommendations,
                 serial=reader.prepared_content.serial, release=captured.release_reader, publish=captured.publish_ordered)
 
-    return LibraryPoolPreparation(store.rec_proposals, store.rec_ledger, store.recommendations,
+    return LibraryPoolPreparation(store.rec_ledger, store.recommendations,
         vibe=lambda now: home_vibe.current(store, now), scheduled=lambda now: mode_composition.scheduled(store, now),
-        clicked=store._clicked_library_pools, snapshot=snapshot,
-        calculate=lambda now, parameters: library_pool._calculate(store, now, parameters),
-        stamp=lambda tracks, now, lane: measurement.stamp_pool(store, tracks, now, lane))
+        snapshot=snapshot)

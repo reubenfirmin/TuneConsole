@@ -10,11 +10,15 @@ sys.path.insert(0, str(Path(__file__).parents[1] / "packaging"))
 provenance = importlib.import_module("candidate_provenance")
 candidates = importlib.import_module("release_candidates")
 timing = importlib.import_module("release_timing")
+receipt = importlib.import_module("container.receipt")
+policy = importlib.import_module("release_policy")
 
 
 def metadata():
     return {"schema": 1, "tag": "v1.2.3", "version": "1.2.3", "revision": "a" * 40,
-            "source_run": "123", "repository": "owner/repo", "sha256": {"payload": "b" * 64},
+            "source_run": "123", "repository": "owner/repo",
+            "sha256": dict.fromkeys(provenance.release_payload_names("1.2.3") | provenance.REPOSITORY_ARCHIVES,
+                                    "b" * 64),
             "architectures": {"macos": ["arm64", "x86_64"], "flatpak": ["aarch64", "x86_64"],
                               "container": ["amd64", "arm64"]}}
 
@@ -29,10 +33,23 @@ def test_different_revision_version_run_or_repository_cannot_reuse_candidates(fi
         provenance.check_identity(data, "v1.2.3", "a" * 40, "123", "owner/repo")
 
 
-def test_tampered_payload_cannot_pass_handoff(tmp_path):
-    (tmp_path / "release-provenance.json").write_text(json.dumps(metadata()))
-    (tmp_path / "payload").write_bytes(b"changed after the release build")
-    with pytest.raises(ValueError, match="recorded bytes"):
+@pytest.mark.parametrize("name", ["TuneConsole.flatpak", "TuneConsole-macos-x86_64.dmg"])
+def test_tampered_payload_cannot_pass_handoff(tmp_path, name):
+    data = metadata()
+    names = provenance.release_payload_names(data["version"]) | provenance.REPOSITORY_ARCHIVES
+    data["sha256"] = {}
+    for name in names:
+        payload = tmp_path / name
+        payload.write_bytes(b"recorded build bytes")
+        data["sha256"][name] = provenance.digest(payload)
+    (tmp_path / "release-provenance.json").write_text(json.dumps(data))
+    assert provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo") == data
+    (tmp_path / name).write_bytes(b"modified build bytes")
+    with pytest.raises(ValueError, match=f"recorded bytes: {name}"):
+        provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo")
+    del data["sha256"][name]
+    (tmp_path / "release-provenance.json").write_text(json.dumps(data))
+    with pytest.raises(ValueError, match=f"missing payload hashes: {name}"):
         provenance.verify(tmp_path, "v1.2.3", "a" * 40, "123", "owner/repo")
 
 
@@ -41,6 +58,84 @@ def test_missing_architecture_cannot_pass_handoff():
     data["architectures"]["container"].pop()
     with pytest.raises(ValueError, match="architecture"):
         provenance.check_identity(data, "v1.2.3", "a" * 40, "123", "owner/repo")
+
+
+def test_next_patch_ignores_prereleases_and_uses_numeric_version_order():
+    assert policy.next_patch(["v1.2.2", "v1.2.10", "v2.0.0rc1", "old-tag"]) == "v1.2.11"
+
+
+@pytest.mark.parametrize("changed", [None, "tree", "head", "owner"])
+def test_tag_discovers_the_maintainer_pr_candidate_only_for_the_same_merge_tree(tmp_path, changed):
+    revision, preview, head, tree = (letter * 40 for letter in "abcd")
+
+    class Release:
+        repository = "owner/repo"
+
+        def api(self, path):
+            if "/commits/" in path and "/pulls?" in path:
+                return [{"merged_at": "time", "merge_commit_sha": revision,
+                         "user": {"login": "another" if changed == "owner" else "owner"},
+                         "head": {"sha": head, "repo": {"full_name": self.repository}},
+                         "base": {"ref": "main", "repo": {"full_name": self.repository}}}]
+            if "/workflows/ci.yml/runs?" in path:
+                assert f"head_sha={head}" in path
+                return {"workflow_runs": [{"id": 123}]}
+            if "/workflows/prepare-release.yml/runs?" in path:
+                return {"workflow_runs": []}
+            if "/artifacts?" in path:
+                return {"artifacts": [{"name": name, "id": n + 1, "expired": False, "size_in_bytes": 1}
+                                      for n, name in enumerate(candidates.EXPECTED)]}
+            if path.endswith(f"/git/commits/{preview}"):
+                return {"tree": {"sha": "e" * 40 if changed == "tree" else tree},
+                        "parents": [{"sha": "f" * 40 if changed == "head" else head}]}
+            if path.endswith(f"/git/commits/{revision}"):
+                return {"tree": {"sha": tree}}
+            assert path == "repos/owner/repo/actions/runs/123"
+            return {"path": candidates.PR_WORKFLOW, "head_sha": head, "event": "pull_request",
+                    "head_repository": {"full_name": self.repository}, "status": "completed"}
+
+        def run(self, *args):
+            directory = Path(args[args.index("--dir") + 1])
+            (directory / "release-provenance.json").write_text(json.dumps(dict(metadata(), revision=preview, tree=tree)))
+
+    status = tmp_path / "status.json"
+    if changed:
+        with pytest.raises(candidates.CandidateUnavailable, match="No complete prepared assets"):
+            candidates.discover(Release(), revision, "v1.2.3", status_file=status)
+    else:
+        assert candidates.discover(Release(), revision, "v1.2.3", status_file=status) == ("123", "1,2,3,4,5,6,7,8,9")
+        assert json.loads(status.read_text())["build_revision"] == preview
+
+
+@pytest.mark.parametrize("alias_first", [False, True])
+def test_registry_receipt_uses_the_pushed_manifest_independent_of_local_alias_order(monkeypatch, alias_first):
+    image = "ghcr.io/owner/repo"
+    digest = "sha256:" + "a" * 64
+    revision = "b" * 40
+    remote = f"{image}@{digest}"
+    local_aliases = [remote, f"repo@{digest}"]
+    if alias_first:
+        local_aliases.reverse()
+    registry = {f"{image}:candidate": digest, remote: json.dumps({
+        "os": "linux", "architecture": "amd64", "config": {"Labels": {
+            "org.opencontainers.image.version": "1.2.3", "org.opencontainers.image.revision": revision,
+        }},
+    })}
+
+    def inspect(reference, _template):
+        if reference == "tuneconsole:candidate":
+            pytest.fail(f"Read local aliases {local_aliases}")
+        return registry[reference]
+
+    monkeypatch.setattr(receipt, "inspect", inspect)
+    expected = {"arch": "amd64", "version": "1.2.3", "digest": remote}
+    assert receipt.capture(image, "candidate", "amd64", "1.2.3", revision) == expected
+    assert receipt.repair(image, dict(expected, digest=f"repo@{digest}"), "amd64", "1.2.3", revision) == expected
+    with pytest.raises(ValueError, match="does not match"):
+        receipt.capture(image, "candidate", "arm64", "1.2.3", revision)
+    registry[f"{image}:candidate"] = "missing"
+    with pytest.raises(ValueError, match="manifest digest"):
+        receipt.capture(image, "candidate", "amd64", "1.2.3", revision)
 
 
 @pytest.mark.parametrize("event,branch,head", [("push", "v1.2.3", "a" * 40),
@@ -88,12 +183,14 @@ def test_late_or_failed_publication_does_not_claim_budget_success():
     assert failed["elapsed_seconds"] is None and not failed["within_budget"]
 
 
-def test_recovery_clock_uses_original_release_start_without_looking_up_ci():
+def test_recovery_clock_uses_original_tag_request_without_looking_up_ci():
     class History:
         repository = "owner/repo"
 
         def api(self, path):
-            assert path == "repos/owner/repo/actions/runs/123"
-            return {"created_at": "2026-10-23T12:01:00Z", "updated_at": "2026-10-23T14:30:00Z"}
+            if path == "repos/owner/repo/actions/runs/123":
+                return {"created_at": "2026-10-23T14:30:00Z", "event": "workflow_dispatch"}
+            assert "/workflows/release.yml/runs?event=push&branch=v1.2.3&head_sha=" in path
+            return {"workflow_runs": [{"created_at": "2026-10-23T12:01:00Z"}]}
 
-    assert candidates.source_clock(History(), "123") == {"release_started_at": "2026-10-23T12:01:00Z"}
+    assert candidates.publication_clock(History(), "a" * 40, "v1.2.3", "123") == {"release_started_at": "2026-10-23T12:01:00Z"}

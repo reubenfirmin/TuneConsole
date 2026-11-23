@@ -4,6 +4,8 @@ Callers hold the Store lock and an outer transaction. Candidate admission uses
 supplied observation IDs, or captures the candidate actually offered by this
 call. It never searches historical values to guess a supplying delivery.
 """
+import json
+
 from . import metadata_deliveries as deliveries, metadata_evidence as evidence, metadata_values as values
 
 
@@ -16,8 +18,9 @@ def field_name(field):
 def candidates(conn, conflict_id):
     result = []
     for row in conn.execute('SELECT o.*,COALESCE(o.legacy_source,d.provider) AS provider '
-            'FROM metadata_conflict_candidates c JOIN metadata_observations o ON o.id=c.observation_id '
-            'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE c.conflict_id=? ORDER BY c.position,o.id',
+            'FROM metadata_conflicts c,json_each(c.candidate_positions) p '
+            'JOIN metadata_observations o ON o.id=CAST(p.key AS INTEGER) '
+            'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE c.id=? ORDER BY p.value,o.id',
             (conflict_id,)):
         value = evidence.value_from_row(row)
         result.append({'provider': row['provider'], 'value': None if value.kind == 'unresolved' else value.selected(),
@@ -26,9 +29,17 @@ def candidates(conn, conflict_id):
     return result
 
 
+def save_candidates(conn, conflict_id, observations):
+    positions = {}
+    for position, observation in enumerate(observations):
+        positions.setdefault(observation, position)
+    conn.execute('UPDATE metadata_conflicts SET candidate_positions=? WHERE id=?',
+                 (json.dumps(positions, separators=(',', ':')), conflict_id))
+
+
 def for_entry(conn, entry_id, field=None):
-    query = ('SELECT c.* FROM metadata_conflicts c JOIN catalog_entries e ON e.id=? '
-             'WHERE (c.entry_id=e.id OR c.recording_id=e.recording_id)')
+    query = ('SELECT c.* FROM metadata_conflicts c JOIN track_sources e ON e.id=? '
+             'WHERE c.runtime_id IS NULL AND (c.entry_id=e.id OR c.recording_id=e.recording_id)')
     args = [entry_id]
     if field is not None:
         query += ' AND c.field=?'
@@ -50,7 +61,7 @@ def _admit(conn, entry_id, field, candidate, now):
                                         units={field: unit} if unit else {})[field]
     row = conn.execute('SELECT o.*,COALESCE(d.provider,o.legacy_source) AS provider FROM metadata_observations o '
                        'LEFT JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE o.id=?', (observation,)).fetchone()
-    subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    subject = conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     if (row is None or subject is None or row['provider'] != provider or row['field'] != field
             or row['field_scope'] != values.scope(field) or row['recording_id'] != subject['recording_id']
             or values.scope(field) != 'recording' and row['entry_id'] != entry_id
@@ -68,7 +79,7 @@ def upsert(conn, entry_id, field, offered, *, now=None, refreshed_providers=None
     if any(not isinstance(candidate, dict) for candidate in offered):
         raise ValueError('Metadata conflict candidates must be named values with providers')
     with evidence._atomic(conn):
-        subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+        subject = conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
         if subject is None:
             raise ValueError('Unknown metadata conflict input')
         # Continue an installed entry-local conflict on its original owner.
@@ -95,9 +106,7 @@ def upsert(conn, entry_id, field, offered, *, now=None, refreshed_providers=None
         else:
             conflict = row['id']
             conn.execute('UPDATE metadata_conflicts SET status=?,updated_at=? WHERE id=?', (status, now, conflict))
-            conn.execute('DELETE FROM metadata_conflict_candidates WHERE conflict_id=?', (conflict,))
-        conn.executemany('INSERT OR IGNORE INTO metadata_conflict_candidates(conflict_id,observation_id,position) VALUES (?,?,?)',
-                         ((conflict, observation, position) for position, observation in enumerate(observations)))
+        save_candidates(conn, conflict, observations)
     return conflict
 
 

@@ -35,7 +35,7 @@ print(hashlib.sha256(fit.matrix.tobytes()).hexdigest())
 
 
 def test_item2vec_builds_unit_vectors(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(8)]
     B = [store.tracks.upsert_track(f"b{i}", f"B{i}", "BB", None, None) for i in range(8)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 8, "h", 0.0), A)
@@ -63,7 +63,7 @@ def test_method_setting_switches_builder(store, monkeypatch):
 
     monkeypatch.setattr(training, 'svd', builder('svd'))
     monkeypatch.setattr(training, 'item2vec', builder('item2vec'))
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     A = [store.tracks.upsert_track(f"a{i}", f"A{i}", "AB", None, None) for i in range(14)]
     store.playlists.set_playlist_tracks(store.playlists.upsert_playlist(iid, "PA", "PA", 14, "h", 0.0), A)
     store.settings.set_setting("rec_embed_method", "svd")

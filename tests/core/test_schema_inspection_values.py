@@ -4,7 +4,8 @@ import sqlite3
 
 import pytest
 
-from yt_playlist.core import schema_definition, schema_inspection
+from yt_playlist.core import schema_inspection
+from yt_playlist.core.migrations import schema_definition
 
 
 def test_named_definitions_observe_only_current_main_schema_and_allow_quoted_names():

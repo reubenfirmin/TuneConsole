@@ -10,15 +10,15 @@ from tempfile import TemporaryDirectory
 import pytest
 from tests.audio_model_support import disable_models
 
-from yt_playlist.core import file_owners, policy_documents, served_facts
+from yt_playlist.core import file_owners, file_paths, policy_bodies, policy_documents, publication_files, served_facts
 from yt_playlist.core.db_revisions import Revisions
 from yt_playlist.core.store import Store
 from tests.store_fixture_support import PristineSchema, initialize_consumer, revision_definitions
 
 
 BODY_OWNERS = ('policy_documents', 'evidence_ledger', 'metadata_delivery_files',
-    'audio_annotation_files', 'album_description_files', 'sample_files', 'metadata_runtime_files',
-    'group_documents', 'collection_recovery', 'recommendation_outputs', 'legacy_evidence', 'playback_inbox')
+    'album_description_files', 'sample_files', 'metadata_runtime_files',
+    'group_documents', 'collection_recovery', 'recommendation_outputs', 'legacy_evidence')
 
 
 def assert_upgrade_phase(template, version):
@@ -39,9 +39,10 @@ def roots(conn):
     """The current finite file-owner inventory, also for memory fixtures."""
     result = {name: module.directory(conn) for name, module in file_owners.owners().items()}
     result['served_facts'] = served_facts.directory(conn)
+    result['playback_inbox'] = file_paths.directory(conn, 'playback-feedback')
     for name in BODY_OWNERS:
         module = importlib.import_module('yt_playlist.core.' + name)
-        if name in {'sample_files', 'audio_annotation_files'}:
+        if name == 'sample_files':
             result[name] = module.directory(conn, memory_key=getattr(conn, '_policy_memory_key', None))
         else:
             result[name] = module.directory(conn)
@@ -111,8 +112,6 @@ class PreparedTemplate:
                 # host power-loss durability is outside this fixture's contract.
                 target.conn.execute('PRAGMA synchronous=OFF')
                 self.restore(target)
-                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-                    setattr(target, name, getattr(self.source, name))
                 target._bind_repositories()
                 if target._db_path is not None:
                     mode = target.conn.execute('PRAGMA journal_mode=WAL').fetchone()[0]
@@ -181,28 +180,48 @@ class PreparedTemplate:
             destination = destinations[domain] / relative
             assert source != destination
             # Installed recovery may retain a verified file in an earlier
-            # compaction tree. Its SQL coordinate must still become private.
+            # snapshot. Its SQL coordinate must still become private.
             if source.exists():
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
             external_relocations[source] = destination
         target.conn.execute('BEGIN')
         with target.conn:
-            with policy_documents.coordinate_updates(target.conn, {table.strip('"') for table, _, _ in self.coordinates}):
+            def relocated(filename):
+                path = Path(filename)
+                if path in external_relocations:
+                    return str(external_relocations[path])
+                source = next((parent for parent in (path, *path.parents) if parent in relocations), None)
+                assert source is not None, 'Unmanaged prepared fixture coordinate: ' + filename
+                return str(relocations[source] / path.relative_to(source))
+
+            file_owned = publication_files.installed_manifests(target.conn)
+            if file_owned:
+                manifest_tables = publication_files.PREFIXES
+            else:
+                manifest_tables = [table for table in publication_files.OWNERS.values()
+                                   if target.conn.execute("SELECT 1 FROM pragma_table_info(?) WHERE name='files'",
+                                                          (table,)).fetchone()]
+            manifests = {}
+            for table in manifest_tables:
+                replacements = {row[0]: relocated(row[3]) for row in publication_files.references(target.conn, table)}
+                if replacements:
+                    manifests[table] = replacements
+            tables = {table.strip('"') for table, _, _ in self.coordinates}
+            if manifests:
+                tables.update((publication_files.RECEIPTS,) if file_owned else manifests)
+            with policy_documents.coordinate_updates(target.conn, tables):
                 updates = {}
                 for table, column, filename in self.coordinates:
-                    path = Path(filename)
-                    if path in external_relocations:
-                        updates.setdefault((table, column), {})[filename] = str(external_relocations[path])
-                        continue
-                    # Walk each ancestry once. Checking every owner with
-                    # is_relative_to repeatedly constructs the same parents.
-                    source = next((parent for parent in (path, *path.parents)
-                                   if parent in relocations), None)
-                    assert source is not None, 'Unmanaged prepared fixture coordinate: ' + filename
-                    destination = relocations[source]
-                    updates.setdefault((table, column), {})[filename] = str(
-                        destination / path.relative_to(source))
+                    updates.setdefault((table, column), {})[filename] = relocated(filename)
+                for table, replacements in manifests.items():
+                    publication_files.relocate(target.conn, table, replacements)
+                if target.conn.execute("SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='settings'").fetchone():
+                    policy_paths = target.conn.execute("SELECT key,value->>'$[0]' FROM main.settings WHERE key GLOB ?",
+                                                       (policy_bodies.PATTERN,)).fetchall()
+                    for key, filename in policy_paths:
+                        target.conn.execute("UPDATE main.settings SET value=json_set(value,'$[0]',?) WHERE key=?",
+                                            (relocated(filename), key))
                 for (table, column), mapping in updates.items():
                     items = list(mapping.items())
                     # Bound SQL parameters while avoiding a table scan for
@@ -245,14 +264,14 @@ def capture_template(source, result, *, logical_coordinates=(), external_files=(
     revisions = getattr(source, '_snapshot_revisions', None)
     guards, tables, views = (), frozenset(), frozenset()
     if revisions is not None:
-        revisions.refresh()
         physical = {name for name, in source.conn.execute(
             "SELECT name FROM main.sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         actual_views = {name for name, in source.conn.execute(
             "SELECT name FROM main.sqlite_schema WHERE type='view'")}
-        if revisions.tables != physical or revisions.views != actual_views:
-            # A backup can give a different schema the same SQLite cookie.
-            # Refresh's ordinary cookie fast path cannot establish its owners.
+        schema_version = source.conn.execute('PRAGMA main.schema_version').fetchone()[0]
+        if (revisions.schema_version != schema_version or revisions.tables != physical
+                or revisions.views != actual_views):
+            # A backup can change the schema owners without changing the SQLite cookie.
             Revisions.unbind(source.conn)
             revisions = source._snapshot_revisions = Revisions(source.conn)
         # SQLite can retain orphan TEMP trigger catalog rows after backup.
@@ -295,8 +314,6 @@ def historical_template(pristine, seed, *, database, logical_coordinates=(), sch
             else:
                 assert not schema_replay, 'Historical replay must precede current snapshot guards'
                 completed.restore(source)
-                for name in ('_schema_compatibility', '_rebuild_source_version', '_schema_recovery_pending'):
-                    setattr(source, name, getattr(completed.source, name))
                 source._bind_repositories()
             result = seed(source)
             # Explicit migration replay must precede current TEMP guards, which
@@ -310,7 +327,7 @@ def historical_template(pristine, seed, *, database, logical_coordinates=(), sch
 
 
 @contextmanager
-def prepared_template(pristine, seed, *, database=None, defer_metadata=False, snapshot_guards=True):
+def prepared_template(pristine, seed, *, database=None, run_migrations=False, snapshot_guards=True):
     """Build with ordinary test settings; retain private files and a read-only template."""
     with ExitStack() as resources:
         home = resources.enter_context(TemporaryDirectory(prefix='tuneconsole-template-home-'))
@@ -328,7 +345,7 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False, sn
             resources.callback(source.conn.close)
             if database is not None:
                 source.conn.execute('PRAGMA synchronous=OFF')
-            if isinstance(pristine, PristineSchema) and not defer_metadata:
+            if isinstance(pristine, PristineSchema) and not run_migrations:
                 # The session builder supplies exact shipped empty SQL below
                 # startup admission. Bind this private consumer like store
                 # instead of revalidating hundreds of unchanged DDL objects for
@@ -338,7 +355,7 @@ def prepared_template(pristine, seed, *, database=None, defer_metadata=False, sn
             else:
                 assert snapshot_guards, 'Raw schema admission owns its snapshot guards'
                 pristine.backup(source.conn)
-                source.init_schema(defer_metadata=defer_metadata)
+                source.init_schema()
             files = roots(source.conn)
             cleanup_memory_files(source, files)
             result = seed(source)

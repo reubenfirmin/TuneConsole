@@ -10,9 +10,7 @@ from yt_playlist.controllers.album_menu import AlbumMenu
 from yt_playlist.controllers.home_board import HomeBoard
 from yt_playlist.controllers.home_navigation import HomeNavigation
 from yt_playlist.controllers.home_tuning import HomeTuning
-from yt_playlist.controllers.vibe_preparation import VibePreparation
 from yt_playlist.rec import album_choices, album_tuning, home_cards, mix_tuning, vibe_readiness
-from yt_playlist.rec.vibe_requests import VibeRequests
 
 pytestmark = pytest.mark.usefixtures('no_database')
 
@@ -25,9 +23,7 @@ def board(result):
             return value
         return run
     command = HomeBoard(load=effect('load', {'genre_options': [{'family': 'jazz'}]}),
-        live=effect('live', ({'generation': 4}, result, 'tuning-4')), expire=effect('expire'),
         cards=effect('cards', result), starter=lambda value, now: value,
-        remember=effect('remember'), schedule=effect('schedule'), vibe=lambda: {'id': 'latest', 'phase': 'waiting'},
         present=effect('present'), audit=effect('audit'), tuning=lambda: True, remaining=lambda now: 12,
         fingerprint=lambda payload, now: {}, modes=lambda: True, current_vibe=lambda now: 'relax',
         discovery=lambda payload, now: {}, artist_images=effect('images'), busy=lambda: False,
@@ -36,18 +32,15 @@ def board(result):
     return command, calls
 
 
-def test_live_board_completes_capture_publication_exposure_and_audit_before_presenter():
+def test_live_board_captures_exposure_and_audit_for_an_explicit_adjustment():
     result = home_cards.CardsResult([{'lane': 'wheelhouse', 'tracks': [{'key': 'exact recording'}]}], [],
                                    None, None, [], [], 0, '')
     command, calls = board(result)
-    model = command.query(None, 1000, live=True, path='/home/cards', attempt=2)
-    assert [name for name, _, _ in calls] == ['expire', 'live', 'remember', 'schedule', 'present', 'audit']
-    assert calls[2][1] == ({'generation': 4}, result, 1000)
-    assert calls[2][2] == {'tuning': 'tuning-4'}
-    assert calls[-1][1] == (result.protos, 1000, '/home/cards')
-    assert model['protos'] == result.protos and model['preparing']
-    assert model['vibe_request']['id'] == 'latest'
-    assert model['prepare_interval'] is not None
+    model = command.query(None, 1000, changed=True, path='/home/vibe')
+    assert [name for name, _, _ in calls] == ['cards', 'present', 'audit']
+    assert calls[1][1] == (result, 1000)
+    assert calls[-1][1] == (result.protos, 1000, '/home/vibe')
+    assert model['protos'] == result.protos
 
 
 def test_rotation_closes_current_window_and_rejects_stale_pool_epoch_without_starting_work():
@@ -66,7 +59,7 @@ def test_rotation_closes_current_window_and_rejects_stale_pool_epoch_without_sta
 def test_album_query_selects_real_menu_and_captures_evidence_notes_listening():
     items = [{'browse_id': f'album-{i}', 'title': f'Album {i}', 'artist': f'Artist {i}',
               'genre': 'Jazz', 'score': 1, 'features': {}} for i in range(8)]
-    payload = {'items': items, 'context': {'comparison': 'paired-model'}}
+    payload = {'items': items, 'context': {'score_generation': 'ordinary'}}
     store = repository_store(rec_proposals={'get_proposals': {}, 'put_proposals': None},
         notes={'request': None}, ledger={}, genres={'feature_axes': {'Jazz': ('jazz', None)}}, settings={})
     present, schedule, listening = Mock(return_value='held-menu'), Mock(), Mock(side_effect=lambda ids: {
@@ -80,7 +73,7 @@ def test_album_query_selects_real_menu_and_captures_evidence_notes_listening():
         tuning=lambda now: {'values': {'novelty': .5}, 'genres': [], 'remaining': 25},
         defaults=lambda: {'novelty': .5}, excluded=lambda epoch: [], select=select,
         listening=listening, read_notes=lambda album: 'Prepared note', present=present, close=Mock(),
-        opportunity=Mock(), schedule=schedule, worker_available=True, writable=lambda: True, logger=Mock())
+        opportunity=Mock(), schedule=schedule, worker_available=True, logger=Mock())
     model = command.query(1000)
     assert model['albums'] and len(model['albums']) <= 8
     assert model['opportunity_id'] == 'held-menu'
@@ -90,8 +83,8 @@ def test_album_query_selects_real_menu_and_captures_evidence_notes_listening():
     assert [row['id'] for row in offered] == [row['browse_id'] for row in model['albums']]
     assert present.call_args.kwargs['context']['album_menu']['temporary_until'] == 1025
     store.notes.request.assert_called_once()
-    store.rec_proposals.put_proposals.assert_called_once_with('model_album_assignment',
-        {'epoch': 2, 'comparison': 'paired-model'}, 1000)
+    assert present.call_args.kwargs['context']['score_generation'] == 'ordinary'
+    store.rec_proposals.put_proposals.assert_not_called()
 
 
 def test_tuning_changes_effective_weight_and_pinning_preserves_existing_lean():
@@ -125,47 +118,6 @@ def test_navigation_bounds_story_visibility_and_rejects_unconfirmed_playback():
     refresh.assert_called_once()
 
 
-def test_vibe_build_releases_reader_before_guarded_publication_and_preserves_partial_board():
-    events = []
-    snapshot = SimpleNamespace(store=object(), release_reader=lambda: events.append('released'),
-                               is_current=lambda: False)
-    result = SimpleNamespace(protos=[{'lane': str(i)} for i in range(4)], preparing=False, requested_genres=[])
-    finish = Mock(return_value=True)
-    def remember(*args, **kwargs):
-        assert events == ['released']
-        assert kwargs['before_publish']() is False
-        events.append('publication-rejected')
-    command = VibePreparation(expire=Mock(), snapshot=lambda: nullcontext(snapshot),
-        capture=lambda *args: ({}, result, 'revision', 4), remember=remember,
-        atomic=nullcontext, schedule=Mock(), now=lambda: 1000, logger=Mock())
-    command.build({'id': 'old', 'vibe': 'relax'}, finish)
-    finish.assert_not_called()
-    assert events == ['released', 'publication-rejected']
-    events.clear()
-    result.protos = result.protos[:2]
-    command.build({'id': 'latest', 'vibe': 'relax'}, finish)
-    assert events == ['released']
-    finish.assert_called_once_with({'id': 'latest', 'vibe': 'relax'}, 'waiting')
-    command.schedule.assert_called_once()
-
-
-def test_latest_vibe_intent_survives_owner_restart_and_stale_finish_cannot_overwrite():
-    values = {}
-    settings = SimpleNamespace(get_setting=lambda key: values.get(key), set_setting=values.__setitem__,
-                               delete_setting=lambda key: values.pop(key, None))
-    work = Mock(spec_set=['start_thread', 'accepting'])
-    owner = VibeRequests(settings, work=work, adjusting=lambda now: nullcontext(), atomic=nullcontext,
-                         background=nullcontext, build=Mock(), logger=Mock())
-    old = owner.select('relax', 1000)
-    latest = owner.select('energize', 1001)
-    assert not owner._finish(old, 'ready')
-    restarted = VibeRequests(settings, work=work, adjusting=lambda now: nullcontext(), atomic=nullcontext,
-                            background=nullcontext, build=Mock(), logger=Mock())
-    assert restarted.state() == latest
-    assert restarted._finish(latest, 'ready')
-    assert restarted.state() == {**latest, 'phase': 'ready'}
-
-
 def test_readiness_rule_requires_full_supported_and_distinct_menus():
     def menu(prefix):
         return [{'tracks': [{'key': f'{prefix}-{i}-{j}', 'supported': ['relax', 'energize']}
@@ -189,23 +141,24 @@ def test_complete_home_query_captures_page_then_presenter_renders_supplied_model
     board.load.return_value = {'generation': 'committed'}
     board.feed.return_value = feed
     board.busy.return_value = False
-    growth = dict(ready_areas={'album-choices': True, 'recent': True}, nodes=[],
-                  vibes_ready=False, ready_formats={'mixes': True})
     albums, stories, radio_tracks = Mock(return_value={'albums': []}), Mock(return_value={'cards': []}), Mock()
+    visit, growth, revisit, radio = Mock(), Mock(), Mock(), Mock()
     command = HomeQuery(store.settings, store.accounts, store.model, board,
         artists_required=lambda: False, setup_completed=lambda: True, update=lambda: None,
-        recap=lambda now: {'month': 'November'}, spotify=lambda: {'dismissed': True},
-        radio=lambda launch: {'state': {'active': False}, 'launch': launch}, radio_tracks=radio_tracks,
-        collections=lambda payload, now: {'rediscover': []}, album_ready=lambda now: True,
-        mix_ready=lambda now: True, growth=lambda *args, **kwargs: growth, albums=albums, stories=stories,
-        default_panel=lambda value: 'directions', tv_minutes=lambda: 60, actions=lambda now: [],
+        recap=lambda now: {'month': 'November'}, spotify=lambda **_: {'dismissed': True},
+        radio=radio, radio_tracks=radio_tracks, revisit=revisit, access=lambda panel: False,
+        earned=lambda: {'directions', 'album-choices', 'recent'}, visit=visit,
+        growth=growth, albums=albums, stories=stories,
+        preferred=lambda: 'directions', tv_minutes=lambda: 60, actions=lambda now: [],
         sync=lambda now: {}, writable=lambda: True)
-    model = command.page(1000, launch='exact-playlist')
-    assert model['album_board'] == {'albums': []} and model['story_board'] == {'cards': []}
+    model = command.page(1000)
+    assert model['album_board'] is None and model['story_board'] is None
     assert model['spotify_library_job'] is None and model['muted_count'] == 1
-    radio_tracks.assert_not_called()
+    for hidden_query in (radio, radio_tracks, albums, stories, growth, revisit):
+        hidden_query.assert_not_called()
+    visit.assert_called_once_with('directions')
     board.feed.assert_called_once_with({'generation': 'committed'}, 1000,
-        vibes_ready=False, record=True, path='/', attempt=0)
+        vibes_ready=None, lazy_tuning=True, record=True, path='/', attempt=0, complete_only=True)
     # Rendering has only detached values. Any accidental query after acquisition fails.
     for repository in (store.settings, store.accounts, store.model, board):
         for operation in repository._mock_children.values():
@@ -218,27 +171,32 @@ def test_complete_home_query_captures_page_then_presenter_renders_supplied_model
     assert 'data-epoch="3"' in html and 'Jazz' in html and 'home-mode-cards' in html
 
 
-def test_home_preparation_keeps_complete_board_and_rejects_stale_publication():
+def test_home_preparation_keeps_complete_board_and_reports_unpublished_batch():
     import json
     from yt_playlist.controllers.home_preparation import HomePreparation
     result = home_cards.CardsResult([{'lane': str(i), 'label': str(i), 'tracks': []} for i in range(4)],
                                    [], None, None, [], [], 0, '')
     publish = Mock(return_value=False)
-    command = HomePreparation(calculate=lambda offset, order: result, freeze=lambda value: value,
-        has_complete=lambda payload, now: True, encode=json.dumps, publish=publish,
+    existing = Mock(return_value=True)
+    calculate = Mock(return_value=result)
+    command = HomePreparation(calculate=calculate, freeze=lambda value: value,
+        is_complete=lambda menu: len(menu['protos']) == 4, has_complete=existing, encode=json.dumps, publish=publish,
         check=Mock(), elapsed=lambda: 0, deferred=Mock(), max_menus=2, budget=10, max_bytes=100000, schema=1)
-    args = dict(previous={}, reusable=False, mode_ids=['one'], modes=[], adaptive=False, now=1000,
+    args = dict(cursor=10, adaptive=True, now=1000,
                 tuning='tuning', generation='generation', options=[], fingerprint={},
-                collections={'choice_context': {}}, play_exposure={})
+                collections={'choice_context': {}})
     assert command.prepare(**args) is None
     encoded, now = publish.call_args.args
     payload = json.loads(encoded)
     assert len(payload['menus']) == 2 and all(len(menu['protos']) == 4 for menu in payload['menus'])
+    assert [call.args for call in calculate.call_args_list] == [(10,), (11,)]
+    existing.assert_not_called()
     assert payload['generation'] == 'generation' and now == 1000
     publish.reset_mock()
     result.protos = result.protos[:2]
     assert command.prepare(**args) is None
     publish.assert_not_called()
+    existing.assert_called_once_with()
     command.deferred.assert_called_once_with('incomplete_menus')
 
 
@@ -260,8 +218,8 @@ def test_clicked_pool_plan_includes_generation_policy_before_releasing_and_publi
     ledger = Mock(spec_set=['record_prepared_policies'])
     ledger.record_prepared_policies.side_effect = lambda *args: events.append('policies')
     recommendations.publish.side_effect = lambda *args: events.append('publish') or True
-    command = LibraryPoolPreparation(Mock(), ledger, recommendations, vibe=lambda now: '',
-        scheduled=Mock(), clicked=True, snapshot=lambda: nullcontext(capture), calculate=Mock(), stamp=Mock())
+    command = LibraryPoolPreparation(ledger, recommendations, vibe=lambda now: '',
+        scheduled=Mock(), snapshot=lambda: nullcontext(capture))
     parameters = {'lane': 'comfort'}
     assert command.prepare(1000, parameters)
     assert events == ['release', 'policies', 'publish']
@@ -277,9 +235,8 @@ def test_joint_preparation_fits_detached_inputs_and_cleans_staging_on_stale_publ
     rows = [dict(recording=i, measurement=i, artists=[i], genre='jazz', album=str(i),
                  score=.3 + i / 10, metadata_prior=.5, support=1., source='audio_measurement/test')
             for i in range(1, 5)]
-    settings = Mock(spec_set=['get_setting'])
-    settings.get_setting.return_value = 'revision'
-    predictions = Mock(spec_set=['joint_inputs', 'stage_joint_model', 'publish_joint_model'])
+    predictions = Mock(spec_set=['joint_inputs', 'joint_revision', 'stage_joint_model', 'publish_joint_model'])
+    predictions.joint_revision.return_value = 'revision'
     predictions.joint_inputs.return_value = rows
     staged = Mock(spec_set=['close'])
     predictions.stage_joint_model.return_value = 'generation', staged
@@ -293,16 +250,16 @@ def test_joint_preparation_fits_detached_inputs_and_cleans_staging_on_stale_publ
             callback()
         return accept
     @contextmanager
-    def snapshot():
+    def snapshot(vibe, configuration):
+        assert (vibe, configuration) == ('relax', 'config')
         events.append('capture')
         try:
-            yield SimpleNamespace(settings=settings, predictions=predictions, priors=lambda batch, vibe: batch,
-                                  refresh=lambda vibe: True, publish=publish)
+            yield SimpleNamespace(predictions=predictions, priors=lambda batch, vibe: batch,
+                                  previous={}, head=None, policy='policy', publish=publish)
         finally:
             events.append('released')
-    command = JointPreparation(settings, predictions, snapshot=snapshot, state=lambda vibe: {},
-        qualified=lambda: True, configuration=lambda: 'config', refresh=Mock(), fit=fit,
-        now=lambda: 1000, monotonic=lambda: 1, vibes=('relax',), max_rows=32)
+    command = JointPreparation(predictions, snapshot=snapshot, next_fit=lambda _waiting: 'relax',
+        configuration=lambda: 'config', fit=fit, now=lambda: 1000, monotonic=lambda: 1, max_rows=32)
     work = command.steps(joint.MEMORY_BYTES)
     next(work)
     assert events == ['capture']
@@ -317,6 +274,7 @@ def test_joint_preparation_fits_detached_inputs_and_cleans_staging_on_stale_publ
         assert args[:2] == ('relax', 'generation')
         assert args[2]['outcome'] == 'ready' and args[2]['revision'] == 'revision'
         assert args[3] == [1, 2, 3, 4] and args[4] is staged and args[5] is True
+        assert predictions.publish_joint_model.call_args.kwargs == {'artists': [4, 3, 2, 1]}
     staged.close.assert_called_once()
     events.clear()
     cancelled = command.steps(joint.MEMORY_BYTES)

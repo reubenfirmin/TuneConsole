@@ -1,24 +1,25 @@
 """Readable descriptions of saved musical evidence; no inference or provider I/O."""
 import math
 
-from yt_playlist.rec import home_vibe, musical_character
-from yt_playlist.rec.musical_profiles import DIMENSIONS
+from yt_playlist.core.audio_vibe_contract import ACOUSTICBRAINZ_ESTIMATE, POOLED_SOURCES
+from yt_playlist.rec import home_vibe
+from yt_playlist.rec.musical_profiles import DIMENSIONS, VERSION
 
 _LABELS = {'intensity': 'Intensity', 'tempo': 'Tempo', 'groove': 'Groove',
            'instrumental': 'Instrumental', 'acoustic': 'Acoustic', 'relaxed': 'Relaxedness',
            'happiness': 'Happy mood', 'sadness': 'Sad mood', 'aggression': 'Aggression', 'density': 'Density'}
 _PROVIDERS = {'acousticbrainz': 'AcousticBrainz', 'musicbrainz': 'MusicBrainz',
               'lastfm': 'Last.fm', 'discogs': 'Discogs'}
-_KINDS = {'explicit': 'Your correction', 'legacy_selected': 'Legacy metadata',
+_KINDS = {'explicit': 'Your correction',
           'prediction': 'Model prediction', 'measurement': 'Measurement',
           'reported': 'Reported tags', 'curated': 'Genre hint', 'inherited': 'Inherited hint'}
 _MATCHES = {'supplied_recording_mbid': 'Recording ID lookup',
             'title_artist_match': 'Title and artist lookup', 'musicbrainz_lookup': 'MusicBrainz lookup',
             'matched_release_or_tracklist': 'Release or tracklist lookup', 'name_query': 'Name lookup'}
 _VIBE_SOURCES = {'audio_measurement': 'Audio model estimate',
-                 'provider_measurement': 'Provider attribute estimate',
+                 ACOUSTICBRAINZ_ESTIMATE: 'AcousticBrainz estimate',
                  'artist_genre': 'Artist and genre estimate', 'artist': 'Artist estimate',
-                 'genre': 'Genre estimate', 'heuristic': 'Attribute estimate'}
+                 'genre': 'Genre estimate'}
 
 
 def _basis(dimension):
@@ -40,6 +41,8 @@ def _basis(dimension):
 
 def describe(profile, sources=(), *, truncated=False):
     """Keep probabilities, engineering support and recording matches distinct."""
+    if profile and profile.get('version') != VERSION:
+        profile = None
     rows = []
     for name in DIMENSIONS:
         dimension = (profile or {}).get('dimensions', {}).get(name) or {}
@@ -78,15 +81,11 @@ def describe(profile, sources=(), *, truncated=False):
         fit = fits.get(name) or {}
         score, source = fit.get('score'), fit.get('source')
         known = type(score) in (int, float) and math.isfinite(score) and 0 <= score <= 1
-        # A neutral fallback with zero support is still unknown evidence.
-        attributes_known = any(musical_character.dimension({'musical': profile}, dimension)[0] is not None
-                               for dimension in preset['weights'])
-        supported = known and source in _VIBE_SOURCES and (
-            fit.get('support', 0) > 0 or (source == 'heuristic' and attributes_known))
+        supported = known and source in _VIBE_SOURCES and fit.get('support', 0) > 0
         vibe_rows.append({'name': name, 'label': preset['label'],
             'description': f'{score * 100:.0f}/100' if supported else 'Unknown',
-            'basis': _VIBE_SOURCES.get(source, 'Source unknown') if known else '',
-            'recordings': fit.get('recordings') if source in ('artist_genre', 'artist', 'genre') else None})
+            'basis': _VIBE_SOURCES[source] if supported else '',
+            'recordings': fit.get('recordings') if source in POOLED_SOURCES else None})
     return {'rows': rows, 'known': sum(row['known'] for row in rows), 'total': len(rows),
             'vibes': vibe_rows, 'vibe_version': vibes.get('version'), 'vibe_inputs_version': vibes.get('inputs_version'),
             'sources': retained, 'truncated': truncated or bool((profile or {}).get('sources_truncated'))}

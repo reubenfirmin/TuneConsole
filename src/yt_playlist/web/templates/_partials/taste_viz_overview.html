@@ -72,11 +72,11 @@
       </div>
     </div>
     <div class="taste-recent-listening">
-    <div class="taste-recent-listening-head"><h3>Listening balance <span>Last 24 hours</span></h3><a href="#profile" @click="select('profile')">Compare music groups</a></div>
+    <div class="taste-recent-listening-head"><h3>Listening balance <span>Today</span></h3><a href="#profile" @click="select('profile')">Compare music groups</a></div>
     {% if viz.recent.shifts %}
-    <p class="taste-recent-quiet">Compared with your library’s usual balance. Fresher plays count more; automatic radio selections are excluded.</p>
-    <div class="taste-shifts" role="table" aria-label="Recent listening compared with library music groups">
-      <div class="taste-shift-head" role="row"><span role="columnheader">Music group</span><span aria-hidden="true"></span><span role="columnheader">Library</span><span role="columnheader">Last 24h</span></div>
+    <p class="taste-recent-quiet">Compared with your library’s usual balance. Fresher plays count more. The comparison uses listening eligible for taste learning.</p>
+    <div class="taste-shifts" role="table" aria-label="Today’s listening compared with library music groups">
+      <div class="taste-shift-head" role="row"><span role="columnheader">Music group</span><span aria-hidden="true"></span><span role="columnheader">Library</span><span role="columnheader">Today</span></div>
       {% for r in viz.recent.shifts %}
       <div class="taste-shift-row" role="row" style="--petal-c:{{ ROSE_PALETTE[r.color_idx % ROSE_PALETTE|length] }}">
         <strong role="rowheader">{{ r.label }}</strong>
@@ -85,11 +85,11 @@
           <i class="taste-shift-library" style="left:{{ r.library * 100 }}%"></i><i class="taste-shift-recent" style="left:{{ r.recent * 100 }}%"></i>
         </span>
         <span class="taste-shift-value" role="cell"><small>Library </small>{{ '%.0f'|format(r.library*100) }}%</span>
-        <span class="taste-shift-value" role="cell"><small>Last 24h </small>{{ '%.0f'|format(r.recent*100) }}%</span>
+        <span class="taste-shift-value" role="cell"><small>Today </small>{{ '%.0f'|format(r.recent*100) }}%</span>
       </div>
       {% endfor %}
     </div>
-    <p class="taste-shift-key"><i class="taste-shift-library" aria-hidden="true"></i> Share of grouped library <i class="taste-shift-recent" aria-hidden="true"></i> Share of recent listening</p>
+    <p class="taste-shift-key"><i class="taste-shift-library" aria-hidden="true"></i> Share of grouped library <i class="taste-shift-recent" aria-hidden="true"></i> Share of today’s listening</p>
     {% elif refreshing_groups %}
     <p class="taste-recent-quiet" role="status">Updating your music groups automatically. This comparison will appear when they’re ready.</p>
     {% elif viz.recent.has_styles and not viz.recent.styles_current %}
@@ -98,13 +98,13 @@
     <p class="taste-recent-quiet">This comparison appears once your library has been grouped by genre, era, and sound.</p>
     {% else %}
       {% if viz.recent.coverage.tracks and not viz.recent.coverage.eligible_tracks %}
-    <p class="taste-recent-quiet">Recent radio listening is recorded. Automatic selections are excluded from this comparison.</p>
+    <p class="taste-recent-quiet">Today’s plays appear in listening history. This comparison uses plays eligible for taste learning.</p>
       {% elif viz.recent.coverage.eligible_tracks %}
-    <p class="taste-recent-quiet">Recent listening is recorded, but there isn’t enough comparable music yet.</p>
+    <p class="taste-recent-quiet">Today’s listening needs more comparable music to show a balance.</p>
       {% elif viz.recent.coverage.latest_day %}
     <p class="taste-recent-quiet">Listening recorded through <time datetime="{{ viz.recent.coverage.latest_day }}">{{ viz.recent.coverage.latest_day }}</time>; precise times aren’t available for this comparison.</p>
       {% else %}
-    <p class="taste-recent-quiet">A recent listening comparison isn’t available yet.</p>
+    <p class="taste-recent-quiet">No listening recorded today.</p>
       {% endif %}
     {% endif %}
     </div>

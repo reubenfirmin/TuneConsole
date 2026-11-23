@@ -132,9 +132,8 @@ def test_cancellation_propagates_before_later_commands(scheduler):
 
 
 def source_commands():
-    commands = Mock(spec_set=['capturing', 'advance', 'repair', 'joint_active', 'joint_scoring',
-        'vibe', 'fanout', 'pending', 'start', 'musical', 'musical_pending'])
-    for name in ('capturing', 'joint_active', 'joint_scoring', 'musical_pending'):
+    commands = Mock(spec_set=['capturing', 'advance', 'repair', 'vibe', 'pending', 'start', 'musical', 'musical_pending'])
+    for name in ('capturing', 'musical_pending'):
         getattr(commands, name).return_value = False
     commands.musical.return_value = True
     commands.vibe.return_value = True
@@ -151,12 +150,12 @@ def test_busy_sources_cannot_starve_recording_captures():
     commands.vibe.assert_called_once_with()
 
 
-def test_joint_scoring_delivers_one_recording_batch_before_next_source_write():
+def test_busy_vibe_work_yields_to_recording_and_musical_source_turns():
     commands, turns = source_commands(), SourceTurns()
-    commands.joint_scoring.return_value = True
-    turns.capture(commands, 100)
-    assert commands.mock_calls == [call.capturing(), call.repair(100), call.joint_active(),
-        call.joint_scoring(), call.fanout(), call.pending(), call.start(['recording'], 100)]
+    for _ in range(5):
+        turns.capture(commands, 100)
+    assert [item[0] for item in commands.mock_calls if item[0] in ('musical', 'start', 'vibe')] == [
+        'musical', 'start', 'vibe', 'start', 'musical']
 
 
 def test_in_progress_capture_is_resumed_without_another_source_admission():

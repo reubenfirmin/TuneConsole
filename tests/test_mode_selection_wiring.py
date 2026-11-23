@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
-from tests.home_fixture_support import home_routes_only, publish_menu, without_metadata_providers
+from tests.home_fixture_support import home_routes_only, seed_menu_cards, serve_home_offers, without_metadata_providers
 
 pytestmark = pytest.mark.usefixtures('unlocked_home_controls', 'home_routes_only', 'without_metadata_providers')
 
@@ -35,17 +35,15 @@ def _seed_modes(store):
 
 
 def _client(store, now=1000.0):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     return TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now,
                                  background_work=False),
                       base_url="http://127.0.0.1")
 
 
-def test_cards_render_logs_impressions(store):
+def test_cards_render_logs_impressions(store, monkeypatch):
     _seed_modes(store)
-    # Serving consumes a completed menu. Ranking and pool production have
-    # independent owners; real persistence and impression recording stay here.
-    publish_menu(store, count=2, mode_ids=(1, 2))
+    serve_home_offers(monkeypatch, seed_menu_cards(store, count=2, mode_ids=(1, 2)))
     client = _client(store)
     r = client.get("/home/cards")
     assert r.status_code == 200
@@ -62,7 +60,7 @@ def completed_generated_playlist(store, monkeypatch):
 
     # The route owns mode-pick logging. Remote creation, item ingestion and
     # quarantine have their own generated-playlist owners.
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     playlist = store.playlists.upsert_playlist(account, 'created-mix', 'My Mix', 1, 'hash', 1000)
     create = Mock(return_value={'new_ytm': 'created-mix', 'pid': playlist, 'added': 1})
     monkeypatch.setattr(playlist_generated, 'create_generated_playlist', create)

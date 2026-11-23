@@ -1,15 +1,18 @@
 """Optional local Btrfs library workspaces; never imported by ordinary fixtures."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import sqlite3
 import subprocess
 import sys
 import time
 import uuid
+
+from tests.library_image.schema_coordinates import LEDGERS, SCHEMA_FIELDS, read_schema
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_VOLUME = ROOT / 'build/library-image-poc/volume'
@@ -100,13 +103,29 @@ class Manager:
             raise ValueError('Baseline metadata identity mismatch')
         return result
 
+    def _with_schema(self, metadata):
+        if all(ledger in metadata for ledger in LEDGERS):
+            return metadata
+        database = self.volume / 'baselines' / metadata['id'] / 'state.db'
+        # Older capture receipts recorded only the initial ledger. Read the
+        # two coordinates from their frozen copy without rewriting it.
+        with closing(sqlite3.connect(database.as_uri() + '?mode=ro&immutable=1', uri=True)) as connection:
+            return metadata | read_schema(connection)
+
+    def generations(self):
+        with self.lock():
+            return [self._with_schema(self.metadata(path.stem))
+                    for path in (self.volume / 'metadata').glob('*.json')]
+
     def resolve(self, *, baseline=None, source=None, schema=None):
         if baseline:
             result = self.metadata(baseline)
         elif schema is not None:
-            candidates = [self.metadata(path.stem) for path in (self.volume / 'metadata').glob('*.json')]
-            candidates = [item for item in candidates if item['schema'] == schema
-                          and (source is None or item['source'] == str(Path(source).resolve()))]
+            source_path = str(Path(source).resolve()) if source is not None else None
+            metadata = (self.metadata(path.stem) for path in (self.volume / 'metadata').glob('*.json'))
+            candidates = [self._with_schema(item) for item in metadata
+                          if source_path is None or item['source'] == source_path]
+            candidates = [item for item in candidates if item['schema'] == schema]
             if not candidates:
                 raise ValueError('No prepared generation matches the requested schema')
             result = max(candidates, key=lambda item: item['created_at'])
@@ -117,11 +136,12 @@ class Manager:
             if not pointer.exists():
                 raise ValueError('No prepared baseline for this source; run prepare explicitly')
             result = self.metadata(json.loads(pointer.read_text())['baseline'])
-        if schema is not None and result['schema'] != schema:
-            raise ValueError('Prepared generation has a different schema')
         path = self.volume / 'baselines' / token(result['id'])
         if not path.is_dir() or command('btrfs', 'property', 'get', '-ts', path, 'ro').stdout.strip() != 'ro=true':
             raise RuntimeError('Prepared baseline is missing or is not frozen')
+        result = self._with_schema(result)
+        if schema is not None and result['schema'] != schema:
+            raise ValueError('Prepared generation has a different schema')
         return result
 
     def container_args(self, library, report, name, *, readonly=False, donor=None):
@@ -129,7 +149,8 @@ class Manager:
             'podman', 'run', '--rm', '--name', name, '--pull=never', '--userns=keep-id',
             '--network=none', '--read-only', '--cap-drop=all', '--security-opt=label=disable',
             '--memory=2g', '--pids-limit=256', '--stop-timeout=0',
-            '--tmpfs', '/tmp:rw,size=256m,mode=1777,nodev,nosuid,notmpcopyup',
+            # Pytest databases here need fixture space above the 256 MiB write reserve.
+            '--tmpfs', '/tmp:rw,size=768m,mode=1777,nodev,nosuid,notmpcopyup',
             '--tmpfs', '/worktree/build:rw,size=256m,mode=1777,nodev,nosuid,notmpcopyup',
             '--volume', str(ROOT) + ':/worktree:ro',
             '--volume', str(library) + ':/library:' + ('ro' if readonly else 'rw'),
@@ -150,21 +171,47 @@ class Manager:
         command('btrfs', 'property', 'set', '-ts', path, 'ro', 'false')
         command('btrfs', 'subvolume', 'delete', path)
 
-    def prepare(self, source, *, refresh=False):
-        from .capture import verify_tree
+    def discard_baselines(self, source, pointer):
+        with self.lock():
+            generations = [self.metadata(path.stem) for path in (self.volume / 'metadata').glob('*.json')]
+            identities = [item['id'] for item in generations if item['source'] == str(source)]
+            pointer.unlink(missing_ok=True)
+            for identity in identities:
+                target = self.volume / 'baselines' / identity
+                if target.exists():
+                    self.destroy(target)
+                (self.volume / 'metadata' / (identity + '.json')).unlink()
+            return bool(identities)
 
+    def wait_for_database_space(self, size, *, discarded):
+        fs = os.statvfs(self.volume)
+        if fs.f_bavail * fs.f_frsize >= size:
+            return
+        if discarded:
+            # Deletion returns before Btrfs reclaims the old subvolume's blocks.
+            # Start SQL as soon as it fits. File copying starts after SQL.
+            command('btrfs', 'filesystem', 'sync', self.volume)
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                fs = os.statvfs(self.volume)
+                if fs.f_bavail * fs.f_frsize >= size:
+                    return
+                time.sleep(.1)
+        raise RuntimeError('The test volume has insufficient free space for the source SQLite database')
+
+    def prepare(self, source, *, refresh=False):
         self.initialize()
         source = Path(source).resolve(strict=True)
         key = hashlib.sha256(str(source).encode()).hexdigest()
         pointer = self.volume / 'sources' / (key + '.json')
         with lease(self.volume / 'locks' / ('prepare-' + key + '.lock')):
-            self.collect(delete=True)
             if pointer.exists() and not refresh:
                 return self.resolve(source=source)
-            # Leave space for the candidate instead of temporarily retaining
-            # three full captures. Current source generations and active pins
-            # remain protected even when older unused generations are pruned.
-            self.collect(keep=1, delete=True)
+            started = time.monotonic()
+            before = source.stat()
+            discarded = refresh and self.discard_baselines(source, pointer)
+            self.collect(delete=True)
+            self.wait_for_database_space(before.st_size, discarded=discarded)
             identity = uuid.uuid4().hex
             target = self.volume / 'baselines' / identity
             report_dir = ROOT / 'build/test-reports/library-images' / identity
@@ -177,34 +224,22 @@ class Manager:
                     with self.lock():
                         save(self.volume / 'runs' / (identity + '.json'), receipt)
                         command('btrfs', 'subvolume', 'create', target)
-                    started = time.monotonic()
-                    before = source.stat()
-                    print('Capturing one consistent SQL/file baseline', flush=True)
+                        command('btrfs', 'property', 'set', '-ti', target, 'compression', 'zstd')
+                    print('Copying the local test library', flush=True)
                     command(*self.container_args(target, report_dir, name, donor=source), '-m',
-                            'tests.library_image.capture', 'export', str(source), pass_fds=(held.fileno(),))
-                    receipt['export_seconds'] = time.monotonic() - started
+                            'tests.library_image.capture', str(source), pass_fds=(held.fileno(),))
                     receipt.update(json.loads((target / '.capture.json').read_text()))
                     (target / '.capture.json').unlink()
-                    print('Restoring and checking stable /library coordinates', flush=True)
-                    command(*self.container_args(target, report_dir, name), '-m',
-                            'tests.library_image.capture', 'finish', pass_fds=(held.fileno(),))
-                    receipt['restore_seconds'] = time.monotonic() - started - receipt['export_seconds']
-                    after = source.stat()
-                    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
-                        raise RuntimeError('Source database was replaced during capture; retry preparation')
-                    save(target / '.baseline.json', dict(id=identity, schema=receipt['schema'],
+                    save(target / '.baseline.json', dict(id=identity, **{key: receipt[key] for key in SCHEMA_FIELDS},
                                                         created_at=receipt['created_at']))
-                    command('btrfs', 'filesystem', 'sync', target)
-                    receipt['verification'] = verify_tree(target)
-                    receipt.update(seconds=time.monotonic() - started, state='ready',
-                                   runtime_image=command('podman', 'image', 'inspect', '--format', '{{.Id}}', self.image).stdout.strip(),
-                                   source_stat=dict(device=before.st_dev, inode=before.st_ino))
                     with self.lock():
                         command('btrfs', 'property', 'set', '-ts', target, 'ro', 'true')
+                        receipt.update(seconds=time.monotonic() - started, state='ready',
+                                       runtime_image=command('podman', 'image', 'inspect', '--format', '{{.Id}}', self.image).stdout.strip(),
+                                       source_stat=dict(device=before.st_dev, inode=before.st_ino))
                         save(self.volume / 'metadata' / (identity + '.json'), receipt)
                         save(pointer, {'baseline': identity})
                     save(report_dir / 'preparation.json', receipt)
-                    self.collect(delete=True)
                     return receipt
                 except BaseException as error:
                     save(report_dir / 'preparation-error.json', dict(receipt, error=repr(error)))
@@ -244,6 +279,7 @@ class Manager:
                     started = time.monotonic()
                     base = self.volume / 'baselines' / baseline['id']
                     receipt = dict(id=identity, baseline=baseline['id'], created_at=time.time(),
+                                   **{key: baseline[key] for key in SCHEMA_FIELDS},
                                    container=name, kind='readonly' if readonly else 'workspace', owner=process_identity())
                     save(self.volume / 'runs' / (identity + '.json'), receipt)
                     if not readonly:

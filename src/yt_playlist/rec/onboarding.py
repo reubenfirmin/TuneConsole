@@ -1,9 +1,9 @@
 """Guide new accounts until useful listening offers arrive, then retain setup completion."""
 import random
 
+from yt_playlist.integrations.youtube_music_access import YouTubeMusicAccess
 from yt_playlist.rec import mix_tuning, rec_params
 from yt_playlist.rec.onboarding_outputs import MIN_MIXES, prepared_mixes_ready, starter_album
-from yt_playlist.util.duration import parse_duration
 
 SETUP_COMPLETE = 'onboard_setup_complete'
 LASTFM_NUDGE_SNOOZE_S = 30 * 86400
@@ -157,7 +157,7 @@ def dismiss_recap_nudge(store, month):
 
 
 def dismiss_update_nudge(store, version):
-    dismissed = version or store.settings.get_setting('latest_version_seen')
+    dismissed = version or store.enrichment_state.release_check()[2]
     if dismissed:
         store.settings.set_setting('backend_update_dismissed_version', dismissed)
 
@@ -224,13 +224,13 @@ def arrival_status(store, now=None) -> dict:
     Metadata coverage is a count, never a percentage pretending to measure model training.
     Observations from incomplete imports are not ready songs.
     """
-    from yt_playlist.rec import account_growth, artist_start
+    from yt_playlist.rec import account_growth, artist_start, group_viz
 
     with store.read_view() as reader:
         facts = reader.readiness.arrival()
         songs, covers = facts['songs'], facts['covers']
         coverage = reader.enrichment_reports.coverage_stats()
-        modes = facts['modes']
+        modes = sum(group.get('leaf', False) for group in (group_viz.prepared(reader) or {}).get('groups', ()))
         model_tracks = reader.rec_model.rec_content_vectors_count()
         discoveries = reader.rec_model.rec_discovered_content_vectors_count()
         imported = reader.settings.get_setting("last_sync_at") is not None
@@ -307,33 +307,6 @@ def library_sample(store, n=12) -> list[dict]:
     return OnboardingSamples(store.readiness, random.Random()).sample(n)
 
 
-def _home_tracks(store, client, n):
-    """Flatten YouTube home-feed shelves into proto tracks (quick picks / mixes). Best-effort."""
-    out = []
-    maximum = rec_params.max_track_duration_s(store)
-    try:
-        shelves = client.get_home() or []
-    except Exception:  # noqa: BLE001
-        return out
-    for shelf in shelves:
-        for t in (shelf.get("contents") or []):
-            vid = t.get("videoId")
-            if not vid:
-                continue
-            duration = t.get('duration_seconds') or parse_duration(t.get('duration'))
-            if duration is None:
-                duration = store.tracks.duration_for_video(vid)
-            if duration is not None and duration > maximum:
-                continue
-            arts = t.get("artists") or []
-            out.append({"video_id": vid, "title": t.get("title") or "",
-                        "artist": (arts[0].get("name") or "" if arts else ""), "album": "",
-                        "thumbnail": None, "key": "", "duration": duration})
-            if len(out) >= n:
-                return out
-    return out
-
-
 def _discovered_sample(store, now, n):
     """Keep candidate selection and its duration eligibility in one local read view."""
     from yt_playlist.rec import surfaces
@@ -357,17 +330,31 @@ def _discovered_sample(store, now, n):
 
 
 def radio_sample(store, client, now, n=12) -> list[dict]:
-    """Onboarding radio: the discovered/cold pool when it has material, topped up from YouTube's home
-    feed (get_home) when the account is too empty to have seeded any. [] when there is no client."""
+    """Top up the locally discovered starter tracks from the account's YouTube Music Home feed."""
     if client is None:
         return []
     try:
         out = _discovered_sample(store, now, n)
     except Exception:  # noqa: BLE001 - cold pool is best-effort
         out = []
-    if len(out) < n:
-        seen = {d["video_id"] for d in out}
-        for d in _home_tracks(store, client, n - len(out)):
-            if d["video_id"] not in seen:
-                out.append(d)
-    return out[:n]
+    if len(out) >= n:
+        return out[:n]
+    try:
+        tracks = YouTubeMusicAccess.for_client(client).home_tracks()
+    except Exception:  # noqa: BLE001 - keep any local tracks when the provider is unavailable
+        return out
+    seen = {track['video_id'] for track in out}
+    maximum = rec_params.max_track_duration_s(store)
+    for track in tracks:
+        video, duration = track['video_id'], track['duration']
+        if video in seen:
+            continue
+        if duration is None:
+            duration = store.tracks.duration_for_video(video)
+        if duration is not None and duration > maximum:
+            continue
+        out.append(dict(track, album='', thumbnail=None, key='', duration=duration))
+        seen.add(video)
+        if len(out) == n:
+            break
+    return out

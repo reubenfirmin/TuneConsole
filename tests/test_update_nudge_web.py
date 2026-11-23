@@ -5,18 +5,7 @@ from starlette.testclient import TestClient
 from fastapi import FastAPI
 
 
-class FakeSettings:
-    def __init__(self, settings=None):
-        self.settings = dict(settings or {})
-    def get_setting(self, key, default=None):
-        return self.settings.get(key, default)
-    def set_setting(self, key, value):
-        self.settings[key] = value or ""
-
-
-class FakeStore:
-    def __init__(self, settings=None):
-        self.settings = FakeSettings(settings)
+from tests.test_updatecheck import FakeStore
 
 
 def _home_app(store):
@@ -56,14 +45,14 @@ def test_home_renders_backend_update_card(store, monkeypatch):
     # and never nagged. Pin it to a packaged install so the release-behind card path is exercised.
     monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
     store.settings.set_setting("last_sync_at", "1700000000")
-    store.settings.set_setting("latest_version_seen", "999.0.0")   # force "behind" regardless of real version
+    store.enrichment_state.record_release_check(1700000000, '999.0.0')
     publish_personal_mix(store, now=1700000001)
     # Notices live on the established Home dashboard. A prepared menu alone
     # does not complete a new listener's serial onboarding journey (#608).
     returning_listener(store, 'mixes', now=1700000001)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
                    base_url="http://127.0.0.1")
-    html = c.get("/").text
+    html = c.get("/?panel=notices&fragment=1").text
     assert 'id="update-nudge"' in html
     assert "999.0.0" in html
     assert "/onboard/update/dismiss" in html
@@ -79,12 +68,12 @@ def test_home_container_update_links_to_instructions(store, monkeypatch):
     monkeypatch.setattr(updatecheck, "is_dev_install", lambda: False)
     monkeypatch.setenv("YT_PLAYLIST_CONTAINER", "1")
     store.settings.set_setting("last_sync_at", "1700000000")
-    store.settings.set_setting("latest_version_seen", "999.0.0")
+    store.enrichment_state.record_release_check(1700000000, '999.0.0')
     publish_personal_mix(store, now=1700000001)
     returning_listener(store, 'mixes', now=1700000001)
     c = TestClient(create_app(store, lambda: FakeClient(), now_fn=lambda: 1700000001),
                    base_url="http://127.0.0.1")
-    html = c.get("/").text
+    html = c.get("/?panel=notices&fragment=1").text
     assert 'href="https://tuneconsole.com/#container-updates"' in html
     assert "Update your container" in html
     assert 'x-data="appUpdate()"' not in html

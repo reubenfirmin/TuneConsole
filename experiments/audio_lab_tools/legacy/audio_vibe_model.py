@@ -15,7 +15,6 @@ from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core import audio_vibe_metadata as metadata_features
 from yt_playlist.core import audio_embedding
 from yt_playlist.core.audio_model_files import AudioModelFiles, artifact_loader
-from yt_playlist.rec import audio_vibe_arc
 from experiments.audio_lab_tools.legacy import audio_vibe_external
 from yt_playlist.rec import audio_vibe_cruise, audio_vibe_energize, audio_vibe_focus, audio_vibe_relax, audio_vibe_release, audio_vibe_uplift
 
@@ -203,15 +202,8 @@ def apply_loaded(samples, prediction, metadata=None, *, model, digest):
         if external:
             if prediction.get('taxonomy_version') != model['taxonomy_version']:
                 return prediction
-            # Preserve the chronological sequence through both classifier stages.
-            # The frozen single-excerpt model is unchanged; the song reducer is
-            # owned by the same temporal policy used by all six specialists.
-            excerpt_scores = [audio_vibe_external.scores(model, [sample])
-                              for sample in audio_vibe_arc.ordered(samples)]
-            arcs = {vibe: audio_vibe_arc.fit(vibe, [row[vibe] for row in excerpt_scores])
-                    for vibe in model['labels']}
-            total = sum(value for value, _rule in arcs.values())
-            corrected = {vibe: value / total for vibe, (value, _rule) in arcs.items()}
+            # The retired classifier scored the combined recording vector once.
+            corrected = audio_vibe_external.scores(model, samples)
             trained_labels = model['labels']
             score_source = 'external_emotion_model'
             evidence = 'Includes learned external-emotion evidence; scores remain uncalibrated'
@@ -237,9 +229,6 @@ def apply_loaded(samples, prediction, metadata=None, *, model, digest):
                 row = {**row, 'baseline_score': row['score'],
                        'score': corrected[row['vibe']],
                        'score_source': score_source}
-                if external:
-                    row = {**row, 'excerpt_scores': [value[row['vibe']] for value in excerpt_scores],
-                           'rule': arcs[row['vibe']][1]}
             ranking.append(row)
         if external:
             # Research argmax breaks ties in the fixed target order, including

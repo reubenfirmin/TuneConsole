@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from yt_playlist.controllers.group_preparation import GroupPreparation
 from yt_playlist.controllers.group_root_backfill import Backfill
 from yt_playlist.core.db_revisions import column_group_reads
+from yt_playlist.core.group_preparation_state import SERIAL
 from yt_playlist.library import group_lifetimes as group_roots
 from yt_playlist.library.group_lifetimes import pending_roots
 
@@ -13,9 +14,11 @@ def preparation(store, *, policy, budget):
 
     @contextmanager
     def capture():
-        with store.read_snapshot() as snapshot, \
+        # Lease lookups can change while staging. Head selection and the exact
+        # published generation content still guard the worker's output.
+        # The serial schedules work. The captured musical inputs guard its publication.
+        with store.read_snapshot(allow_stale_keys={('group_generations', ''), ('settings', 'key:' + SERIAL)}) as snapshot, \
                 column_group_reads(snapshot.store, 'recordings', 'catalog'), \
-                column_group_reads(snapshot.store, 'rec_musical_profiles', 'definition'), \
                 column_group_reads(snapshot.store, 'prepared_recording_inputs', 'grouping'):
             reader = snapshot.store
             yield snapshot, reader.taste_groups, reader.genres, reader.modes.meta_for
@@ -27,7 +30,7 @@ def preparation(store, *, policy, budget):
 
 def backfill(store, **limits):
     return Backfill(store.group_evidence, store.rec_ledger.evidence(),
-        enabled=lambda: group_roots.enabled(store), admission=lambda: group_roots.admission(store),
+        admission=lambda: group_roots.admission(store),
         writer=lambda: group_roots.writer(store), resolve=lambda value: group_roots.context(store, value),
         retain=lambda *args, **kw: group_roots.retain(store, *args, **kw),
         release=lambda *args: group_roots.release(store, *args), **limits)
@@ -36,26 +39,14 @@ def backfill(store, **limits):
 def candidates(store):
     from yt_playlist.controllers.group_candidates import GroupCandidates
     from yt_playlist.rec import mode_rules as mode_surfaces, rec_params, stored_groups
-    from yt_playlist.rec.eligibility import home_exclusions
 
-    def capture(now):
-        typed = getattr(store, '_recommendation_files', False)
-        generation = None
-        if typed:
-            header = store.recommendations.head('home')
-            generation = header['id'] if header else None
-            pools = {lane: None for lane in mode_surfaces.CARD_SURFACES + ('temporal',)
-                     if generation is not None and store.recommendations.pool('home', 'all', lane,
-                                                                              generation=generation) is not None}
-            blocked = set()
-        else:
-            pools = (store.rec_proposals.get_proposals('mode_bundles') or {}).get('all', {})
-            keys = {item['key'] for pool in pools.values() for item in pool if item.get('key')}
-            identities = store.artists.track_keys(keys=keys)
-            pools = {lane: [{**row, 'artist_ids': sorted(identities.get(row['key'], ()))} for row in pool]
-                     for lane, pool in pools.items()}
-            blocked = home_exclusions(store, keys, now)
-        return dict(typed=typed, generation=generation, pools=pools, blocked=blocked,
+    def capture():
+        header = store.recommendations.head('home')
+        generation = header['id'] if header else None
+        pools = tuple(lane for lane in mode_surfaces.CARD_SURFACES + ('temporal',)
+                      if generation is not None and store.recommendations.pool(
+                          'home', 'all', lane, generation=generation) is not None)
+        return dict(generation=generation, pools=pools,
                     muted=store.rec_model.muted_artists(),
                     cap_artist=int(rec_params.get_param(store, 'modes_artist_cap')),
                     cap_album=int(rec_params.get_param(store, 'modes_album_cap')))

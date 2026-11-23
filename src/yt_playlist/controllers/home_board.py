@@ -1,14 +1,13 @@
-"""Home board query and publication effects over explicit preparation capabilities."""
-from yt_playlist.rec import home_prepared, home_vibe
+"""Assemble the Home board and record the choices offered to the listener."""
+from yt_playlist.rec import home_vibe
 
 
 class HomeBoard:
-    def __init__(self, *, load, live, expire, cards, starter, remember, schedule, vibe,
+    def __init__(self, *, load, cards, starter,
                  present, audit, tuning, remaining, fingerprint, modes, current_vibe,
                  discovery, artist_images, busy, pool, refresh, ledger, parameter, close, epoch, start_pool):
-        self.load, self.live, self.expire, self.calculate = load, live, expire, cards
-        self.starter, self.remember, self.schedule = starter, remember, schedule
-        self.vibe, self.present, self.audit = vibe, present, audit
+        self.load, self.calculate, self.starter = load, cards, starter
+        self.present, self.audit = present, audit
         self.tuning, self.remaining, self.fingerprint = tuning, remaining, fingerprint
         self.modes, self.current_vibe = modes, current_vibe
         self.discovery, self.artist_images, self.busy = discovery, artist_images, busy
@@ -39,55 +38,41 @@ class HomeBoard:
                       for key in ('include_genres', 'avoid_genres')}}
         return self.start_pool(kind, parameters, excluded)
 
-    def query(self, payload, now, *, live=False, record=False, path='/', attempt=0, **options):
-        if live:
-            self.expire(now)
-            payload, result, tuning = self.live(now, options)
-            self.remember(payload, result, now, tuning=tuning)
-            self.schedule()
-        else:
-            result = self.calculate(payload, now, record=record)
+    def query(self, payload, now, *, changed=False, record=False, path='/', attempt=0, complete_only=False, **options):
+        result = self.calculate(payload, now, record=record,
+                                verify_vibe=path == '/home/vibe', **options)
+        present = changed or (record and (not complete_only or len(result.protos) >= 4))
         result = self.starter(result, now)
-        vibe = self.vibe()
-        context = board_values(result, vibe, attempt, live)
-        if (live or record) and result.protos:
-            self.present(result, payload, now)
+        if present and result.protos:
+            self.present(result, now)
         self.audit(result.protos, now, path)
+        context = vars(result).copy()
+        if (path in ('/', '/home/cards', '/home/feed') and not result.vibe and not result.genre_notice
+                and result.slots and len(result.protos) < 4):
+            # An incomplete ordinary board can gain a lane when its inputs arrive.
+            context['prepare_attempt'] = min(10, attempt + 1)
+            context['prepare_interval'] = min(30, 3 * 2 ** min(attempt, 4))
         return context
 
     def controls(self, payload, now, *, vibes_ready):
         return {'fingerprint': self.fingerprint(payload, now), 'tuning_active': self.tuning(),
                 'vibe_presets': home_vibe.PRESETS, 'vibes_ready': vibes_ready, 'vibe': self.current_vibe(now)}
 
-    def feed(self, payload, now, *, vibes_ready, **options):
-        return {**self.controls(payload, now, vibes_ready=vibes_ready), 'has_modes': self.modes(),
-                **self.query(payload, now, **options)}
+    def feed(self, payload, now, *, vibes_ready, lazy_tuning=False, **options):
+        has_modes = self.modes()
+        if lazy_tuning:
+            families = (payload or {}).get('fingerprint', {}).get('breadth', {}).get('families', {})
+            controls = {'lazy_tuning': True, 'show_tuning': bool(families or has_modes),
+                        'tuning_active': self.tuning(), 'tuning_remaining': self.remaining(now),
+                        'vibe': self.current_vibe(now)}
+        else:
+            controls = self.controls(payload, now, vibes_ready=vibes_ready)
+        board = self.query(payload, now, **options)
+        if board['protos']:
+            controls['show_tuning'] = True
+        return {**controls, 'has_modes': has_modes, **board}
 
     def discovery_query(self, payload, now):
         selection = self.discovery(payload, now)
         self.artist_images(selection, now)
         return {**selection, 'discovery_busy': self.busy()}
-
-    def pool_query(self, job, payload, now, path):
-        result = self.pool(job, now, path)
-        if result.proto:
-            menu = self.calculate(payload, now, record=False)
-            lane = result.proto['lane']
-            menu.protos = [p for p in menu.protos if p['lane'] != lane] + [result.proto]
-            menu.slots = [{'proto': result.proto, 'pool': None} if
-                          (slot['proto']['lane'] if slot['proto'] else slot['pool']['lane']) == lane else slot
-                          for slot in menu.slots] or [{'proto': result.proto, 'pool': None}]
-            self.remember(payload, menu, now)
-        return result
-
-
-def board_values(result, vibe_request, attempt=0, live=False):
-    context = vars(result).copy()
-    context['vibe_request'] = vibe_request
-    pending = bool(vibe_request and vibe_request['phase'] in ('pending', 'waiting'))
-    if pending:
-        context.update(preparing=True, preference_notice=None)
-    waiting = result.preparing or (not result.protos and bool(result.slots))
-    context['prepare_attempt'], context['prepare_interval'] = home_prepared.polling_schedule(
-        min(10, max(0, attempt)), live=live, waiting=waiting, vibe_pending=pending)
-    return context

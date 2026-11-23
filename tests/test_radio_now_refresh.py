@@ -1,10 +1,11 @@
 """Current-listening policy is maintained without a visible/polling Radio page."""
 import json
 import time
+from dataclasses import replace
 
-import numpy as np
 import pytest
 
+from tests.group_support import publish, recordings
 from tests.radio_session_support import controlled_radio_checkpoints, poc, play
 from tests.store_fixture_support import bounded_consumer_schema, initialize_consumer, reuse_reporting_reader
 from tests.recommendation_support import publish_bundles, seed_publication_subjects
@@ -21,7 +22,7 @@ def disable_periodic_library_sync():
 
 @pytest.fixture(scope='module')
 def now_schema():
-    # NOW consumes two fixed styles; taxonomy/bootstrap admission have their own
+    # NOW consumes two published track groups. Taxonomy and startup have their own
     # owners. Keep actual candidate SQL and connection-local revision guards.
     with bounded_consumer_schema((('ambient', 'Ambient'), ('techno', 'Techno'))) as schema:
         yield schema
@@ -29,20 +30,21 @@ def now_schema():
 
 
 def prepare_now_candidates(store):
-    # NOW consumes clustered candidates and the captured vectors below. Musical
-    # profile preparation/intensity have independent owners in test_radio_tuning.
-    # Controller consumers add their own account and listening evidence later.
-    modes, bundles, tracks = [], {}, []
-    for mode, genre in enumerate(('Ambient', 'Techno'), 1):
-        modes.append({'mode_id': mode, 'label': genre.lower(), 'families': [[genre.lower(), 1]],
-                      'centroid': np.eye(2, dtype=np.float32)[mode - 1], 'size': 6, 'rep_keys': []})
-        rows = [{'key': f'm{mode}-{index}|artist m{mode}-{index}', 'video_id': f'm{mode}-{index}',
-                 'title': f'm{mode}-{index}', 'artist': f'Artist m{mode}-{index}', 'genre': genre}
-                for index in range(6)]
-        tracks.extend(rows)
-        bundles[str(mode)] = {'wheelhouse': rows[:3], 'fresh': rows[3:]}
+    corpus = recordings([('Ambient', 6, .1), ('Techno', 6, .9)])
+    tracks = [{'key': f'track-{index}|artist {index}', 'video_id': f'track-{index}',
+               'title': f'Track {index}', 'artist': f'Artist {index}', 'genre': track.genre}
+              for index, track in enumerate(corpus)]
+    bundles = {'_radio': {'space': embed.content_space_id(store), 'members': {}}}
     seed_publication_subjects(store, tracks)
-    store.modes.replace_modes(modes, retired_ids=[], now=1)
+    head = publish(store, [replace(track, key=row['key']) for track, row in zip(corpus, tracks)])
+    membership = store.taste_groups.leaf_members(head['generation'])
+    assert len(set(membership.values())) == 2
+    for track in tracks:
+        version = membership[track['key']]
+        bundle = bundles.setdefault(version, {'wheelhouse': [], 'fresh': []})
+        lane = 'wheelhouse' if len(bundle['wheelhouse']) < 3 else 'fresh'
+        bundle[lane].append(track)
+        bundles['_radio']['members'].setdefault(version, []).append(track['key'])
     # Policy hashing is a lower-layer input to these NOW refresh cases. The
     # real NOW policy (including the concurrent gain change) remains live.
     with pytest.MonkeyPatch.context() as patch:
@@ -88,21 +90,19 @@ def active(controlled_radio_checkpoints, poc, prepared, monkeypatch):
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
     neutral = RadioCandidates(store, clock[0], {**radio_tuning.DEFAULTS, "theme": 0})
     neutral.rng.seed(3)
-    neutral_style = neutral.next_track([])["genre"]
-    preferred = [t for t in prepared if t["genre"] != neutral_style][:3]
-    keys = [t["key"] for t in preferred]
-    vector = [1., 0.] if preferred[0]["genre"] == "Ambient" else [0., 1.]
+    neutral_genre = neutral.next_track([])["genre"]
+    preferred = [t for t in prepared if t["genre"] != neutral_genre][:3]
     reads = []
 
     def vectors(*args, **kwargs):
         reads.append(1)
-        return keys, np.array([vector] * len(keys), dtype=np.float32), {k: i for i, k in enumerate(keys)}
+        pytest.fail("Radio must not load the complete content matrix")
 
     monkeypatch.setattr(embed, "load_content_vectors", vectors)
     iid = store.accounts.get_master_account().id
     store.history.import_play_events(iid, [(track['key'], track['video_id'], clock[0] - i * 60)
                                          for i, track in enumerate(preferred)])
-    assert controller.start(prepared[0]["video_id"])["ok"]
+    assert controller.start()["ok"]
     play(controller, remote.ids[0])
     assert controller.session.candidates.now_posterior
     workers.clear()
@@ -115,9 +115,10 @@ def test_hidden_radio_monitor_refreshes_invalid_now_evidence(active, monkeypatch
     controller, remote, workers, clock, reads = active
     store, session = controller.ctx.store, controller.session
     if invalidation == "quiet_window":
-        clock[0] += (rec_params.get_param(store, "now_window_h") + 1) * 3600
+        clock[0] += 24 * 3600
     else:
         rec_params.set_param(store, "now_gain", 0)
+        rec_params.set_param(store, "session_alpha", 0)
         clock[0] += radio_tuning.NOW_REFRESH_SECONDS + 1
     ticks = [0]
 
@@ -145,10 +146,10 @@ def test_hidden_radio_monitor_refreshes_invalid_now_evidence(active, monkeypatch
         assert cached.now_gain == 0 and not reads
     cached.configure({**radio_tuning.DEFAULTS, "theme": 0})
     cached.rng.seed(3)
-    cached_style = cached.next_track([])["genre"]
+    cached_genre = cached.next_track([])["genre"]
     fresh = RadioCandidates(store, clock[0], cached.tuning)
     fresh.rng.seed(3)
-    assert cached_style == fresh.next_track([])["genre"]
+    assert cached_genre == fresh.next_track([])["genre"]
 
 
 def test_refresh_preserves_plans_and_rejects_concurrently_changed_policy(active, monkeypatch):
@@ -159,6 +160,7 @@ def test_refresh_preserves_plans_and_rejects_concurrently_changed_policy(active,
     saved_tracks, saved_remote = list(session.tracks), list(remote.ids)
     clock[0] += radio_tuning.NOW_REFRESH_SECONDS + 1
     original = candidates.sample_now
+    today_gain = rec_params.get_param(store, "session_alpha")
 
     def policy_changed(now, *, store):
         sample = original(now, store=store)
@@ -180,10 +182,30 @@ def test_refresh_preserves_plans_and_rejects_concurrently_changed_policy(active,
     clock[0] += radio_tuning.NOW_REFRESH_SECONDS
     controller._refresh_now(session)
     workers.pop()[0][0]()
-    assert candidates.now_gain == 0 and candidates.now_posterior == {}
+    assert candidates.now_gain == today_gain and candidates.now_posterior
     assert candidates.now_sampled_at == clock[0]
     assert json.dumps(session.directions.public([]), sort_keys=True) == before
     assert session.tracks == saved_tracks and remote.ids == saved_remote
+
+
+def test_new_session_crosses_groups_without_any_fixed_modes(store, prepared):
+    assert not store.modes.list_modes()
+    c = RadioCandidates(store, 100_000, {**radio_tuning.DEFAULTS, 'theme': 0})
+    try:
+        assert set(c.pools) == set(store.taste_groups.leaf_members(
+            store.taste_groups.head_generation()).values())
+        seeds = c.seed_offer(2)
+        assert len({c.cluster_for(track) for track in seeds}) == 2
+        anchor = seeds[0]
+        crossed = c.next_track([anchor])
+        assert crossed and c.cluster_for(crossed) != c.cluster_for(anchor)
+        alternate = c.next_track([anchor], excluded={crossed['video_id']})
+        assert alternate and alternate['video_id'] not in {crossed['video_id'], anchor['video_id']}
+        c.configure({**c.tuning, 'theme': 1})
+        themed = c.next_track([anchor])
+        assert themed and c.cluster_for(themed) == c.cluster_for(anchor)
+    finally:
+        c.close()
 
 
 @pytest.mark.parametrize("change", ["stop", "replacement", "retune"])

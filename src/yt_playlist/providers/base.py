@@ -86,7 +86,6 @@ FIELD_SPECS = {
     "music_scale": Discrete(),
     "label": Discrete(),
     "bpm": Numeric(2.0),
-    "energy": Numeric(0.1),
     "danceability": Numeric(0.1),
 }
 

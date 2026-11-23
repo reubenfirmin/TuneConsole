@@ -5,7 +5,7 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
   const KEY = 'tuneconsole.audio-collection.1', LIMIT = 12;
   const observers = new Set();
   let state = {run: null, outbox: [], recent: []}, playback = null, sampler;
-  let ready = false, available = false, durable = false, flushing = false, retryAt = 0, failures = 0;
+  let ready = false, available = false, durable = false, flushing = false, completing = false, retryAt = 0, failures = 0;
   let writing = Promise.resolve(), status = null, current = null, port = null, receipt = null;
 
   function metadataOnly(value, limit) {
@@ -26,12 +26,29 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
     return typeof sample?.id === 'string' && sample.id.length === 36
       && typeof sample.run_id === 'string' && sample.run_id.length === 36
       && sample.analysis_location === 'youtube_tab' && sample.audio_transferred_to_app === false
-      && sample.raw_audio_retained === false && sample.tags && sample.traits && metadataOnly(sample, 65536);
+      && sample.raw_audio_retained === false && sample.tags
+      && (sample.embedding || (sample.traits && sample.mood_versions)) && metadataOnly(sample, 65536);
   }
 
   function publish() {
-    const value = {type: 'collection', protocol: 1, extension_version: extensionVersion, run: state.run,
-      recent: state.recent, status, pending: state.outbox.length, receipt};
+    if (completing) return;
+    const run = state.run && {...state.run, sampling_complete: !!state.run.duration
+      && TuneConsoleAudioSampler.samplingPoints(state.run.duration).every(point =>
+        ['saved', 'missed', 'too_short'].includes(state.run.points[point.key]))};
+    const recent = new Map(state.recent.filter(row => row.id !== run?.id).map(row =>
+      [row.id, {...row, points: {...row.points}, sampling_complete: true}]));
+    for (const sample of state.outbox) {
+      if (sample.run_id === run?.id) continue;
+      if (!recent.has(sample.run_id)) recent.set(sample.run_id, {
+        id: sample.run_id, video_id: sample.video_id, title: sample.title, artist: sample.artist,
+        points: {}, sampling_complete: true});
+      recent.get(sample.run_id).points[sample.point] = 'saving';
+    }
+    const analysing = current?.analysing && sampler?.active;
+    if (analysing && recent.has(analysing.run.id))
+      recent.get(analysing.run.id).points[analysing.point.key] = 'analysing';
+    const value = {type: 'collection', protocol: 1, extension_version: extensionVersion, run,
+      recent: [...recent.values()], status, pending: state.outbox.length, receipt};
     for (const observer of observers) {
       try { observer.postMessage(value); } catch (error) { observers.delete(observer); }
     }
@@ -51,8 +68,10 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
     return task;
   }
   function remember(run) {
+    const points = Object.fromEntries(Object.entries(run.points).filter(([, phase]) =>
+      ['saved', 'missed', 'too_short'].includes(phase)));
     state.recent = [...state.recent.filter(value => value.id !== run.id),
-      {id: run.id, video_id: run.video_id, title: run.title, artist: run.artist}].slice(-24);
+      {id: run.id, video_id: run.video_id, title: run.title, artist: run.artist, points}].slice(-24);
   }
   function changed(run) {
     state.run = run;
@@ -75,7 +94,7 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
     get current() { return current; }, validPlaying, stop,
     schedule(seconds) {
       const playing = validPlaying();
-      if (current || !playing || !this.port || capture.previewOpen) return;
+      if (current || !playing || !this.port) return;
       current = {token: crypto.randomUUID(), playing, analysing: false};
       port.postMessage({type: 'capture', id: current.token, video_id: playing.video_id, not_before: seconds});
     }};
@@ -111,9 +130,14 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
     } else if (data.type === 'result') {
       current = null;
       const value = data.result;
-      if (!value?.prediction?.moods?.traits) { tick(); return; }
-      sampler.completed({...value, observed_playback: job.playing,
-        observed_position_at_start: job.playing.position});
+      if (!value?.prediction?.embedding) { tick(); return; }
+      // Collection may persist before queuing the check. Publish the two
+      // changes together so a previous song cannot briefly look finished.
+      completing = true;
+      try {
+        sampler.completed({...value, observed_playback: job.playing,
+          observed_position_at_start: job.playing.position});
+      } finally { completing = false; publish(); }
     }
   }
   async function post(path, body) {
@@ -145,7 +169,14 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
         const remaining = state.outbox.filter(value => value.id !== sample.id);
         const previous = state.outbox;
         state.outbox = remaining;
-        if (state.run?.id === sample.run_id) state.run.points[sample.point] = 'saved';
+        if (state.run?.id === sample.run_id) {
+          state.run.points[sample.point] = 'saved';
+          remember(state.run);
+        } else {
+          const saved = state.recent.find(value => value.id === sample.run_id);
+          remember({id: sample.run_id, video_id: sample.video_id, title: sample.title, artist: sample.artist,
+            points: {...saved?.points, [sample.point]: 'saved'}});
+        }
         try { await persist(); }
         catch (error) { state.outbox = previous; throw error; }
         failures = 0; retryAt = 0;
@@ -182,7 +213,7 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
   }
   function tick(deliver = true) {
     if (!ready || !sampler) return;
-    sampler.tick({collect: durable && available && !capture.previewOpen && state.outbox.length < LIMIT});
+    sampler.tick({collect: durable && available && state.outbox.length < LIMIT});
     if (deliver) flush();
   }
   function restorePoints(run) {
@@ -213,7 +244,6 @@ function createAudioCollection({appOrigin, capture, storage = chrome.storage?.lo
         cached: state.run, clock, save() {}, changed, result: collected});
       ready = true;
       port = capture.openCollection(receive);
-      capture.onCollectionChanged(() => { publish(); tick(); });
       interval?.(tick, 500);
       publish(); tick();
     } catch (error) {

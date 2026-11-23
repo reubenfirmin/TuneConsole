@@ -47,18 +47,26 @@ def test_store_build_without_reply_can_confirm_without_an_elapsed_clock(paused, 
     with client.websocket_connect("/bridge/ws", headers={"origin": EXTENSION_ORIGIN}) as ws:
         if not delayed_health:
             ws.send_json({"type": "sensor-health", "ytmTabs": 1})
-        bridge.now_playing = {"video_id": "song", "paused": not paused, "position": None}
+        bridge.now_playing = {"video_id": "song", "paused": not paused, "position": None,
+                              "playlist_ytm_id": "PL", "queue_item": {"index": 7}}
         bridge.now_playing_seen_at = time.monotonic()
         responses = []
         action = "pause" if paused else "play"
+        occurrence = "" if paused else "&playlist=PL&queueIndex=7"
         call = threading.Thread(target=lambda: responses.append(client.post(
-            f"/now-playing/toggle?action={action}&videoId=song&confirm=true")))
+            f"/now-playing/toggle?action={action}&videoId=song&confirm=true{occurrence}")))
         call.start()
         frame = ws.receive_json()
         assert frame["type"] == "playpause" and frame["action"] == action
         # A legacy store worker executes but never acknowledges this frame.
-        ws.send_json({"type": "now-heartbeat", "title": "Song", "videoId": "song",
-                      "paused": paused, "position": None})
+        heartbeat = {"type": "now-heartbeat", "title": "Song", "videoId": "song",
+                     "paused": paused, "position": None, "playlist": "PL"}
+        if not paused:
+            assert (frame["playlist"], frame["queueIndex"]) == ("PL", 7)
+            ws.send_json({**heartbeat, "queueItem": {"videoId": "song", "playlist": "PL", "index": 8}})
+            time.sleep(.15)
+            assert call.is_alive(), "a different occurrence cannot confirm Play"
+        ws.send_json({**heartbeat, "queueItem": {"videoId": "song", "playlist": "PL", "index": 7}})
         if delayed_health:
             time.sleep(.15)
             assert call.is_alive(), "unknown capability cannot use the legacy heartbeat fallback"

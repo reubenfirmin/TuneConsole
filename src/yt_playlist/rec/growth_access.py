@@ -11,6 +11,15 @@ RETAINED_DESTINATIONS = {'directions': 'listening', 'album-choices': 'albums',
                          'vibes': 'vibes', 'recent': 'recent'}
 
 
+def main_path_through(area):
+    """Return the main-path areas already proven accessible by this destination."""
+    destination = 'listening' if area == 'rediscover' else RETAINED_DESTINATIONS.get(area)
+    if destination is None:
+        return set()
+    prefix = MAIN_PATH[:MAIN_PATH.index(destination) + 1]
+    return {panel for panel, stop in RETAINED_DESTINATIONS.items() if stop in prefix}
+
+
 def has_access(state, area):
     """Keep earned destinations open while their eligible output refreshes.
 

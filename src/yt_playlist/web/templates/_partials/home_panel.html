@@ -1,0 +1,36 @@
+{% set panel = home_default_panel %}
+{% if panel == 'unlocks' %}
+  {% if home_fragment %}<div x-init='applyGrowth({{ growth|tojson }})'>{% endif %}
+  {% include '_partials/account_growth.html' %}
+  {% if home_fragment %}</div>{% endif %}
+{% elif panel == 'radio' %}
+  {% include '_partials/radio.html' %}
+{% elif panel == 'tv' %}
+  <div class="tv-slot"></div>
+  {% if home_fragment %}<template class="tv-session-template">{% include '_partials/tv.html' %}</template>{% endif %}
+{% elif panel == 'album-choices' and album_board %}
+  {% with albums=album_board.albums, opportunity_id=album_board.opportunity_id,
+          preparing=album_board.preparing, filtered=album_board.filtered,
+          tuning=album_board.tuning, tuning_axes=album_board.tuning_axes,
+          tuning_defaults=album_board.tuning_defaults, genres=album_board.genres %}
+  {% include '_partials/album_choices.html' %}
+  {% endwith %}
+{% elif panel == 'directions' %}
+  {% include '_partials/home_feed.html' %}
+  {% if muted_count %}
+  <p class="section-note muted-note">Hiding {{ muted_count }} muted artist{{ 's' if muted_count != 1 else '' }} based on your feedback -
+    <a href="/taste">manage on the Taste Model page</a>.</p>
+  {% endif %}
+{% elif panel == 'rediscover' %}
+  {% include '_partials/rediscover.html' %}
+{% elif panel == 'recent' and story_board %}
+  {% with cards=story_board.cards, groups=story_board.groups,
+          spreads=story_board.spreads, preparing=story_board.preparing %}
+  {% include '_partials/into_recently.html' %}
+  {% endwith %}
+{% elif panel == 'discover' %}
+  {% include '_partials/home_discovery.html' %}
+{% elif panel == 'notices' %}
+  {% include '_partials/takeout_nag.html' %}
+  {% include '_partials/alerts.html' %}
+{% endif %}

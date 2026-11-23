@@ -37,7 +37,7 @@
         {% if view == 'queue' %}
         <td>{{ 'Re-enrichment' if track.last_enriched_at is not none else 'First enrichment' }}</td>
         {% else %}
-        <td>{% set fields = [] %}{% for key, label in [('genre', 'Genre'), ('mb_year', 'Year'), ('bpm', 'BPM'), ('energy', 'Energy'), ('danceability', 'Danceability')] %}{% if track[key] is not none and track[key] != '' %}{% set _ = fields.append(label) %}{% endif %}{% endfor %}{{ fields|join(', ') or 'No core fields found' }}</td>
+        <td>{% set fields = [] %}{% for key, label in [('genre', 'Genre'), ('mb_year', 'Year'), ('bpm', 'BPM'), ('danceability', 'Danceability')] %}{% if track[key] is not none and track[key] != '' %}{% set _ = fields.append(label) %}{% endif %}{% endfor %}{{ fields|join(', ') or 'No core fields found' }}</td>
         {% endif %}
         <td>{{ age(track.last_enriched_at) }}</td>
       </tr>

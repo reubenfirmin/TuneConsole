@@ -2,6 +2,9 @@
 import hashlib
 import json
 
+from yt_playlist.core.activity import check_cancellable_work
+from yt_playlist.rec.vibe_score_policy import score_patterns
+
 
 class MusicalProfiles:
     def __init__(self, repository, files, metadata, predictions, refresh):
@@ -9,6 +12,8 @@ class MusicalProfiles:
         self.predictions, self.refresh = predictions, refresh
 
     def _write(self, kind, values):
+        if not values:
+            return []
         records = self.files.describe(kind, values)
         identities = self.repository.reserve_files(records)
         return self.files.write_reserved([record | {'file_id': identity}
@@ -52,10 +57,8 @@ class MusicalProfiles:
         self.repository.assert_idle()
         with self.files.retained():
             owners = self.repository.publication_owners('source', [key])
-            references = ([] if owners is None else self._write('source',
-                [(key, owners[key], payload, version, digest)]))
-            return self.repository.publish_source(key, pending, ids, payload, version, digest, now, limit,
-                                                  references=references)
+            reference, = self._write('source', [(key, owners[key], payload, version, digest)])
+            return self.repository.publish_source(key, pending, ids, now, limit, reference=reference)
 
     def recording_inputs(self, keys, max_bytes=8 * 1024 * 1024, *, source_scopes=None):
         keys = list(keys)
@@ -88,9 +91,9 @@ class MusicalProfiles:
         with self.files.retained():
             owners = self.repository.publication_owners('recording',
                 [key for key, payload, _version, _digest in prepared if payload is not None])
-            references = ([] if owners is None else self._write('recording',
+            references = self._write('recording',
                 [(key, owners[key], payload, version, digest) for key, payload, version, digest in prepared
-                 if payload is not None]))
+                 if payload is not None])
             changed = self.repository.publish_recordings(prepared, now, references=references)
         if changed:
             self.refresh.publish_notification()
@@ -101,15 +104,25 @@ class MusicalProfiles:
     def readiness_state(self, keys):
         digest, profiles = hashlib.sha256(), {}
         keys = sorted(set(keys))
-        for offset in range(0, len(keys), 512):
-            rows = self.repository.readiness_rows(keys[offset:offset + 512])
-            digest.update(json.dumps(rows, separators=(',', ':')).encode())
-            for key, policy, _digest, vibe, score, support, source, stamp in rows:
-                profile = profiles.setdefault(key, {'version': policy, 'vibes': {
-                    'inputs_version': stamp, 'fits': {}}})
-                if vibe is not None and policy is not None:
-                    profile['vibes']['fits'][vibe] = {
-                        'score': score, 'support': support, 'source': source, 'inputs_version': stamp}
+        if not keys:
+            return digest.hexdigest(), profiles
+
+        # Retain the fingerprint of installed publications by preserving the
+        # original 512-key groups in the digest after a single set of reads.
+        group_size = 512
+        groups = [[] for _ in range(0, len(keys), group_size)]
+        group_by_key = {key: index // group_size for index, key in enumerate(keys)}
+        rows = self.repository.readiness_rows(keys, patterns=score_patterns())
+        for row in rows:
+            key, policy, _digest, vibe, score, support, source, stamp = row
+            groups[group_by_key[key]].append(row)
+            profile = profiles.setdefault(key, {'version': policy, 'vibes': {
+                'inputs_version': stamp, 'fits': {}}})
+            if vibe is not None and policy is not None:
+                profile['vibes']['fits'][vibe] = {
+                    'score': score, 'support': support, 'source': source, 'inputs_version': stamp}
+        for group in groups:
+            digest.update(json.dumps(group, separators=(',', ':')).encode())
         return digest.hexdigest(), profiles
 
     def by_keys(self, keys):
@@ -119,6 +132,16 @@ class MusicalProfiles:
         with self.files.retained():
             result = self.files.read_page('recording', self.repository.profile_references(keys))
         return self.predictions.overlay(result)
+
+    def base_profile_pages(self, keys):
+        """Read the immutable fallback profiles before overlaying relational fits."""
+        keys = list(dict.fromkeys(keys))
+        with self.files.retained():
+            references = []
+            for offset in range(0, len(keys), 512):
+                check_cancellable_work()
+                references.extend(self.repository.profile_references(keys[offset:offset + 512]))
+            yield from self.files.read_ordered_pages('recording', references)
 
     def provenance_sources(self, key, digests, *, limit=16, max_bytes=256 * 1024):
         if not digests:

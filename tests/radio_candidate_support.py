@@ -7,6 +7,7 @@ in test_stored_radio and test_typed_recommendation_publication.
 from collections import defaultdict
 from contextlib import nullcontext
 from copy import deepcopy
+from itertools import chain, islice
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -14,7 +15,9 @@ import numpy as np
 import pytest
 
 from yt_playlist.rec import musical_character, radio_candidates, radio_intensity
+from yt_playlist.rec.vibe_score_policy import serving_prefix
 from yt_playlist.rec.stored_radio import LOOKAHEAD, PreparedRadio
+from yt_playlist.repos.tracks import TrackRepo
 
 
 @pytest.fixture
@@ -22,6 +25,7 @@ def intensity_inputs(monkeypatch):
     inputs_state = SimpleNamespace(indexed=True)
     pools, modes, profiles, vectors = {}, {}, {}, {}
     labels = ['Electronic'] * 5 + ['Synthwave', 'Jazz', 'Rock', 'Ambient']
+    stamp = serving_prefix() + 'radio-test'
     for index, label in enumerate(labels):
         mid = str(index + 1)
         angle = index * .01 if index < 6 else (index - 5) * 1.2
@@ -33,7 +37,8 @@ def intensity_inputs(monkeypatch):
             key = f'policy-{mid}-{offset}'
             energy = .04 if mid == '9' and offset >= 12 else .96
             profile = {'version': musical_character.VERSION,
-                       'dimensions': {'intensity': {'value': energy, 'support': 1}}}
+                       'vibes': {'inputs_version': stamp, 'intensity_fits': {
+                           'energize': {'score': energy, 'support': 1, 'source': 'audio_measurement'}}}}
             profiles[key] = profile
             vectors[key] = vector.tobytes()
             rows.append({'key': key, 'video_id': key, 'title': key,
@@ -47,11 +52,20 @@ def intensity_inputs(monkeypatch):
         return {label: (('Electronic' if label and label.casefold() == 'synthwave'
                         else (label or '').title()), (label or '').casefold()) for label in labels}
 
+    def genre_tracks(labels, after, limit):
+        # The controlled catalog contains the recordings selected for this
+        # scenario. Tests with extra catalog inventory supply it explicitly.
+        rows = ({**track, 'id': index} for index, track in enumerate(chain.from_iterable(pools.values()), 1)
+                if index > after and track['genre'] in labels)
+        return deepcopy(list(islice(rows, limit)))
+
     store = SimpleNamespace(
-        _recommendation_files=True, _lock=nullcontext(),
-        settings=SimpleNamespace(get_setting=lambda name: {'rec_content_model': 'controlled',
-            'rec_param:now_gain': '0'}.get(name)),
-        rec_model=SimpleNamespace(disliked_identity_keys=set, suppressed_keys=lambda *args: set(),
+        _lock=nullcontext(),
+        settings=SimpleNamespace(get_setting=lambda name: {'rec_param:now_gain': '0'}.get(name)),
+        rec_model=SimpleNamespace(disliked_identity_keys=set, disliked_key_page=lambda **kwargs: [],
+            recording_encoder=lambda: 'controlled', recording_state=lambda: SimpleNamespace(generation=None),
+            vectors_by_keys=lambda keys: {}, content_vectors_by_keys=lambda keys: {},
+            suppressed_keys=lambda *args: set(),
             muted_artists=list, get_weights=lambda **kwargs: weights,
             content_vector_pools=lambda keys: {'library': {key: vectors[key] for key in keys},
                                                'discovered': {}}),
@@ -61,27 +75,33 @@ def intensity_inputs(monkeypatch):
             intensity_bands=lambda *args, **kwargs: [2, 48]),
         rec_query=SimpleNamespace(tracks_by_keys=lambda keys: {}),
         accounts=SimpleNamespace(get_accounts=list),
+        tracks=SimpleNamespace(preferred_playback_uploads=Mock(
+            spec=TrackRepo.preferred_playback_uploads, return_value={})),
         radio_catalog=SimpleNamespace(details=lambda keys: {key: all_tracks[key] for key in keys},
+            genre_labels=lambda: sorted({track['genre'] for track in chain.from_iterable(pools.values())
+                                         if track['genre']}),
+            genre_tracks=genre_tracks,
             rotation_facts=lambda keys: {key: {'owned': not all_tracks[key].get('_radio_fresh'),
                 'heard': bool(all_tracks[key].get('plays')), 'last_started': None, 'last_offered': None}
                 for key in keys if key in all_tracks}))
 
-    store.read_view = lambda: nullcontext(store)
+    store.read_view = lambda **kwargs: nullcontext(store)
 
-    def intensity_pool(bands, mode, energy, *, allowed, genre_allowed, excluded, used, limit=LOOKAHEAD):
+    def intensity_pool(bands, mode, preference, *, allowed, genre_allowed, excluded, used, limit=LOOKAHEAD,
+                       max_priority=None):
         assert 1 <= limit <= LOOKAHEAD
         reads.append((mode, limit, frozenset(used)))
         result, priority = [], None
-        ordered = sorted(bands[mode], key=lambda value: radio_intensity.loss(value, energy))
+        ordered = sorted(bands[mode], key=lambda value: radio_intensity.priority(value, preference))
         for value in ordered:
-            loss = radio_intensity.loss(value, energy)
-            if priority is not None and loss > priority:
+            rank = radio_intensity.priority(value, preference)
+            if (priority is not None and rank > priority) or (max_priority is not None and rank > max_priority):
                 break
             for track in bands[mode][value]:
                 if (track['key'] in used or track['video_id'] in excluded
                         or not genre_allowed(track['genre']) or not allowed(track)):
                     continue
-                priority = loss
+                priority = rank
                 result.append(track)
                 if len(result) == limit:
                     return priority, deepcopy(result)
@@ -95,6 +115,13 @@ def intensity_inputs(monkeypatch):
             bands[mode] = defaultdict(list)
             for track in rows:
                 bands[mode][musical_character.intensity(track)].append(track)
+        headings = {}
+        for mode, region in bands.items():
+            mode_headings = defaultdict(set)
+            for value, rows in region.items():
+                band = round(value * radio_intensity.RESOLUTION)
+                mode_headings[band].update(track['genre'] for track in rows)
+            headings[mode] = mode_headings
 
         def tracks(surface, mode, purpose, *, allowed, excluded=(), used=(), limit=LOOKAHEAD):
             return deepcopy([track for track in pools[mode] if track['key'] not in used
@@ -103,6 +130,7 @@ def intensity_inputs(monkeypatch):
         return SimpleNamespace(generation=1, current_reader=None, has_intensity=inputs_state.indexed,
             surface=lambda name: name, positions=lambda *args: {}, close=lambda: None,
             planning_read=nullcontext, planning_fact=lambda key, load: load(),
+            intensity_headings=lambda: headings,
             track_facts=lambda name, keys, load: load(keys),
             tracks=Mock(spec=PreparedRadio.tracks, side_effect=tracks),
             intensity_pool=Mock(spec=PreparedRadio.intensity_pool,
@@ -117,7 +145,7 @@ def intensity_inputs(monkeypatch):
             **{mid: {'_radio_pool': deepcopy(rows[:12])} for mid, rows in pools.items()}}
 
     monkeypatch.setattr('yt_playlist.rec.stored_radio.PreparedRadio', publication)
-    monkeypatch.setattr(radio_candidates, '_prepared_inputs', inputs)
+    monkeypatch.setattr(radio_candidates, 'prepared_inputs', inputs)
     monkeypatch.setattr(musical_character, 'load',
         lambda store, keys: {key: deepcopy(profiles[key]) for key in keys})
     inputs_state.store, inputs_state.pools, inputs_state.quiet = store, pools, quiet

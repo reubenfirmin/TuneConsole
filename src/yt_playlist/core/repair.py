@@ -12,7 +12,6 @@ from pathlib import Path
 import tempfile
 
 CORROBORATION_TOLERANCE_DAYS = 1
-PHANTOM_PURGE_SEEN = "repair_phantom_verified_import_seen"
 
 logger = logging.getLogger(__name__)
 
@@ -47,17 +46,16 @@ def _phantom_rows(conn, account_id, lo, hi, *, tolerance=CORROBORATION_TOLERANCE
     # Any exact event corroborates, regardless of its source. Unknown and independently observed
     # daily rows cannot be disproved by a YouTube export and must survive even without an event.
     return conn.execute(
-        "SELECT o.*,c.captured_at FROM listening_observation_subjects o "
-        "JOIN listening_capture_receipts c ON c.id=o.capture_id "
+        "SELECT o.*,o.first_observed_at AS captured_at FROM listening_observation_subjects o "
         "WHERE o.account_id=? AND o.source='ytm_history' AND o.precision='legacy_unknown' "
-        "AND CAST(c.captured_at / 86400 AS INTEGER) BETWEEN ? AND ? "
+        "AND CAST(o.first_observed_at / 86400 AS INTEGER) BETWEEN ? AND ? "
         "AND NOT EXISTS (SELECT 1 FROM listening_observation_subjects other "
         "  WHERE other.account_id=o.account_id AND other.identity_key=o.identity_key "
         "  AND other.source<>'ytm_history' AND (other.day=o.day OR other.source_day=o.source_day)) "
         "AND NOT EXISTS (SELECT 1 FROM play_event_subjects pe "
         "  WHERE pe.account_id=o.account_id AND pe.identity_key=o.identity_key "
         "  AND ABS(CAST(pe.played_at / 86400 AS INTEGER) "
-        "          - CAST(c.captured_at / 86400 AS INTEGER)) <= ?)",
+        "          - CAST(o.first_observed_at / 86400 AS INTEGER)) <= ?)",
         (account_id, lo, hi, tolerance)).fetchall()
 
 
@@ -102,8 +100,6 @@ def purge_phantom_history(conn, backup_path=None) -> int:
             raise ValueError('History repair requires a recovery backup; nothing was deleted')
         _publish_backup(backup_path, rows.values())
         conn.executemany('DELETE FROM listening_observations WHERE id=?', [(rid,) for rid in rows])
-        from .first_play import invalidate
-        invalidate(conn)
         conn.commit()
     except BaseException:
         conn.rollback()

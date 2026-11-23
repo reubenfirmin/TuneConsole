@@ -16,7 +16,7 @@ class TasteQueries:
     def controls(self, now, groups):
         return {'values': {spec.name: self.parameter(spec.name) for spec in rec_params.PARAMS
                            if spec.group in groups or spec.name in rec_params.SEMANTIC_PARAMS},
-                'adaptive': bool(self.readings.group_checkpoint()), 'tuning': self.tuning(now)}
+                'adaptive': bool(self.readings.groups_published()), 'tuning': self.tuning(now)}
 
     def model_status(self):
         breadth = self.breadth()
@@ -89,7 +89,7 @@ class TasteQueries:
             return self.grouping(policy=True)
         if panel == 'profile':
             modes = []
-            if not self.readings.group_checkpoint():
+            if not self.readings.groups_published():
                 rows = self.modes.list_modes(active_only=True)
                 metadata = self.tracks.tracks_by_keys([key for mode in rows for key in mode['rep_keys']])
                 modes = [{'label': row['label'], 'size': row['size'], 'fresh': now - row['first_seen'] < 2 * 86400,

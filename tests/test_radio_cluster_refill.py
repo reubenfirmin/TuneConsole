@@ -1,14 +1,14 @@
-"""Continuing style streams are independent of Home's finite card proposals."""
+"""On Air can keep playing from a track group beyond Home's card proposals."""
 from copy import deepcopy
 
 import pytest
 from tests.derived_rating_support import remove_rating, seed_dislike
 
 from yt_playlist.rec import embedding_vectors, radio_tuning
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.rec.radio_candidates import CLUSTER_POOL_LIMIT, RadioCandidates
 from tests.test_radio_catalog import catalog_track, seed, seed_catalog
-from tests.musical_support import prepare_profiles
-from yt_playlist.core import catalog
+from tests.musical_support import publish_intensities
 from yt_playlist.rec import musical_character
 from tests.recommendation_support import publish_bundles
 from tests.radio_candidate_support import intensity_inputs
@@ -33,7 +33,7 @@ def indexed(store, seed, count=110, *, mixed=False, home=True):
 
 @pytest.fixture
 def refill_library(intensity_inputs):
-    """One published style exceeds the finite Home and catalog lookahead.
+    """One published track group exceeds the finite Home and catalog lookahead.
 
     Real stored-page reads and live eligibility are owned by test_stored_radio;
     this fixture isolates candidate continuation policy from SQL/model setup.
@@ -96,10 +96,10 @@ def test_refill_rechecks_feedback_and_survives_an_unrelated_model_publication(st
     tracks = indexed(store, seed, 5)
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1})
     seed_dislike(store, tracks[0]['key'], 1001, 1)
-    store.settings.set_setting('rec_content_generation', 'new-generation')
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(generation='new-generation'))
     # An active session retains its published membership and directions. A new
     # incompatible basis is never decoded against the old saved centroids.
-    store.settings.set_setting('rec_content_model', '{"new":"basis"}')
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(encoder='{"new":"basis"}'))
     history = [seed]
     for _ in range(4):
         track = c.next_track(history)
@@ -117,11 +117,7 @@ def test_indexed_cluster_without_a_home_card_is_still_available(store, seed):
 
 def test_continuing_refill_uses_shared_intensity_for_unprepared_recordings(store, seed):
     tracks = indexed(store, seed, 3)
-    for i, track in enumerate(tracks):
-        tid = store.tracks.track_ids_for_videos([track['video_id']])[track['video_id']]
-        with store.conn:
-            catalog.choose_field(store.conn, tid, 'energy', .99 if i == 2 else .01)
-    prepare_profiles(store)
+    publish_intensities(store, {track['key']: .99 if i == 2 else .01 for i, track in enumerate(tracks)})
     c = RadioCandidates(store, 1000, {**radio_tuning.DEFAULTS, 'theme': 1, 'energy': 1})
     track = c.next_track([seed])
     assert track['key'] == tracks[2]['key']

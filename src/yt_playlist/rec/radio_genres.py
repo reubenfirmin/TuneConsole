@@ -1,4 +1,4 @@
-"""Genre endpoints for the radio dial, independent of embedding style and I/O."""
+"""Genre endpoints for the On Air dial, independent of track grouping and I/O."""
 from functools import lru_cache
 
 from yt_playlist.util import genre_catalog, genre_map
@@ -69,7 +69,10 @@ class GenrePolicy:
         return self._contrasts[key]
 
     def bonus(self, track):
-        changed, absent, distance = self.contrast(track)
-        contrast = (max(0., changed) + absent + distance) / 3
-        current = self.key(self.current)
-        return self.breadth * contrast + self.focus * bool(current) * (self.key(track) == current)
+        if self.breadth:
+            changed, absent, distance = self.contrast(track)
+            return self.breadth * (max(0., changed) + absent + distance) / 3
+        if self.focus:
+            current = self.key(self.current)
+            return self.focus if current and self.key(track) == current else 0.
+        return 0.

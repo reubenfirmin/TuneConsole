@@ -1,10 +1,6 @@
 """Serialized runtime access to shared vibe model SQL records."""
-from yt_playlist.core.vibe_model_queries import (
-    VibeModelQueries, album_tables, schema, conditioning_guards, install, install_conditioning_guards,
-    metadata_guards, install_metadata_guards, validate_metadata_guards, validate, available,
-    album_facts, training_rows, linked, subject, receipt_marker, root_measurements,
-    referenced_generations, referenced, measurement_rows,
-)
+from yt_playlist.core.vibe_model_queries import VibeModelQueries
+from yt_playlist.core.db_revisions import keyed_reads
 from yt_playlist.repos.base import Repo, synchronized
 from yt_playlist.repos import vibe_model_file_writes
 
@@ -22,7 +18,8 @@ class VibeModelsRepo(Repo):
 
     @synchronized
     def file_reference(self, generation):
-        return VibeModelQueries.file_reference(self, generation)
+        with keyed_reads(self._store, 'collection_file_writes', (bytes.fromhex(generation).hex(),)):
+            return VibeModelQueries.file_reference(self, generation)
 
     @synchronized
     def assert_idle(self):

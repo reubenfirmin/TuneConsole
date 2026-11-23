@@ -53,11 +53,10 @@ def _add(page, label, kind):
     expect(page.locator(".cluster-center")).to_have_attribute("aria-busy", "false")
 
 
-@pytest.mark.parametrize("width", [1440, 1920])
-def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
+def test_seed_songs_wrapping_and_restore(page, cluster_library):
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
-    page.set_viewport_size({"width": width, "height": 1050})
+    page.set_viewport_size({"width": 1440, "height": 1050})
     page.goto(f"{cluster_library}/clusters")
     expect(page.locator(".cluster-graph canvas")).to_have_count(1)
     _add(page, ARTISTS[0], "artist")
@@ -76,10 +75,6 @@ def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
     expect(name).to_have_value(expected_name)
     center = page.locator(".cluster-center")
     expect(center.locator(".cn-seed")).to_have_count(3)
-    assert center.evaluate("el => el.scrollWidth <= el.clientWidth")
-    assert center.locator(".cn-seeds").evaluate("el => el.scrollWidth <= el.clientWidth")
-    assert center.evaluate("el => el.offsetHeight > 140")
-    assert center.locator(".cn-seed").last.evaluate("el => el.offsetHeight > 30")
     assert page.evaluate(f"{DATA}.nodes.filter(n => n.kind === 'track').every(n => n.label !== {SONG!r})")
     page.get_by_role("region", name="Edit central cluster").get_by_role("button", name="Done").click()
     saved_seed = page.evaluate(f"{DATA}.randomSeed")
@@ -94,11 +89,17 @@ def test_seed_songs_wrapping_and_restore(page, cluster_library, width):
     page.wait_for_function(f"{DATA}._pendingView == null", timeout=5000)
     restored = page.evaluate(f"({{zoom: {DATA}._fg.zoom(), view: JSON.parse(localStorage.getItem({DATA}._canvasKey({DATA}.activeId))).view}})")
     assert abs(restored["zoom"] - saved_zoom) < 0.01, (saved_zoom, restored)
-    bounds = center.bounding_box()
-    assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= width
-    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    for width in (1440, 1920):
+        page.set_viewport_size({"width": width, "height": 1050})
+        assert center.evaluate("el => el.scrollWidth <= el.clientWidth")
+        assert center.locator(".cn-seeds").evaluate("el => el.scrollWidth <= el.clientWidth")
+        assert center.evaluate("el => el.offsetHeight > 140")
+        assert center.locator(".cn-seed").last.evaluate("el => el.offsetHeight > 30")
+        bounds = center.bounding_box()
+        assert 0 <= bounds["x"] and bounds["x"] + bounds["width"] <= width
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+        capture(page, path=f'build/test-reports/home-discovery-browser/clusters-{width}.png')
     assert not errors
-    capture(page, path=f'build/test-reports/home-discovery-browser/clusters-{width}.png')
 
 
 def test_removing_an_artist_keeps_developed_branches(page, cluster_library):

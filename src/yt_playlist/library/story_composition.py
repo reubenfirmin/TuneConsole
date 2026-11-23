@@ -29,7 +29,9 @@ def stories(store, *, taxonomy=None):
     def fetch(subject, now, fetch_fn):
         with wikipedia.access(store), net.probe_errors() as errors:
             try:
-                payload = (fetch_fn or wikipedia.fetch_summary)(subject['kind'], subject['display'])
+                kwargs = ({'artist_genres': subject['recording_genres']}
+                          if fetch_fn is None and 'recording_genres' in subject else {})
+                payload = (fetch_fn or wikipedia.fetch_summary)(subject['kind'], subject['display'], **kwargs)
             except LookupUnavailable as exc:
                 exc.retry_at = max([getattr(exc, 'retry_at', 0), *(net.retry_after(e, now) for e in errors)])
                 raise

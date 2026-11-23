@@ -23,6 +23,9 @@ name = "wikipedia"
 # Words that carry no identity (added as search context, or generic): ignored when checking that a
 # resolved page is actually about the subject.
 _STOPWORDS = {"band", "musician", "music", "genre", "the", "and", "of", "a"}
+_MUSICIAN = re.compile(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
+                       r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
+                       r'music producer|record producer)\b', re.I)
 _MAX_CANDIDATES = 5
 
 _SEARCH, _SUMMARY = SEARCH, SUMMARY
@@ -99,21 +102,49 @@ def _summary(title):
         raise
 
 
-def fetch_summary(kind, display):
+def fetch_summary(kind, display, *, artist_genres=None):
     """Resolve a matching article; stale evidence also reports pending access."""
-    return _project(_fetch_summary, kind, display)
+    return _project(_fetch_summary, kind, display, artist_genres)
 
 
-def _fetch_summary(kind, display):
+def _fetch_summary(kind, display, artist_genres):
     """Return a summary or confirmed miss; raise LookupUnavailable on retryable failures.
 
-    Walks the top search candidates and accepts the first that is a real article (type 'standard',
-    non-empty extract) AND has the subject's identity in the title. A shared
-    first name or a mention of the artist inside another article is insufficient."""
+    Story lookups pass recent recording genres to resolve same-name articles."""
     from yt_playlist.controllers.wikipedia_acquisition import summary
     from types import SimpleNamespace
     policy = SimpleNamespace(matches_subject=matches_subject, project_summary=project_summary)
-    return summary(policy, _search_titles, _summary, kind, display)
+    select = None if artist_genres is None else lambda candidates, ambiguous: _select_artist_summary(
+        display, artist_genres, candidates, ambiguous)
+    return summary(policy, _search_titles, _summary, kind, display, select=select)
+
+
+def _select_artist_summary(display, genres, candidates, ambiguous):
+    article = candidates[0]
+    introduction = re.split(r'[.!?]\s|\n', article['extract'], maxsplit=1)[0]
+    if (not ambiguous and subject_matches('artist', display, article['title'], allow_qualified_artist=False)
+            and _MUSICIAN.search(introduction)):
+        return {**article, 'matched_genres': []}
+    if not genres:
+        return None
+
+    # A category describes the article itself. An extract can mention another
+    # artist by the same name without describing that artist's genre.
+    titles = [article['title'] for article in candidates]
+    params = {'action': 'query', 'format': 'json', 'prop': 'categories',
+              'clshow': '!hidden', 'cllimit': '200', 'titles': '|'.join(titles)}
+    pages = _get_json(_SEARCH + '?' + urllib.parse.urlencode(params))['query']['pages']
+    categories = {page['title']: [_plain_name(c['title'].removeprefix('Category:'))
+                                 for c in page.get('categories', ())] for page in pages.values()}
+    patterns = {genre: re.compile(rf'\b{re.escape(_plain_name(genre))} (?:music(?:al)? )?'
+                                  r'(?:groups|bands|musicians|singers|rappers|djs)\b') for genre in genres}
+    matched = []
+    for article in candidates:
+        labels = categories.get(article['title'], ())
+        confirmed = [genre for genre, pattern in patterns.items() if any(pattern.search(label) for label in labels)]
+        if confirmed:
+            matched.append({**article, 'matched_genres': confirmed})
+    return matched[0] if len(matched) == 1 else None
 
 
 def project_summary(s, kind, display, title):
@@ -158,9 +189,7 @@ def artwork_filename(summary, display, title):
             or not matches_subject('artist', display, summary.get('title') or title)):
         return None
     context = summary.get('description') or summary.get('extract') or ''
-    if not re.search(r'\b(musician|musical|band|singer|songwriter|dj|composer|rapper|'
-                     r'guitarist|bassist|drummer|pianist|vocalist|orchestra|'
-                     r'music producer|record producer)\b', context, re.I):
+    if not _MUSICIAN.search(context):
         return None
     parsed = urllib.parse.urlsplit((summary.get('originalimage') or {}).get('source') or '')
     if parsed.scheme == 'https' and parsed.netloc == 'upload.wikimedia.org':

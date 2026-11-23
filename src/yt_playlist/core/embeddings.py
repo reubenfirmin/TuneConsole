@@ -30,7 +30,8 @@ def descriptor(name):
         kind, space = SPACES[name]
     except KeyError:
         raise ValueError('Invalid training model table') from None
-    return kind, space, f'{kind}_embeddings', f'{kind}_id'
+    table = embedding_files.relation(kind)
+    return kind, space, table, f'{kind}_id'
 
 
 def version(name, settings):
@@ -71,8 +72,7 @@ def model_dimensions(name, settings):
 
 
 def head(conn, name):
-    kind, space, table, _column = descriptor(name)
-    table = embedding_files.relation(conn, kind)
+    _kind, space, table, _column = descriptor(name)
     row = conn.execute(f'SELECT model_version,dimensions FROM {table} WHERE space=? LIMIT 1',
                        (space,)).fetchone()
     return tuple(row) if row else None
@@ -85,19 +85,18 @@ def rows(conn, name, *, keys=None):
 
 def row_facts(conn, name, *, keys=None):
     kind, space, table, column = descriptor(name)
-    table = embedding_files.relation(conn, kind)
     if kind == 'recording':
         subject = 'recordings'
         key = 's.identity_key'
-        retired = 'recording_redirects'
+        active = 's.redirect_recording_id IS NULL'
     else:
         subject = 'artists'
         key = "'@artist:'||s.id"
-        retired = 'artist_redirects'
+        active = 's.redirect_artist_id IS NULL'
     source = (f'{subject} s CROSS JOIN {table} e ON s.id=e.{column}' if keys is not None else
               f'{table} e JOIN {subject} s ON s.id=e.{column}')
-    sql = (f'SELECT {key},e.vector,e.dimensions,e.publication,e.position,e.file_id FROM {source} '
-           f'WHERE e.space=? AND NOT EXISTS(SELECT 1 FROM {retired} d WHERE d.retired_id=s.id)')
+    sql = (f'SELECT {key},e.dimensions,e.publication,e.position,e.file_id FROM {source} '
+           f'WHERE e.space=? AND {active}')
     args = [space]
     if keys is not None:
         keys = list(dict.fromkeys(keys))
@@ -115,20 +114,19 @@ def row_facts(conn, name, *, keys=None):
             args.extend(subjects)
     # Source insertion order is part of the discovered cohort's tied rankings.
     sql += ' ORDER BY e.insertion_order' if space == 'content_discovery' else f' ORDER BY {key}'
-    return [(key, vector, dimensions, (publication, file_id) if file_id is not None else publication, position)
-            for key, vector, dimensions, publication, position, file_id in conn.execute(sql, args)]
+    return [(key, None, dimensions, (publication, file_id) if file_id is not None else publication, position)
+            for key, dimensions, publication, position, file_id in conn.execute(sql, args)]
 
 
 def count(conn, name):
-    kind, space, table, _column = descriptor(name)
-    table = embedding_files.relation(conn, kind)
+    _kind, space, table, _column = descriptor(name)
     return conn.execute(f'SELECT COUNT(*) FROM {table} WHERE space=?', (space,)).fetchone()[0]
 
 
 def owner(conn, kind, key):
     if kind == 'recording':
         row = conn.execute('SELECT r.id FROM recordings r WHERE r.identity_key=? '
-                           'AND NOT EXISTS(SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id)',
+                           'AND r.redirect_recording_id IS NULL',
                            (key,)).fetchone()
         subject = row[0] if row else None
     else:
@@ -186,18 +184,17 @@ def prepare(conn, name, upserts, removed=(), *, replace=False, model_version=Non
             subject = int(key[8:]) if str(key).startswith('@artist:') else artists.lookup(conn, key)
         retracted.append(subject)
     files = None
-    if admitted and embedding_files.available(conn):
-        logical = embedding_files.relation(conn, kind)
+    if admitted:
         orders, order = {}, 0
         if not replace:
             subjects = [subject for subject, _vector in admitted]
             qs = ','.join('?' for _ in subjects)
-            orders = dict(conn.execute(f'SELECT {column},insertion_order FROM {logical} '
+            orders = dict(conn.execute(f'SELECT {column},insertion_order FROM {table} '
                 f'WHERE space=? AND {column} IN ({qs})', (space, *subjects)))
             removed_subjects = [subject for subject in retracted if subject is not None]
             excluded = (f' AND {column} NOT IN (' + ','.join('?' for _ in removed_subjects) + ')'
                         if removed_subjects else '')
-            order = conn.execute(f'SELECT COALESCE(MAX(insertion_order),0) FROM {logical} '
+            order = conn.execute(f'SELECT COALESCE(MAX(insertion_order),0) FROM {table} '
                 'WHERE space=?' + excluded, (space, *removed_subjects)).fetchone()[0]
         # Retractions happen before appending new rows, as in the writer API.
         for subject in retracted:
@@ -217,23 +214,13 @@ def publish_prepared(conn, publication):
     if not conn.in_transaction:
         raise RuntimeError('Embedding publication requires an outer transaction')
     kind, space, table, column = descriptor(publication.name)
-    file_owned = embedding_files.available(conn)
+    removed = [(subject, space) for subject in publication.removed if subject is not None]
     if publication.replace:
         conn.execute(f'DELETE FROM {table} WHERE space=?', (space,))
-        if file_owned:
-            conn.execute(f'DELETE FROM {kind}_embedding_files WHERE space=?', (space,))
-    removed = [(subject, space) for subject in publication.removed]
-    conn.executemany(f'DELETE FROM {table} WHERE {column}=? AND space=?', removed)
-    if file_owned:
-        conn.executemany(f'DELETE FROM {kind}_embedding_files WHERE {column}=? AND space=?', removed)
+    if removed:
+        conn.executemany(f'DELETE FROM {table} WHERE {column}=? AND space=?', removed)
     if publication.files is not None:
         embedding_files.publish_prepared(conn, kind, space, publication.model_version, publication.files)
-        return
-    conn.executemany(f'INSERT INTO {table}({column},space,model_version,dimensions,vector,built_at) '
-                     f'VALUES (?,?,?,?,?,?) ON CONFLICT({column},space,model_version) '
-                     'DO UPDATE SET vector=excluded.vector,built_at=excluded.built_at',
-                     ((subject, space, publication.model_version, publication.dimensions, vector, publication.now)
-                      for subject, vector in publication.rows))
 
 
 def publish(conn, name, upserts, removed=(), *, replace=False, model_version=None, now=None):

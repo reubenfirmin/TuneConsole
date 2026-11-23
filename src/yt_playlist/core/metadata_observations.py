@@ -64,7 +64,7 @@ def record(conn, entry_id, provider, observations, *, run_id, now, expected_reco
         raise ValueError('Observation provider and delivery ID are required')
     if isinstance(now, bool) or not isinstance(now, (int, float)) or not math.isfinite(now):
         raise ValueError('Observation time must be finite')
-    subject = conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry_id,)).fetchone()
+    subject = conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry_id,)).fetchone()
     if subject is None:
         raise ValueError('Unknown observation catalog entry')
     if expected_recording_id is not None and subject[0] != expected_recording_id:

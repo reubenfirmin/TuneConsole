@@ -18,7 +18,7 @@ from yt_playlist.web.app import create_app
 def missing(store, monkeypatch, tmp_path):
     monkeypatch.setenv('YT_PLAYLIST_HOME', str(tmp_path))
     monkeypatch.setattr(executor, 'with_retry', lambda fn: fn())
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     pid = store.playlists.upsert_playlist(iid, 'MISSING', 'Gone from YouTube', 0, '', 1)
     client = FakeClient()
     app = create_app(store, lambda: {iid: client}, now_fn=lambda: 2)

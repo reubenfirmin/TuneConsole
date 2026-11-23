@@ -90,14 +90,14 @@ def candidate_library_template(candidate_expiry_schema, expiry_rankers):
     """
     def build(store):
         with store._lock:
-            account = store.accounts.upsert_account('Listener', 'fixture', None, True)
+            account = store.accounts.upsert_account('Listener', None, True)
             # Expiry consumes completed catalog inputs. Keep all three subjects,
             # memberships and genres without provider delivery/artist inference.
             seed_publication_subjects(store, [
                 {'key': f'expiry-{i}', 'title': f'Song {i}', 'artist': f'Artist {i}',
                  'video_id': f'v{i}', 'genre': ('Techno', 'Jazz', 'Rock')[i]}
                 for i in range(3)])
-            tids = [row[0] for row in store.conn.execute('SELECT id FROM catalog_entries ORDER BY id')]
+            tids = [row[0] for row in store.conn.execute('SELECT id FROM track_sources ORDER BY id')]
             for i, members in enumerate((tids[:2], tids[1:])):
                 playlist = store.playlists.upsert_playlist(account, f'p{i}', f'Playlist {i}', len(members), '', 1)
                 store.playlists.set_playlist_tracks(playlist, members)
@@ -181,23 +181,49 @@ def test_old_deadline_respects_renewal_and_permanent_blocks(
     assert bool(candidate(store, key)) == (not permanent)
 
 
-@pytest.mark.parametrize('removed', [False, True])
-def test_expiry_preserves_unavailable_and_removed_sources(
-        store, monkeypatch, removed, candidate_library_template):
+def test_expiry_preserves_unavailable_source(store, monkeypatch, candidate_library_template):
     key = candidate_library_template.result
     snooze(store, key)
     with store.conn:
-        if removed:
-            store.conn.execute('DELETE FROM library_memberships WHERE entry_id IN '
-                '(SELECT id FROM catalog_entries WHERE recording_id='
-                '(SELECT id FROM recordings WHERE identity_key=?))', (key,))
-        else:
-            store.conn.execute('UPDATE youtube_items SET available=0 WHERE recording_id='
-                '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
+        store.conn.execute('UPDATE track_sources SET available=0 WHERE recording_id='
+                           '(SELECT id FROM recordings WHERE identity_key=?)', (key,))
     refresh(store, 2500)
     monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
     refresh(store, 3100)
     assert candidate(store, key) is None
+
+
+def test_expiry_preserves_removed_standalone_save(store, monkeypatch):
+    key, video = 'standalone-save', 'standalone-video'
+    seed_publication_subjects(store, [{
+        'key': key, 'video_id': video, 'title': 'Standalone', 'artist': 'Saved only', 'genre': 'Rock',
+    }])
+    vectors = store.rec_model.get_rec_vectors()
+    store.rec_model.replace_rec_vectors([*vectors, (key, np.array([1., 1.], np.float32).tobytes())])
+    refresh(store)
+    assert candidate(store, key)
+    assert store.tracks.song_library_membership(video) == {'owned': True, 'retained': False}
+    snooze(store, key)
+    assert store.tracks.remove_song_library_membership(video) is True
+    assert key not in store.rec_query.library_keys()
+    refresh(store, 2500)
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    refresh(store, 3100)
+    assert candidate(store, key) is None
+
+
+def test_expiry_restores_playlist_owned_song_after_removal_attempt(
+        store, monkeypatch, candidate_library_template):
+    key = candidate_library_template.result
+    video = store.conn.execute('SELECT s.video_id FROM track_sources s JOIN recordings r '
+                               'ON r.id=s.recording_id WHERE r.identity_key=?', (key,)).fetchone()[0]
+    assert store.tracks.song_library_membership(video) == {'owned': True, 'retained': True}
+    snooze(store, key)
+    assert store.tracks.remove_song_library_membership(video) is False
+    assert key in store.rec_query.library_keys()
+    monkeypatch.setattr(embed, 'build_vectors_from_baskets', no_fit)
+    refresh(store, 3100)
+    assert candidate(store, key)
 
 
 def test_expiry_survives_restart(tmp_path, monkeypatch, candidate_library_template):

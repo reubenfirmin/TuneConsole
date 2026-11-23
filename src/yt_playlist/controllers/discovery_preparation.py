@@ -3,15 +3,14 @@ import random
 
 from yt_playlist.core.activity import check_stopping, WorkClosing
 from yt_playlist.rec import discovery_pool
-from yt_playlist.util.matching import normalize
 
 
 def bridge_values(anchors, neighbors, labels, owned):
     bridges = {}
     for name, weight, vector in anchors:
-        for candidate, match in neighbors.get(name, ()):
-            if candidate and candidate not in owned:
-                bridges.setdefault(candidate, []).append((vector, weight * float(match), labels[name]))
+        for candidate in neighbors.get(name, ()):
+            if candidate.key not in owned:
+                bridges.setdefault(candidate.key, []).append((vector, weight * candidate.score, labels[name]))
     return bridges
 
 
@@ -35,49 +34,48 @@ def album_removals(albums, keep, per_artist, rng):
 
 class DiscoveryArtists:
     def __init__(self, *, taste, vectors, anchors, owned, reference, cache, similar, neighbors,
-                 rank, thumbnail, genre, now):
+                 rank, thumbnail, genre, now, youtube=lambda reference: ()):
         self.taste, self.vectors, self.anchors, self.owned = taste, vectors, anchors, owned
         self.reference, self.cache, self.similar, self.neighbors = reference, cache, similar, neighbors
         self.rank, self.thumbnail, self.genre, self.now = rank, thumbnail, genre, now
+        self.youtube = youtube
 
     def query(self, limit=15, max_anchors=30):
         taste = self.taste()
-        if not taste:
-            return []
         _keys, vectors, index = self.vectors()
-        if vectors is None:
-            return []
         anchors = self.anchors(vectors, index, max_anchors)
         if not anchors:
             return []
         owned, now = self.owned(), self.now()
-        display, labels, neighbors = {}, {}, {}
+        providers, sources, labels, neighbors = {}, {}, {}, {}
         for name, _weight, _vector in anchors:
             check_stopping()
             reference = self.reference(name)
             label = labels[name] = reference['name'] if reference else name
-            cached = self.cache.cached_similar(name, now)
-            if cached is None:
-                result, successful = self.similar(label)
-                if successful:
-                    cached = result
-                    self.cache.cache_similar(name, cached, now)
-                else:
-                    cached = result or self.cache.cached_similar(name, now, ttl_days=float('inf')) or []
-            for candidate, _match in cached:
-                display.setdefault(normalize(candidate), candidate)
-        for name, _weight, _vector in anchors:
-            check_stopping()
-            neighbors[name] = self.neighbors(name, topn=50)
-        ranked = self.rank(bridge_values(anchors, neighbors, labels, owned), taste, vectors.shape[1])
+            if self.similar is not None and self.cache.cached_similar(name, now) is None:
+                source_name = self.cache.lookup_name(name)
+                if source_name is not None:
+                    result, successful = self.similar(source_name)
+                    if successful:
+                        self.cache.cache_similar(name, result, now, source_name=source_name)
+            hits = self.neighbors(name, topn=50, youtube=self.youtube(reference))
+            neighbors[name] = hits
+            for hit in hits:
+                if hit.provider is not None:
+                    providers.setdefault(hit.key, hit.provider)
+                sources.setdefault(hit.key, {})[name] = hit.sources
+        ranked = self.rank(bridge_values(anchors, neighbors, labels, owned), taste,
+                           vectors.shape[1] if vectors is not None else 0)
         result = []
         for row in ranked[:limit]:
             check_stopping()
             reference = self.reference(row['cand'])
-            artist = reference['name'] if reference else display.get(row['cand'], row['cand'].title())
+            provider = providers.get(row['cand'], {})
+            artist = reference['name'] if reference else provider.get('name', row['cand'].title())
             result.append({'artist': artist, 'artist_id': reference['id'] if reference else None,
+                           'browse_id': provider.get('browse_id'), 'sources': sources[row['cand']],
                            'score': row['score'], 'because': row['because'], 'fits': row['fits'],
-                           'thumbnail': self.thumbnail(artist), 'genre': self.genre(artist)})
+                           'thumbnail': provider.get('thumbnail') or self.thumbnail(artist), 'genre': self.genre(artist)})
         return result
 
 
@@ -90,7 +88,9 @@ class DiscoveryPreparation:
         self.logger = logger
 
     def scan(self, artist, info, owned, saved, genre, now, per, rng, *, artist_id=None):
-        albums = (info or {}).get('albums') or []
+        albums = (info or {}).get('albums')
+        if albums is None:
+            return
         identities = {row['browse_id']: self.collection.album_id(row['browse_id'])
                       for row in albums if row.get('browse_id') and row['browse_id'] not in saved
                       and (row.get('title') or '').strip()}
@@ -119,7 +119,8 @@ class DiscoveryPreparation:
         genres = self.query.artist_genres(canonical=True)
         limit, per = self.parameter('discovery_artist_limit'), self.parameter('discovery_albums_per_artist')
         rng = random.Random(int(now))
-        due = self.discovery.artists_due_for_scan(now, budget=budget, artist_limit=limit, with_ids=True)
+        due = self.discovery.artists_due_for_scan(now, budget=budget, artist_limit=limit, with_ids=True,
+                                                 require_channel=True)
         for reference in due:
             check_stopping()
             try:
@@ -128,14 +129,19 @@ class DiscoveryPreparation:
                 raise
             except Exception:
                 info = None
-            self.scan(reference['artist'], info, owned, saved, genres.get(self.artists.key(reference['artist_id'])),
-                      now, per, rng, artist_id=reference['artist_id'])
-            self.discovery.mark_scanned(reference['artist_id'], now)
+            artist_id = reference['artist_id']
+            self.scan(reference['artist'], info, owned, saved, genres.get(self.artists.key(artist_id)),
+                      now, per, rng, artist_id=artist_id)
+            self.discovery.mark_scanned(artist_id, now)
         spotify = self.history.spotify_history_stats()
         source = 'spotify_model' if any(spotify.get(key) for key in ('events', 'days', 'artists')) else 'discovery'
         for row in self.new_artists():
+            artist_id = row.get('artist_id')
+            if artist_id is None and row.get('browse_id'):
+                artist_id = self.artists.ensure_artist(row['artist'], provider='youtube', provider_id=row['browse_id'])
             self.discovery.upsert_discovered_artist(row['artist'], row['score'], row.get('because'), row.get('fits'),
-                row.get('thumbnail'), now, genre=row.get('genre'), artist_id=row.get('artist_id'), source=source)
+                row.get('thumbnail'), now, genre=row.get('genre'), artist_id=artist_id, source=source,
+                sources=row.get('sources'))
         self.discovery.prune_discovered(owned, saved, self.query.library_artists())
         self.discovery.prune_discovered_tracks(self.query.library_keys(), held_keys=self.eligibility.generated_track_keys())
         self.cleanup(rng)

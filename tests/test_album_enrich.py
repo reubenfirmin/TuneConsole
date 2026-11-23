@@ -39,7 +39,7 @@ def test_album_waterfall_fills_genres(store, monkeypatch, canonical_genre_matche
 
 
 def test_album_page_renders_enrichable_table(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
@@ -58,7 +58,7 @@ def test_album_enrich_endpoint_starts_job(store, monkeypatch):
         started.set()
 
     monkeypatch.setattr(waterfall, "run_waterfall", enrich)
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
@@ -69,7 +69,7 @@ def test_album_enrich_endpoint_starts_job(store, monkeypatch):
 
 
 def test_album_track_genre_edit(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     _fold_album(store)
     c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
                    base_url="http://127.0.0.1")
@@ -80,7 +80,7 @@ def test_album_track_genre_edit(store):
 
 
 def test_album_folds_in_on_demand_when_saved(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.collection.replace_saved_albums([{"browse": "BID", "title": "Kind of Blue", "artist": "Miles Davis",
                                  "year": "1959", "type": "Album", "thumbnail": None}])
     album = {"title": "Kind of Blue", "artists": [{"name": "Miles Davis"}], "thumbnails": [{"url": "t"}],

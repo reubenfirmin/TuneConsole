@@ -25,16 +25,17 @@ class RequestPriorityMiddleware:
             return await self._http(scope, receive, send)
 
     async def _http(self, scope, receive, send):
-        automatic_home = (scope.get('path') == '/home/growth'
-            or (scope.get('path') == '/home/cards'
+        path, method = scope.get('path'), scope.get('method')
+        automatic_poll = (path in {'/home/growth', '/radio/status'}
+            or (path == '/home/cards'
                 and 'prepare_attempt' in parse_qs(
                     scope.get('query_string', b'').decode('latin-1'), keep_blank_values=True))
-            or (scope.get('path') == '/'
+            or (path == '/'
                 and (b'x-home-refresh', b'sync') in scope.get('headers', ())))
-        if scope.get('method') == 'GET' and automatic_home:
-            # Automatic observation must yield to an explicit listening choice.
-            # Keep running the poll with the ordinary cooperative timeslices,
-            # read budget and cancellation, rather than suspending its updates.
+        story_impressions = method == 'POST' and path == '/home/into-recently/impressions'
+        if (method == 'GET' and automatic_poll) or story_impressions:
+            # Automatic observations share background reader slots and yield
+            # when a navigation or player request needs to work.
             with self.priority.background(check_stopping):
                 return await self.app(scope, receive, send)
         with self.priority.request() as release:

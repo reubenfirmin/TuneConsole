@@ -13,7 +13,7 @@ DAY = 86400
 
 @pytest.fixture
 def store(store):
-    store.conn.execute("INSERT INTO accounts(id, label, credential_ref, is_master) VALUES (1,'me','c.json',1)")
+    store.conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (1,'me',1)")
     store.conn.commit()
     return store
 
@@ -21,8 +21,8 @@ def store(store):
 def _playlist(store, pid, ytm, title, group=None, ident=1):
     from yt_playlist.core.playlist_scopes import ensure
     store.conn.execute(
-        "INSERT INTO playlists(id, account_id, provider_playlist_id, title,playlist_scope_id) VALUES (?,?,?,?,?)",
-        (pid, ident, ytm, title,ensure(store.conn,ytm,ident)))
+        "INSERT INTO playlists(id,account_id,title,playlist_scope_id) VALUES (?,?,?,?)",
+        (pid, ident, title,ensure(store.conn,ytm,ident)))
     if group:
         store.playlists.set_playlist_group(ytm,group,account_id=ident)
     if group == 'Generated':
@@ -96,7 +96,7 @@ def test_ledger_day_counts_keeps_plays_with_no_provenance(store):
 
 def test_ledger_day_counts_merges_identities_on_the_same_day(store):
     """The history model's (identity, day) dedupe double-counted a track played on two accounts."""
-    store.conn.execute("INSERT INTO accounts(id,label,credential_ref,is_master) VALUES (2,'brand','c.json',0)")
+    store.conn.execute("INSERT INTO accounts(id,label,is_master) VALUES (2,'brand',0)")
     store.conn.commit()
     _event(store, "a", 10, ident=1, sec=1)
     _event(store, "a", 10, ident=2, sec=2)

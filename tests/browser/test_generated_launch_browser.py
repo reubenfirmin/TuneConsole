@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import re
 import time
-from urllib.parse import quote
 
 import pytest
 from playwright.sync_api import expect
@@ -22,21 +21,33 @@ def _generation_provider():
 
 @pytest.fixture(scope='session')
 def generated_board_template(_pristine_current_schema):
+    from tests.home_fixture_support import returning_listener
     from tests.prepared_fixture_support import prepared_template
+    from tests.recommendation_support import publish_bundles
     from tests.test_home_other_genres import seed_genres
     from tests.test_mode_cards_route import prepare_home
 
     def build(source):
-        account = source.accounts.upsert_account('main', 'cred', None, True)
+        account = source.accounts.upsert_account('main', None, True)
         source.playlists.upsert_playlist(account, 'PLZ', 'Old Mix', 3, 'h', 0.0)
         sync_identity(source, account, _generation_provider(), now=1)
         source.settings.set_setting('onboard_listening_format', 'mixes')
         # Keep the original six genres, four lanes and twenty songs per lane.
-        seed_genres(source)
+        bundles = seed_genres(source, publish=False)
+        long_titles = []
+        for track in bundles['all']['wheelhouse']:
+            if track['title'].rsplit(' ', 1)[1] in ('5', '8'):
+                track['title'] += ' (Extended club remix) (feat. A guest on the original recording)'
+                long_titles.append((track['title'], track['key']))
+        with source.conn:
+            source.conn.executemany('UPDATE recordings SET title=? WHERE identity_key=?', long_titles)
+            source.conn.executemany('UPDATE track_sources SET title=? WHERE video_id=?', long_titles)
+        publish_bundles(source, bundles, 1)
         for key, value in (('last_sync_at', '1'), ('onboard_dismissed', '1'),
                            ('home_format', 'mixes')):
             source.settings.set_setting(key, value)
         prepare_home(source, 1)
+        returning_listener(source, 'mixes')
         catalog = {'v': _track('v', 'Prepared song', 'Artist')}
         for track in source.conn.execute(
                 'SELECT video_id,title,artist,duration_s FROM catalog_tracks WHERE video_id IS NOT NULL'):
@@ -76,16 +87,6 @@ def generation_app(request, monkeypatch, store, page):
 
     if getattr(request, 'param', None) == 'board':
         base, ctx, provider = request.getfixturevalue('generated_board_app')
-        from yt_playlist.rec import account_growth
-        growth_view = account_growth.view
-
-        def unlocked_mixes(*args, **kwargs):
-            result = growth_view(*args, **kwargs)
-            result['ready_formats']['mixes'] = True
-            result['ready_areas']['directions'] = True
-            return result
-
-        monkeypatch.setattr(account_growth, 'view', unlocked_mixes)
     else:
         original, apps = app_module.create_app, []
 
@@ -262,9 +263,110 @@ def test_save_keeps_loader_until_playlist_opens_without_a_confirmation_screen(ge
 
 
 @pytest.mark.parametrize('generation_app', ['board'], indirect=True)
-@pytest.mark.parametrize('failure', ['create'])
-def test_unconfirmed_provider_create_cannot_be_repeated_after_reload(generation_app, page, failure):
+@pytest.mark.parametrize('outcome', ['saved', 'saved-with-delayed-readback', 'unknown'])
+def test_lost_mix_save_reply_returns_to_the_selected_card(generation_app, page, output_path, outcome):
+    base, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    saves = []
+
+    def lose_reply(route):
+        if outcome != 'unknown':
+            saves.append(route.fetch().status)
+        else:
+            saves.append(None)
+        route.abort('failed')
+
+    page.route(base + '/home/generate', lose_reply)
+    if outcome == 'saved-with-delayed-readback':
+        page.route(base + '/home/generate/reconcile', lambda route: route.fulfill(status=503), times=1)
+    card = page.locator('#gen-wheelhouse')
+    card.locator('.gen-poster').click()
+    selected = card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+    card.evaluate('(card) => { window.selectedMix = card; }')
+    with page.expect_popup() as opened:
+        card.get_by_role('button', name='Save and play this mix').click()
+    popup = opened.value
+    if not popup.is_closed():
+        popup.wait_for_event('close', timeout=5000)
+    assert popup.is_closed()
+    status = card.locator('[data-generation-error]')
+    expect(status).to_be_visible()
+    expect(card.locator('.gen-play')).to_be_disabled()
+    assert card.evaluate('(card) => window.selectedMix === card')
+    assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+    expect(page.locator('.mix-launch-view, #navigation-error, .toast-err')).to_have_count(0)
+
+    if outcome != 'saved':
+        expect(status).to_contain_text('This mix may already be saved.')
+        expect(status.get_by_role('link', name='Find mix in YouTube Music')).to_be_visible()
+        status.get_by_role('button', name='Check saved mix').click()
+
+    if outcome == 'unknown':
+        expect(status.get_by_role('button', name='Check saved mix')).to_be_enabled()
+        expect(status).to_contain_text('This mix may already be saved.')
+        assert saves == [None] and not provider.created and not frames
+    else:
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        assert saves == [200] and len(provider.created) == len(frames) == 1
+        playlist = provider.created[0][0]
+        expect(status.get_by_role('link', name='Open saved mix')).to_have_attribute(
+            'href', 'https://music.youtube.com/playlist?list=' + playlist)
+        assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+        assert playlist in frames[0]['url']
+        page.screenshot(path=Path(output_path) / 'mix-recovered.png')
+        page.reload()
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+        assert saves == [200] and len(provider.created) == len(frames) == 1
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+def test_lost_mix_save_reply_after_home_reload(generation_app, page, output_path):
+    base, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 900})
+    page.clock.install()
+    replies = []
+    session = page.context.new_cdp_session(page)
+    session.on('Fetch.requestPaused', lambda event: replies.append(event['responseStatusCode']))
+    session.send('Fetch.enable', {'patterns': [{'urlPattern': base + '/home/generate', 'requestStage': 'Response'}]})
+
+    card = page.locator('#gen-wheelhouse')
+    card.locator('.gen-poster').click()
+    card.get_by_role('button', name='Remove from this playlist').first.click()
+    selected = card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+    with page.expect_popup() as opened:
+        card.get_by_role('button', name='Save and play this mix').click()
+    popup = opened.value
+    popup.wait_for_url(re.compile(r'^blob:'))
+    expect(popup.get_by_role('status', name='Preparing playlist')).to_be_visible()
+    deadline = time.monotonic() + 5
+    while not replies and time.monotonic() < deadline:
+        page.wait_for_timeout(20)
+    assert replies == [200]
+    assert len(provider.created) == len(frames) == 1
+    playlist = provider.created[0][0]
+    assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+
+    page.reload()
+    popup.clock.fast_forward(91_000)
+
+    status = card.locator('[data-generation-error]')
+    expect(status.get_by_role('link', name='Open saved mix')).to_have_attribute(
+        'href', 'https://music.youtube.com/playlist?list=' + playlist)
+    assert popup.is_closed()
+    expect(status).to_contain_text(f'{len(selected)} songs saved.')
+    expect(card.locator('.gen-play')).to_be_disabled()
+    expect(card.get_by_role('button', name='Back to all mixes')).to_be_visible()
+    assert card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)') == selected
+    assert replies == [200] and len(provider.created) == len(frames) == 1
+    page.screenshot(path=Path(output_path) / 'mix-recovered-after-reload.png')
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+@pytest.mark.parametrize('failure', ['create', 'addition', 'recipe'])
+def test_mix_recovery_keeps_the_selected_card_and_prevents_duplicate_create(generation_app, page, failure, monkeypatch):
     base, provider, bridge, frames = generation_app
+    page.set_viewport_size({'width': 1280, 'height': 900})
     page.unroute('https://i.ytimg.com/**')
     page.route('https://i.ytimg.com/**', lambda route: route.fulfill(
         content_type='image/svg+xml', body='<svg xmlns="http://www.w3.org/2000/svg" width="300" height="300">'
@@ -274,6 +376,7 @@ def test_unconfirmed_provider_create_cannot_be_repeated_after_reload(generation_
     count = card.locator('.gen-row').count()
     card.get_by_role('button', name='Remove from this playlist').first.click()
     expect(card.locator('.gen-row')).to_have_count(count - 1)
+    card.evaluate('(card) => { window.selectedMix = card; }')
     selected = card.locator('.gen-row').evaluate_all(
         "rows => rows.map(row => ({title:row.dataset.title, artist:row.dataset.artist, video:row.dataset.vid}))")
     create = provider.create_playlist
@@ -285,7 +388,7 @@ def test_unconfirmed_provider_create_cannot_be_repeated_after_reload(generation_
 
     if failure == 'create':
         provider.create_playlist = applied_without_reply
-    else:
+    elif failure == 'addition':
         add, read = provider.add_playlist_items, provider.get_playlist
 
         def addition_without_reply(*args, **kwargs):
@@ -294,58 +397,208 @@ def test_unconfirmed_provider_create_cannot_be_repeated_after_reload(generation_
 
         def stale_read(playlist, **kwargs):
             detail = read(playlist, **kwargs)
-            return {**detail, 'tracks': detail['tracks'][:1]} if playlist.startswith('PL_NEW_') else detail
+            return {**detail, 'tracks': detail['tracks'][:1], 'trackCount': 1} if playlist.startswith('PL_NEW_') else detail
 
         provider.add_playlist_items = addition_without_reply
         provider.get_playlist = stale_read
+    else:
+        from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+
+        def fail_recipe(*args, **kwargs):
+            raise AttributeError('controlled recipe publication failure')
+
+        monkeypatch.setattr(PlaylistRecipesRepo, 'publish_recipe', fail_recipe)
     with page.expect_popup() as opened:
         card.get_by_role('button', name='Save and play this mix').click()
-    expect(page.locator('.gen-done')).to_contain_text('Partially saved' if failure == 'addition' else 'Playback unconfirmed')
+    status = card.locator('.gen-focus [data-generation-error]')
+    expect(status).to_be_visible()
+    expect(page.locator('.gen-done')).to_have_count(0)
+    assert card.evaluate('(card) => window.selectedMix === card')
     if not opened.value.is_closed():
         opened.value.wait_for_event('close', timeout=5000)
     assert opened.value.is_closed()
-    expect(page.locator('.gen-done')).to_contain_text(
-        'Some songs are still unconfirmed.' if failure == 'addition' else 'We couldn’t confirm playback.')
-    songs = page.get_by_role('list', name='Your selected songs')
-    for index, track in enumerate(selected):
-        row = songs.get_by_role('listitem').nth(index)
-        expect(row).to_contain_text(track['title'])
-        expect(row).to_contain_text(track['artist'])
-        expect(row.get_by_role('link')).to_have_attribute('href', 'https://music.youtube.com/watch?v=' + quote(track['video']))
-    assert songs.get_by_role('listitem').count() == len(selected)
-    page.wait_for_function("""() => [...document.querySelectorAll('.gen-recovery-tracks img')].every(
-        image => image.complete && image.naturalWidth > 0)""")
-    page.screenshot(path=f'/tmp/tuneconsole-634-provider-{failure}-uncertain.png', full_page=True)
-    if failure == 'addition':
-        expect(page.get_by_role('link', name='Open saved mix')).to_have_attribute(
+    assert card.locator('.gen-row').evaluate_all(
+        "rows => rows.map(row => ({title:row.dataset.title, artist:row.dataset.artist, video:row.dataset.vid}))") == selected
+    title = card.locator('.gen-title').filter(has_text='Extended club remix').first
+    expect(title).to_be_visible()
+    assert title.evaluate('''title => {
+      const text = document.createRange();
+      text.selectNodeContents(title);
+      const lines = [...text.getClientRects()];
+      const track = title.closest('.gen-row').getBoundingClientRect();
+      return lines.length > 1 && lines.every(line => line.right <= track.right && line.bottom <= track.bottom);
+    }''')
+    expect(card.get_by_role('button', name='Back to all mixes')).to_be_visible()
+    if failure != 'create':
+        expect(status.get_by_role('link', name='Open saved mix')).to_have_attribute(
             'href', 'https://music.youtube.com/playlist?list=' + provider.created[0][0])
-        expect(page.locator('[data-generation-error]')).to_contain_text(f'1 saved · {len(selected) - 1} unconfirmed')
-        page.get_by_role('button', name='Check saved mix').click()
-        expect(page.get_by_role('button', name='Check saved mix')).to_be_enabled()
-        expect(page.locator('[data-generation-error]')).to_contain_text('unconfirmed')
     else:
-        expect(page.locator('.gen-done').get_by_role('link', name='Find this mix on YouTube Music')).to_have_attribute(
+        expect(status.get_by_role('link', name='Find mix in YouTube Music')).to_have_attribute(
             'href', re.compile('https://music.youtube.com/search\\?q='))
+    page.screenshot(path=f'/tmp/tuneconsole-1551-mix-{failure}.png')
     assert len(provider.created) == 1 and not frames
+    if failure == 'addition':
+        expect(status).to_contain_text(f'1 song saved · {len(selected) - 1} songs still to check in YouTube Music')
+        status.get_by_role('button', name='Check saved mix').click()
+        expect(status.get_by_role('button', name='Check saved mix')).to_be_enabled()
+        expect(status).to_contain_text('still to check in YouTube Music')
+    elif failure == 'recipe':
+        expect(status).to_contain_text(f'{len(selected)} songs still to check in YouTube Music')
     page.reload()
     card = page.locator('#gen-wheelhouse')
     expect(card.locator('.gen-row')).to_have_count(len(selected))
     assert card.locator('.gen-row').evaluate_all(
         "rows => rows.map(row => ({title:row.dataset.title, artist:row.dataset.artist, video:row.dataset.vid}))") == selected
-    expect(card.get_by_role('button', name='Save and play this mix')).to_be_disabled()
-    expect(card.locator('[data-generation-error]')).to_be_visible()
+    save = card.locator('.gen-play')
+    expect(save).to_be_disabled()
+    expect(status).to_be_visible()
     expect(card.locator('.gen-refresh')).to_be_disabled()
-    card.get_by_role('button', name='Save and play this mix').evaluate("button => htmx.trigger(button, 'click')")
-    if failure == 'addition':
+    save.evaluate("button => htmx.trigger(button, 'click')")
+    if failure != 'create':
         assert [t['videoId'] for t in provider._tracks[provider.created[0][0]]] == [t['video'] for t in selected]
-        expect(card.locator('[data-generation-error]')).to_contain_text('unconfirmed')
-        provider.get_playlist = read
-        card.get_by_role('button', name='Check saved mix').click()
-        expect(card.locator('[data-generation-error]')).to_have_text(re.compile(f'^{len(selected)} saved\\.'))
-        expect(card.locator('[data-generation-progress]')).to_have_count(len(selected))
+        if failure == 'addition':
+            provider.get_playlist = read
+        status.get_by_role('button', name='Check saved mix').click()
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        expect(card.locator('[data-generation-progress]')).to_have_count(0)
         page.reload()
-        expect(card.locator('[data-generation-error]')).to_have_text(re.compile(f'^{len(selected)} saved\\.'))
-        expect(card.get_by_role('button', name='Save and play this mix')).to_be_disabled()
-        page.screenshot(path='/tmp/tuneconsole-634-addition-restored.png', full_page=True)
+        expect(status).to_contain_text(f'{len(selected)} songs saved.')
+        expect(save).to_be_disabled()
         assert len(provider.added) == 1 and not frames
+        if failure == 'recipe':
+            with page.expect_response(lambda response: response.url == f'{base}/play') as play:
+                status.get_by_role('link', name='Open saved mix').click()
+            assert play.value.json()['ok']
+            assert [frame['url'].split('list=')[-1] for frame in frames] == [provider.created[0][0]]
     assert len(provider.created) == 1
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+def test_two_mix_recoveries_restore_their_own_destinations_and_tracks(generation_app, page, monkeypatch, tmp_path):
+    from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+
+    _, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    first = page.locator('#gen-wheelhouse')
+    second = page.locator('#home-mode-cards .gen-card[data-choice-opportunity]:not(#gen-wheelhouse)').first
+
+    def fail_recipe(*args, **kwargs):
+        raise AttributeError('controlled recipe publication failure')
+
+    def selected_uploads(card):
+        return card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+
+    monkeypatch.setattr(PlaylistRecipesRepo, 'publish_recipe', fail_recipe)
+    selections = []
+    for index, card in enumerate((first, second)):
+        card.locator('.gen-poster').click()
+        card.get_by_role('button', name='Remove from this playlist').first.click()
+        selected = selected_uploads(card)
+        save = card.get_by_role('button', name='Save and play this mix')
+        with page.expect_response('**/home/generate') as response:
+            save.click()
+        playlist = provider.created[index][0]
+        assert response.value.json()['recovery']['playlist'] == playlist
+        assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+        selections.append((selected, f'https://music.youtube.com/playlist?list={playlist}'))
+        expect(card.get_by_role('link', name='Open saved mix')).to_have_attribute('href', selections[-1][1])
+        if index == 0:
+            card.get_by_role('button', name='Back to all mixes').click()
+
+    page.reload()
+    for card, (selected, destination) in reversed(list(zip((first, second), selections))):
+        if card is first:
+            card.locator('.gen-poster').click()
+        expect(card.get_by_role('link', name='Open saved mix')).to_have_attribute('href', destination)
+        assert selected_uploads(card) == selected
+        expect(card.locator('.gen-play')).to_be_disabled()
+        card.locator('.gen-play').evaluate("button => htmx.trigger(button, 'click')")
+        if card is second:
+            card.get_by_role('button', name='Back to all mixes').click()
+
+    page.screenshot(path=tmp_path / 'first-known-mix-after-reload.png', animations='disabled')
+    assert len(provider.created) == len(provider.added) == 2 and not frames
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+def test_genre_change_keeps_the_new_mix_and_can_restore_the_earlier_save(generation_app, page, monkeypatch, output_path):
+    from yt_playlist.repos.playlist_recipes import PlaylistRecipesRepo
+
+    _, provider, _, frames = generation_app
+    page.set_viewport_size({'width': 1440, 'height': 1000})
+    card = page.locator('#gen-wheelhouse')
+    save = card.get_by_role('button', name='Save and play this mix')
+    back = card.get_by_role('button', name='Back to all mixes')
+    saved_link = card.get_by_role('link', name='Open saved mix')
+    tunes = page.get_by_role('button', name='Tune these mixes', exact=True)
+    dialog = page.get_by_role('dialog', name='Tune these mixes', exact=True)
+
+    def uploads():
+        return card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+
+    def fail_recipe(*args, **kwargs):
+        raise AttributeError('controlled recipe publication failure')
+
+    card.locator('.gen-poster').click()
+    card.get_by_role('button', name='Remove from this playlist').first.click()
+    selected = uploads()
+    monkeypatch.setattr(PlaylistRecipesRepo, 'publish_recipe', fail_recipe)
+    with page.expect_response('**/home/generate') as saved:
+        save.click()
+    playlist = saved.value.json()['recovery']['playlist']
+    expect(saved_link).to_have_attribute('href', f'https://music.youtube.com/playlist?list={playlist}')
+    assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+    back.click()
+
+    tunes.click()
+    dialog.get_by_role('tab', name='Genre focus', exact=True).click()
+    dialog.get_by_role('checkbox', name='jazz', exact=True).check()
+    with page.expect_response('**/home/mix-genres') as changed:
+        dialog.get_by_role('button', name='Make mixes', exact=True).click()
+    expected = page.evaluate('''html => {
+      const fragment = new DOMParser().parseFromString(html, 'text/html');
+      return Array.from(fragment.querySelectorAll('#gen-wheelhouse .gen-row'), row => row.dataset.vid);
+    }''', changed.value.text())
+    assert expected and expected != selected
+    page.reload()
+    if not back.is_visible():
+        card.locator('.gen-poster').click()
+    assert uploads() == expected
+    expect(save).to_be_enabled()
+    expect(saved_link).to_have_count(0)
+    page.screenshot(path=Path(output_path) / 'new-wheelhouse-after-reload.png', animations='disabled')
+    back.click()
+
+    tunes.click()
+    with page.expect_response('**/home/fingerprint/reset') as reset:
+        dialog.get_by_role('button', name='Reset mix adjustments').click()
+    assert reset.value.ok
+    page.reload()
+    if not back.is_visible():
+        card.locator('.gen-poster').click()
+    assert uploads() == selected
+    expect(saved_link).to_have_attribute('href', f'https://music.youtube.com/playlist?list={playlist}')
+    expect(card.locator('.gen-play')).to_be_disabled()
+    assert len(provider.created) == len(provider.added) == 1 and not frames
+
+
+@pytest.mark.parametrize('generation_app', ['board'], indirect=True)
+def test_home_mix_saves_its_recipe_and_plays_the_visible_order(generation_app, page, store):
+    _, provider, _, frames = generation_app
+    card = page.locator('#gen-wheelhouse')
+    card.locator('.gen-poster').click()
+    selected = card.locator('.gen-row').evaluate_all('rows => rows.map(row => row.dataset.vid)')
+    recipe = json.loads(card.locator('.gen-card-body').get_attribute('data-recipe'))
+    with page.expect_popup() as opened:
+        card.get_by_role('button', name='Save and play this mix').click()
+    page.wait_for_url(re.compile(r'/playlist/\d+$'))
+    expect(page.locator('.pl-headmain')).to_be_visible()
+    if not opened.value.is_closed():
+        opened.value.wait_for_event('close', timeout=10000)
+    assert len(provider.created) == len(frames) == 1
+    playlist = provider.created[0][0]
+    assert playlist in frames[0]['url']
+    assert [track['videoId'] for track in provider._tracks[playlist]] == selected
+    assert store.playlist_recipes.get_recipe(playlist)['model'] == recipe['model']
+    page.locator('.pl-headmain').scroll_into_view_if_needed()
+    page.screenshot(path='/tmp/tuneconsole-1551-mix-saved.png', animations='disabled')

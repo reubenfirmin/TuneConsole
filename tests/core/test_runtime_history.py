@@ -1,4 +1,5 @@
 """Retirement must preserve current inputs and reject stale delivery selection."""
+import json
 import sqlite3
 
 import numpy as np
@@ -16,8 +17,14 @@ def retention_step(store, domain, now, *, activate=False):
 
 
 def retention_status(conn, domain):
-    return dict(conn.execute('SELECT * FROM ' + {'credits': 'artist_credit_retention',
-        'modes': 'taste_mode_retention'}[domain] + ' WHERE id=1').fetchone())
+    if domain == 'credits':
+        return credit_retention.state(conn)
+    return json.loads(conn.execute('SELECT value FROM settings WHERE key=?', (mode_retention.CHECKPOINT,)).fetchone()[0])
+
+
+def selected_observation(store, entry):
+    return store.conn.execute('SELECT id FROM artist_credit_observations WHERE entry_id=? AND is_selected=1',
+                              (entry,)).fetchone()[0]
 
 
 runtime_history = SimpleNamespace(step=retention_step, status=retention_status)
@@ -34,7 +41,7 @@ def deliver(store, entry, key, name, now):
     with atomic_write(store):
         artists.observe(store.conn, entry, name, [{'name': name, 'id': name}],
                         delivery_key=key, now=now)
-        row = store.conn.execute('SELECT observation_id FROM artist_credit_replays '
+        row = store.conn.execute('SELECT id FROM artist_credit_observations '
                                  'WHERE entry_id=? AND source=? AND delivery_key=?', (entry, 'youtube', key)).fetchone()
         return row[0]
 
@@ -52,12 +59,13 @@ def test_expired_delivery_retains_receipt_without_reapplying_old_credit(store):
     second = deliver(store, entry, 'second', 'After', 2)
     selected = list(map(tuple, store.conn.execute('SELECT * FROM entry_artists WHERE entry_id=?', (entry,))))
     finish(store, 'credits', 31 * DAY)
-    assert store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (first,)).fetchone() is None
-    assert store.conn.execute('SELECT observation_id FROM entry_artist_selections WHERE entry_id=?', (entry,)).fetchone()[0] == second
+    assert tuple(store.conn.execute('SELECT retired,is_selected,is_capture_head FROM artist_credit_observations '
+                                   'WHERE id=?', (first,)).fetchone()) == (1, 0, 0)
+    assert selected_observation(store, entry) == second
     assert deliver(store, entry, 'first', 'Before', 60 * DAY) == first
     assert list(map(tuple, store.conn.execute('SELECT * FROM entry_artists WHERE entry_id=?', (entry,)))) == selected
-    assert store.conn.execute('SELECT observation_id FROM artist_credit_capture_heads '
-                              "WHERE entry_id=? AND source='youtube'", (entry,)).fetchone()[0] == second
+    assert store.conn.execute('SELECT id FROM artist_credit_observations '
+                              "WHERE entry_id=? AND source='youtube' AND is_capture_head=1", (entry,)).fetchone()[0] == second
     with pytest.raises(sqlite3.IntegrityError, match='cannot change'):
         deliver(store, entry, 'first', 'Different', 61 * DAY)
     with pytest.raises(ValueError, match='capture expired'):
@@ -74,31 +82,29 @@ def test_current_heads_recent_and_unknown_time_evidence_survive(store):
     with atomic_write(store):
         artists.observe(store.conn, entry, 'Other', [{'name': 'Other', 'id': 'other'}], source='other', now=3)
     finish(store, 'credits', 29 * DAY)
-    assert store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (first,)).fetchone()
+    assert store.conn.execute('SELECT retired FROM artist_credit_observations WHERE id=?', (first,)).fetchone()[0] == 0
     finish(store, 'credits', 31 * DAY)
-    assert store.conn.execute('SELECT count(*) FROM artist_credit_capture_heads WHERE entry_id=?', (entry,)).fetchone()[0] == 2
+    assert store.conn.execute('SELECT count(*) FROM artist_credit_observations WHERE entry_id=? AND is_capture_head=1',
+                              (entry,)).fetchone()[0] == 2
     assert store.conn.execute('SELECT count(*) FROM artist_credit_observations WHERE delivery_key=?', ('second',)).fetchone()[0] == 1
 
 
-def test_preparation_rollback_restart_and_unknown_owner_guard(store, monkeypatch):
+def test_preparation_rolls_back_and_resumes_without_deleting_current_evidence(store, monkeypatch):
     entry = store.tracks.upsert_track('v', 'Song', 'Initial', None, 200)
     first = deliver(store, entry, 'first', 'Before', 1)
-    deliver(store, entry, 'second', 'After', 2)
+    second = deliver(store, entry, 'second', 'After', 2)
     monkeypatch.setattr(credit_retention, 'BATCH', 1)
     with pytest.raises(RuntimeError, match='interrupted'):
         with atomic_write(store):
             credit_retention.step(store.conn, 31 * DAY, activate=True)
             raise RuntimeError('interrupted')
     assert runtime_history.status(store.conn, 'credits')['enabled'] == 0
-    assert store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (first,)).fetchone()
-    with store.conn:
-        store.conn.execute('CREATE TABLE new_owner(id INTEGER PRIMARY KEY,observation_id INTEGER REFERENCES artist_credit_observations(id))')
-    with pytest.raises(ValueError, match='new retention audit'):
-        runtime_history.step(store, 'credits', 31 * DAY, activate=True)
-    with store.conn:
-        store.conn.execute('DROP TABLE new_owner')
+    assert store.conn.execute('SELECT retired FROM artist_credit_observations WHERE id=?', (first,)).fetchone()[0] == 0
+    with pytest.raises(sqlite3.IntegrityError, match='Current artist evidence'):
+        with atomic_write(store):
+            store.conn.execute('DELETE FROM artist_credit_observations WHERE id=?', (second,))
     finish(store, 'credits', 31 * DAY)
-    assert not store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (first,)).fetchone()
+    assert store.conn.execute('SELECT retired FROM artist_credit_observations WHERE id=?', (first,)).fetchone()[0] == 1
     assert runtime_history.status(store.conn, 'credits')['completed'] == 1
 
 
@@ -112,7 +118,7 @@ def test_installed_legacy_captures_retire_but_current_unknown_selection_survives
     assert store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (old,)).fetchone()
     finish(store, 'credits', 1)
     assert not store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (old,)).fetchone()
-    assert store.conn.execute('SELECT count(*) FROM entry_artist_selections').fetchone()[0] == 1
+    assert store.conn.execute('SELECT count(*) FROM artist_credit_observations WHERE is_selected=1').fetchone()[0] == 1
 
 
 def test_replay_protects_immutable_credit_members_after_observation_expiry(store):
@@ -120,36 +126,36 @@ def test_replay_protects_immutable_credit_members_after_observation_expiry(store
     first = deliver(store, entry, 'first', 'Before', 1)
     deliver(store, entry, 'second', 'After', 2)
     finish(store, 'credits', 31 * DAY)
-    credit = store.conn.execute('SELECT credit_id FROM artist_credit_replays WHERE observation_id=?', (first,)).fetchone()[0]
+    credit = store.conn.execute('SELECT credit_id FROM artist_credit_observations WHERE id=?', (first,)).fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='immutable'):
         with atomic_write(store):
-            store.conn.execute('DELETE FROM artist_credit_members WHERE credit_id=?', (credit,))
+            store.conn.execute("UPDATE artist_credits SET members_json='[]' WHERE id=?", (credit,))
 
 
 def test_expired_metadata_delivery_replay_does_not_need_the_old_delivery_graph(store):
     from yt_playlist.core import metadata_deliveries
     entry = store.tracks.upsert_track('v', 'Song', 'Initial', None, 200)
-    recording = store.conn.execute('SELECT recording_id FROM catalog_entries WHERE id=?', (entry,)).fetchone()[0]
+    recording = store.conn.execute('SELECT recording_id FROM track_sources WHERE id=?', (entry,)).fetchone()[0]
     with atomic_write(store):
         delivery = metadata_deliveries.record_many(store.conn, [metadata_deliveries.Delivery(
             'youtube', 'revision', 'recording', 'v', 1, input_entry_id=entry,
             input_recording_id=recording, input_video_id='v')])[0]
         artists.observe(store.conn, entry, 'Before', [{'name': 'Before', 'id': 'Before'}], now=1,
                         metadata_delivery_id=delivery)
-    original = store.conn.execute('SELECT observation_id FROM artist_credit_replays WHERE delivery_key=?',
+    original = store.conn.execute('SELECT id FROM artist_credit_observations WHERE delivery_key=?',
                                   (f'metadata-delivery:{delivery}',)).fetchone()[0]
     deliver(store, entry, 'newer', 'After', 2)
     finish(store, 'credits', 31 * DAY)
     with atomic_write(store):
         store.conn.execute('DELETE FROM metadata_deliveries WHERE id=?', (delivery,))
-        old = store.conn.execute('SELECT credit_id FROM artist_credit_replays WHERE observation_id=?', (original,)).fetchone()[0]
+        old = store.conn.execute('SELECT credit_id FROM artist_credit_observations WHERE id=?', (original,)).fetchone()[0]
         assert artist_credits.capture(store.conn, entry, old, 'youtube', 32 * DAY,
                                       metadata_delivery_id=delivery) == (original, False)
     # A caller-controlled key with the same spelling is not a verified binding.
     fake = deliver(store, entry, 'metadata-delivery:999999', 'Fake', 1)
     deliver(store, entry, 'latest', 'After', 2)
     finish(store, 'credits', 31 * DAY)
-    credit = store.conn.execute('SELECT credit_id FROM artist_credit_replays WHERE observation_id=?', (fake,)).fetchone()[0]
+    credit = store.conn.execute('SELECT credit_id FROM artist_credit_observations WHERE id=?', (fake,)).fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='no verified metadata'):
         with atomic_write(store):
             artist_credits.capture(store.conn, entry, credit, 'youtube', 32 * DAY, metadata_delivery_id=999999)
@@ -159,16 +165,16 @@ def test_expired_replay_keeps_artist_redirect_semantics(store):
     entry = store.tracks.upsert_track('v', 'Song', 'First', None, 200)
     with atomic_write(store):
         artists.observe(store.conn, entry, 'First', [{'name': 'First'}], delivery_key='unresolved', now=1)
-    earlier = store.conn.execute('SELECT observation_id FROM artist_credit_replays WHERE delivery_key=?', ('unresolved',)).fetchone()[0]
+    earlier = store.conn.execute('SELECT id FROM artist_credit_observations WHERE delivery_key=?', ('unresolved',)).fetchone()[0]
     store.tracks.upsert_track('known', 'Other song', 'First', None, 200, credits=[{'name': 'First', 'id': 'first'}])
     with atomic_write(store):
         artists.observe(store.conn, entry, 'First', [{'name': 'First', 'id': 'first'}], delivery_key='resolved', now=2)
     finish(store, 'credits', 31 * DAY)
-    selected = store.conn.execute('SELECT observation_id FROM entry_artist_selections WHERE entry_id=?', (entry,)).fetchone()[0]
+    selected = selected_observation(store, entry)
     with atomic_write(store):
         artists.observe(store.conn, entry, 'First', [{'name': 'First'}], delivery_key='unresolved', now=32 * DAY)
-    assert not store.conn.execute('SELECT 1 FROM artist_credit_observations WHERE id=?', (earlier,)).fetchone()
-    assert store.conn.execute('SELECT observation_id FROM entry_artist_selections WHERE entry_id=?', (entry,)).fetchone()[0] == selected
+    assert store.conn.execute('SELECT retired FROM artist_credit_observations WHERE id=?', (earlier,)).fetchone()[0] == 1
+    assert selected_observation(store, entry) == selected
 
 
 def test_retired_modes_keep_identity_fks_and_active_vectors_exactly(store):
@@ -200,7 +206,7 @@ def test_mode_reactivation_requires_new_payload_and_allocation_never_reuses_dele
     finish(store, 'modes', 3)
     with pytest.raises(sqlite3.IntegrityError, match='requires a new payload'):
         with atomic_write(store):
-            store.conn.execute('UPDATE taste_modes SET active=1 WHERE mode_id=900')
+            store.conn.execute('UPDATE taste_groups SET mode_active=1 WHERE legacy_mode_id=900')
     for invalid in (None, [], [float('nan')], [[.25, .75]]):
         with pytest.raises(ValueError, match='nonempty finite vector'):
             store.modes.replace_modes([{**mode(900), 'centroid': invalid}], [], 4)
@@ -209,14 +215,14 @@ def test_mode_reactivation_requires_new_payload_and_allocation_never_reuses_dele
         with pytest.raises(ValueError, match='nonempty finite vector'):
             store.modes.publish_generation([(900, 'Invalid', '[]', invalid, 2, '[]', 1, 4, 'basis')], [])
     store.modes.replace_modes([mode(900, 'Updated')], [], 4)
-    assert not store.conn.execute('SELECT 1 FROM taste_mode_retired_payloads WHERE mode_id=900').fetchone()
+    assert store.conn.execute('SELECT payload_retired_at FROM legacy_mode_payloads WHERE mode_id=900').fetchone()[0] is None
     assert {m['mode_id'] for m in store.modes.list_modes()} == {1, 900}
     with atomic_write(store):
-        store.conn.execute('DELETE FROM taste_modes WHERE mode_id=900')
+        store.conn.execute('DELETE FROM taste_groups WHERE legacy_mode_id=900')
     assert store.modes.next_mode_id() == 901
     with pytest.raises(sqlite3.IntegrityError, match='go backwards'):
         with atomic_write(store):
-            store.conn.execute('UPDATE taste_mode_retention SET high_water=1')
+            store.conn.execute('UPDATE settings SET value=? WHERE key=?', ('1', mode_retention.HIGH_WATER))
 
 
 def test_reader_keeps_retired_payload_until_release_and_stale_publication_is_rejected(store):
@@ -234,7 +240,7 @@ def test_idle_maintenance_does_not_activate_bulk_work_and_retains_reactivated_mo
     store.modes.replace_modes([mode(1), mode(2)], [], 1)
     store.modes.replace_modes([], [1, 2], 2)
     assert not any(store.retention.maintain_runtime_history(3).values())
-    assert store.conn.execute('SELECT count(*) FROM taste_mode_retired_payloads').fetchone()[0] == 0
+    assert store.conn.execute('SELECT count(*) FROM legacy_mode_payloads WHERE payload_retired_at IS NOT NULL').fetchone()[0] == 0
     monkeypatch.setattr(mode_retention, 'BATCH', 1)
     assert runtime_history.step(store, 'modes', 3, activate=True)
     store.modes.replace_modes([mode(2)], [], 4)

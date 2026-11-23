@@ -20,16 +20,14 @@ class Taste:
         return saved
 
     def save_checkpoint(self, now, *, replace=False):
-        self.model.save_taste_settings(rec_params.CHECKPOINT_SETTING, rec_params.checkpoint_keys(),
-                                      now, replace=replace)
+        self.model.save_taste_settings(rec_params.checkpoint_keys(), now, replace=replace)
 
     def restore_checkpoint(self):
-        self.model.restore_taste_settings(rec_params.CHECKPOINT_SETTING, rec_params.checkpoint_keys())
+        self.model.restore_taste_settings(rec_params.checkpoint_keys())
 
     def set_weight(self, axis, weight, now):
-        self.save_checkpoint(now)
         bounds = dict(lo=rec_params.GENRE_MIN, hi=rec_params.GENRE_MAX) if axis.startswith('genre:') else {}
-        self.model.set_weight(axis, weight, now=now, **bounds)
+        self.model.set_session_weight(axis, weight, now, **bounds)
 
     def set_param(self, name, value, now):
         self.save_checkpoint(now)
@@ -44,6 +42,7 @@ class Taste:
 
     def reset_weights(self, now):
         self.save_checkpoint(now)
+        self.model.clear_session_weights()
         self.model.reset_weights()
 
     def reset_all(self, now):
@@ -124,9 +123,9 @@ def comparison_rows(baseline, current, weights):
 
 def trace_changes(old, current):
     fields = (('durable', 'Saved taste match', False),
-              ('negative_delta', 'Disliked music adjustment', False),
               ('transient_delta', 'Recent listening adjustment', False),
-              ('session_delta', 'Session adjustment', False),
+              ('session_delta', 'Today adjustment', False),
+              ('now_delta', 'Current session adjustment', False),
               ('audio_delta', 'Sound adjustment', False),
               ('rank_base', 'Base score after ranking', False),
               ('axis_applied', 'Combined preference multiplier', True))

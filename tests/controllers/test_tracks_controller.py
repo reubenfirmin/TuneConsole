@@ -42,17 +42,24 @@ def tracks():
     ({'title': 'Song (Live)'}, False), ({'artist': 'Someone Else'}, False),
     ({'artist': 'Artist Guest'}, True), ({'title': ''}, False),
 ])
-def test_alternate_keeps_version_artist_and_duration_constraints(tracks, changes, same):
+def test_playback_preference_requires_matching_version_artist_and_duration(tracks, changes, same):
     requested = {'video_id': 'original', 'title': 'Song', 'artist': 'Artist', 'duration': 180}
     accepted = {**requested, 'video_id': 'actual', **changes}
-    tracks.remember_playback_alternate(3, requested, accepted, evidence={'b': 2, 'a': 1}, now=10)
-    tracks.repository.store_playback_alternate.assert_called_once_with(
-        3, 'original', 'actual', same_recording=same, evidence_json='{"a": 1, "b": 2}', now=10)
+    tracks.repository.entry_for_source.return_value = {'recording_id': 3}
+    tracks.remember_playback_upload(requested, accepted, evidence={'playlist': 'PL'}, now=10)
+    if same:
+        tracks.associate_item.assert_called_once_with('actual', 3, source='youtube_playback_substitution',
+            evidence={'playlist': 'PL', 'requested_video_id': 'original'}, now=10, same_recording=True)
+        tracks.repository.prefer_playback_upload.assert_called_once_with('original', 'actual')
+    else:
+        tracks.associate_item.assert_not_called()
+        tracks.repository.prefer_playback_upload.assert_not_called()
 
 
-def test_same_upload_does_not_create_an_alternate(tracks):
-    tracks.remember_playback_alternate(3, {'video_id': 'v'}, {'video_id': 'v'}, evidence={}, now=10)
-    tracks.repository.store_playback_alternate.assert_not_called()
+def test_same_upload_does_not_change_the_preference(tracks):
+    tracks.remember_playback_upload({'video_id': 'v'}, {'video_id': 'v'}, evidence={}, now=10)
+    tracks.associate_item.assert_not_called()
+    tracks.repository.prefer_playback_upload.assert_not_called()
 
 
 def test_recording_match_rejects_ambiguous_or_different_versions(tracks):

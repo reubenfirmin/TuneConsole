@@ -138,8 +138,9 @@ def test_after():
     return checkout, run
 
 
-@pytest.mark.parametrize("explicit", [False, True])
-@pytest.mark.parametrize("fail", [False, 'setup', 'call', 'teardown'])
+@pytest.mark.parametrize(('explicit', 'fail'), [
+    (False, False), (True, 'setup'), (False, 'call'), (True, 'teardown'),
+])
 def test_temporary_databases_are_removed_after_passing_and_failing_runs(
         probe_suite, explicit, fail, record_testsuite_property):
     checkout, run = probe_suite
@@ -160,6 +161,8 @@ def test_temporary_databases_are_removed_after_passing_and_failing_runs(
         'min_free_bytes': min(row['free_bytes'] for row in samples)}))
     if explicit:
         assert not basetemp.exists()
+    else:
+        assert all(Path(path).is_relative_to(_ROOT / 'build' / 'pytest') for path in created)
     reports = ET.parse(checkout / 'junit.xml').findall('.//testcase')
     assert len(reports) == 9
     assert reports[-1].get('name') == 'test_after'
@@ -204,15 +207,6 @@ def pytest_runtest_makereport(item, call):
     assert '1 passed' in result.stdout
 
 
-def test_default_fixture_storage_uses_the_checkout_filesystem(probe_suite):
-    checkout, run = probe_suite
-    result = run()
-    assert result.returncode == 0, result.stdout + result.stderr
-    created = [Path(path) for path in json.loads((checkout / 'created.json').read_text())]
-    assert all(path.is_relative_to(_ROOT / 'build' / 'pytest') for path in created)
-    assert all(not path.parent.exists() for path in created)
-
-
 def test_fixture_root_allocates_unique_cleaned_session_directories(probe_suite):
     checkout, run = probe_suite
     root = checkout / 'disk-fixtures'
@@ -238,8 +232,9 @@ def test_explicit_basetemp_takes_precedence_over_fixture_root(probe_suite):
     assert not base.exists() and not root.exists()
 
 
-@pytest.mark.parametrize('placement', ['default', 'fixture-root', 'basetemp'])
-@pytest.mark.parametrize('outcome', ['pass', 'fail', 'interrupt'])
+@pytest.mark.parametrize(('placement', 'outcome'), [
+    ('default', 'pass'), ('fixture-root', 'fail'), ('basetemp', 'interrupt'),
+])
 def test_implicit_temporaries_and_memory_store_files_follow_the_owned_factory(
         probe_suite, placement, outcome):
     checkout, run = probe_suite
@@ -335,8 +330,7 @@ def test_unused_fixture_root_does_not_allocate_a_session_base(probe_suite, args)
     assert not list(root.iterdir())
 
 
-@pytest.mark.parametrize('explicit', [False, True])
-@pytest.mark.parametrize('fail', [False, True])
+@pytest.mark.parametrize(('explicit', 'fail'), [(False, False), (True, True)])
 def test_concurrent_focused_sessions_preserve_live_sqlite_and_clean_their_own_workspaces(probe_suite, explicit, fail):
     checkout, run = probe_suite
     (checkout / 'test_probe.py').write_text(

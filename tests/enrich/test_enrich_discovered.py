@@ -30,7 +30,7 @@ def test_drain_processes_discovered(store):
 
 
 def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store):
-    store.settings.set_setting("enrich_caught_up_at", "50")
+    store.enrichment_queue.save_caught_up_at(50)
     store.tracks.upsert_track("older", "Older library song", "Artist", None, 200, created_at=1.0)
     newest = store.tracks.upsert_track("newest", "Newest library song", "Artist", None, 200, created_at=200.0)
     store.discovery.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
@@ -44,7 +44,7 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
         seen.append([track["title"] for track in batch])
         for track in batch:
             sink_for(track).apply_fields("musicbrainz", {"genre": "techno", "year": "2024"})
-            sink_for(track).apply_fields("acousticbrainz", {"bpm": 128.0, "energy": .8, "danceability": .7})
+            sink_for(track).apply_fields("acousticbrainz", {"bpm": 128.0, "danceability": .7})
 
     ctx = SimpleNamespace(store=store, now_fn=lambda: 500.0,
                           rec_worker=SimpleNamespace(trigger_content_update=update),
@@ -57,7 +57,7 @@ def test_mixed_batch_follows_shared_order_and_refreshes_fresh(monkeypatch, store
     keys, now, discovery = prepared[0]
     assert keys == {"newest library song|artist", "new|artist"} and now == 500.0
     assert discovery["genre"] == "Techno" and discovery["year"] == "2024"
-    assert discovery["audio"] == {"bpm": 128.0, "energy": .8, "danceability": .7}
+    assert discovery["audio"] == {"bpm": 128.0, "danceability": .7}
     assert worker.drain_once(limit=1) == 1
     assert seen[-1] == ["Older library song"]
     assert prepared[1][0] == {"older library song|artist"}
@@ -70,7 +70,7 @@ def test_mixed_waterfall_commits_each_track_and_keeps_unfinished_work(store, mon
 
     monkeypatch.setattr(embed, "build_discovered_content_vectors", lambda s: None)
     monkeypatch.setattr(fresh_pool, "prepare", lambda s, now: None)
-    store.settings.set_setting("enrich_caught_up_at", "1")
+    store.enrichment_queue.save_caught_up_at(1)
     library = store.tracks.upsert_track("lib", "Library", "Artist", None, 200, created_at=200.0)
     store.discovery.upsert_discovered_track("new|artist", "new", "New", "Artist", None, None,
                                   None, None, "radio:seed", 300.0)

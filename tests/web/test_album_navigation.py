@@ -19,7 +19,7 @@ def seed_radio_albums(store):
 
 def test_radio_playlist_and_track_pages_share_confirmed_album_navigation(store, monkeypatch):
     tracks = seed_radio_albums(store)
-    account = store.accounts.upsert_account('Main', 'cred', None, True)
+    account = store.accounts.upsert_account('Main', None, True)
     playlist = store.playlists.upsert_playlist(account, 'PL_radio', 'Radio Session', 2, 'h', 0)
     store.playlists.set_playlist_tracks(playlist, tracks)
     app = create_app(store, lambda: {}, background_work=False)

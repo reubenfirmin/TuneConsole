@@ -15,7 +15,7 @@ class _Client:
 
 
 def _ctx(store):
-    account_id = store.accounts.upsert_account('main', 'c', None, True)
+    account_id = store.accounts.upsert_account('main', None, True)
     return SimpleNamespace(store=store, client_provider=lambda: {account_id: _Client()},
                            now_fn=lambda: 1000.0,
                            logger=SimpleNamespace(info=lambda *a, **k: None))

@@ -42,8 +42,9 @@ planning evidence; actual charged wall times establish measured balance.
   SQL, restart, concurrency and publication tests use real private databases.
 - Ordinary consumers copy the genuine empty current-schema template through
   `store`, `file_backed_store` or `initialize_consumer`. Installed-format tests
-  use genuine versioned templates. Bootstrap and migration tests build their
-  own subject state. Never substitute a template for the operation under test.
+  use genuine versioned templates. Fresh bootstrap checks start from an empty
+  database. The suite keeps one populated upgrade test in
+  `core/test_release_baseline.py`.
 - `tmp_path` and `tmp_path_factory` own disposable fixtures. The default base is
   a unique directory under `build/pytest`; `--fixture-root=PATH` changes its
   parent and `--basetemp=PATH` selects an exact base. Use distinct bases for
@@ -70,8 +71,8 @@ planning evidence; actual charged wall times establish measured balance.
 - Avoid repeated schema construction, unrelated large fixtures, repeated model
   fits and duplicate browser journeys. Each consumer still owns a private
   database and file namespace.
-- Bootstrap, migration, admission and corruption tests exercise their real
-  subject operations; historical-format tests use genuine installed versions.
+- Bootstrap, admission and corruption tests exercise their real subject
+  operations. Test ordinary behavior on the current schema.
 - Share setup for cases using the same prepared input while preserving distinct
   failure, recovery, concurrency, ownership and negative cases.
 - Keep production-scale checks in explicit benchmarks. Smaller ordinary
@@ -92,7 +93,7 @@ Paths below are relative to `tests/`.
 | Road Trip | `test_road_trip.py`, `test_road_trip_acquisition.py`, `test_road_trip_mixing.py`, `test_road_trip_balance.py`, `test_road_trip_ordering.py` |
 | Taste | `test_taste_page.py`, `test_taste_controls_web.py`, `test_taste_evaluation_web.py`, `test_taste_feedback_web.py`; `browser/test_taste*_browser.py` |
 | Web routes | `test_web.py`, `test_setup_routes.py`, `test_network_routes.py`, `test_sync_routes.py`, `test_cleanup_routes.py`, `test_merge_routes.py`, `test_enrichment_routes.py`, `test_move_routes.py` |
-| Storage repair | `test_storage_maintenance.py`, `browser/test_storage_notice_browser.py` |
+| Schema upgrades and cleanup notices | `test_prepared_startup.py`, `core/test_release_baseline.py`, `browser/test_storage_notice_browser.py` |
 
 Shared helpers live in `radio_session_support.py`, `browser/radio_ui_support.py`,
 `road_trip_support.py`, `web_support.py`, `setup_support.py` and
@@ -179,8 +180,8 @@ Use the shared local library manager for actual-library evidence.
 
 ### Local actual-library workspaces
 
-[`scripts/test-library.py`](../scripts/test-library.py) captures SQLite and its
-owned file domains once, verifies and freezes the baseline, then creates private
+[`scripts/test-library.py`](../scripts/test-library.py) copies SQLite and its
+sidecar files into a frozen baseline, then creates private
 Btrfs snapshots for local checks. Every container sees its selected library at
 `/library/state.db`; file coordinates are relocated only during preparation.
 Normal runs have no donor mount. Ordinary pytest and GitHub CI do not invoke
@@ -195,22 +196,33 @@ sudo bash scripts/test-library-image-poc-mount.sh
 ```
 
 The mount helper is for the user to inspect and run under the privileged-command
-policy in AGENTS.md. It mounts a new sparse image file inside `build/`; it does
-not reformat the host filesystem. Do not repeat setup on an already mounted
-volume. Build the local dependency image from `uv.lock`, then capture once:
+policy in AGENTS.md. It mounts the 4 GiB sparse image file inside `build/`.
+Prepared baselines and their writable snapshots use Btrfs compression. Build the
+local dependency image from `uv.lock` during setup and when the lockfile changes.
 
 ```sh
 ./scripts/test-library.py build-runtime
-./scripts/test-library.py prepare
+```
+
+The review agent maintains the library baseline. Check its capture time with
+`list` before actual-library acceptance. Refresh when the baseline is missing
+or the review needs newer library data.
+
+```sh
+./scripts/test-library.py prepare --refresh
 ./scripts/test-library.py list
 ```
 
-Preparation reads the source through a read-only connection and file-lifetime
-fences. A second container restores and checks every SQL file coordinate without
-access to the donor. Concurrent preparation requests share a source lock.
-`prepare` reuses the current generation; only `prepare --refresh` captures newer
-data. `--source PATH` selects another source. A dependency-lock change requires
-an explicit `build-runtime` before further runs.
+The refresh deletes the old baseline for the selected source, takes a read-only
+SQLite snapshot and copies the available sidecars. The app can be open or closed
+and routine refresh runs as the current user. The completion report shows the new
+baseline ID, capture time, elapsed time, and skipped files. Confirm the new ID
+appears as ready in `list` and include it in the review evidence. Plain
+`prepare` reuses an existing baseline. `--source PATH` selects another source.
+Capture locates metadata sidecars using the installed schema. Pending migrations
+run on writable test snapshots.
+The baseline keeps current Vibe models and expires superseded model provenance
+in the copied database so unused historical model files can be skipped.
 
 Run focused pytest files or node ids through the manager. Collection shares the
 frozen baseline read-only; each selected test gets its own writable snapshot and
@@ -223,8 +235,11 @@ actual-library helpers and benchmark adapters reuse that path in managed runs:
 ```
 
 Python checks can import `tests.library_image.fixtures.managed_database()`.
-Use `run --baseline ID` or `run --schema VERSION` to select a retained generation;
-the selection stays pinned across all selected tests, even during refresh.
+Use `run --baseline ID` or `run --schema VERSION` to select a prepared generation.
+`--schema` uses the installed `schema_changes` version when present and falls
+back to `schema_migrations` for captures with only that ledger. Preparation,
+listing and run reports show both ledger versions and the selected `schema`.
+Refresh removes that selection. Already-created writable snapshots remain usable.
 Scripts must write retained artifacts to `/reports`; the host destination is
 chosen with `run --report PATH` under `build/test-reports` or `/tmp`, or defaults
 to a private directory under `build/test-reports/library-images`.
@@ -232,11 +247,10 @@ Console output, per-run receipts and pytest JUnit reports are retained there.
 Disposable workspaces and process-local temporary files are removed after their
 containers stop, on both passing and failing runs.
 
-The manager keeps up to two recent generations, plus current generations for
-other sources and any active pins. Before capturing another generation it prunes
-older unused captures to leave room for the candidate; the current generation
-stays available even if preparation fails. Preview and remove abandoned runs or
-older unpinned generations with:
+If capture fails, check its error and the preparation report under
+`build/test-reports/library-images`, correct the cause, and rerun `prepare`.
+Preview and remove abandoned runs or older unpinned generations with these
+commands.
 
 ```sh
 ./scripts/test-library.py gc
@@ -244,14 +258,14 @@ older unpinned generations with:
 ```
 
 `./scripts/test-library.py verify` explicitly checks concurrent actual-library
-writes, extent sharing and interrupted-owner recovery. Add `--refresh` to check
-new-generation publication while old workspaces remain active. This is a focused
-local backend check, separate from ordinary pytest and CI.
+writes, extent sharing and interrupted-owner recovery. Add `--refresh` to
+replace the baseline after the checks.
 
 For an individual abandoned `build/library-image-poc/volume/workspaces/ID`, use
 `./scripts/test-artifacts-cleanup.py PATH` and then `--delete PATH`. Cleanup checks
 the manager receipt and lifetime lease; it stops only that orphan's own container
-before deleting its snapshot. Active owners and pinned generations are protected.
+before deleting its snapshot. Garbage collection skips active workspaces and
+pinned generations.
 Baselines are retained inputs, outside `.pytest_cache`, and must be removed only
 through the manager. Reports are outside the volume.
 

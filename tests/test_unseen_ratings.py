@@ -10,7 +10,7 @@ from tests.conftest import FakeClient
 from tests.store_fixture_support import bounded_consumer_schema, file_consumer_store as store
 from yt_playlist.core.store import Store
 from yt_playlist.library import player_events, ratings, sync
-from yt_playlist.rec import rec_worker
+from yt_playlist.rec import rec_worker, transient
 from yt_playlist.web.app import create_app
 
 
@@ -35,7 +35,7 @@ def _song(video_id):
 def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(tmp_path, action, consumer_store, request):
     path = tmp_path / "ratings.db"
     store = consumer_store(path)
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     calls = []
     ctx = SimpleNamespace(store=store, rec_worker=SimpleNamespace(
         trigger_rating_update=lambda: calls.append("scheduled")))
@@ -49,10 +49,11 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
     store.init_schema()
     keys = ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=_song))
     assert keys == {"unseen song|artist"}
-    assert store.conn.execute("SELECT COUNT(*) FROM library_memberships").fetchone()[0] == 0
+    assert store.conn.execute("SELECT COUNT(*) FROM track_sources WHERE library_origin IS NOT NULL").fetchone()[0] == 0
     if action == "like":
-        assert store.rec_signals.get_theme("artist:Artist") == 1
         assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
+        assert transient.facet_leans(store, 100)["artist:Artist"] > 0
+        assert "artist:Artist" not in store.rec_model.baseline_weights(now=100)
     else:
         assert store.rec_model.disliked_with_ts() == [("unseen song|artist", 100)]
         assert "unseen song|artist" in store.rec_model.suppressed_keys("for_you", 100)
@@ -61,7 +62,7 @@ def test_unseen_confirmed_rating_survives_restart_and_teaches_without_playlist(t
 
 
 def test_failed_metadata_retries_during_normal_sync(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     player_events.handle_player_event(SimpleNamespace(store=store), _event(), 100)
     monkeypatch.setattr(ratings, "with_retry", lambda fn: fn())
 
@@ -77,7 +78,7 @@ def test_failed_metadata_retries_during_normal_sync(store, monkeypatch):
 
 
 def test_mismatched_metadata_is_not_bound_to_the_rating(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     ratings.record_confirmed(store, iid, "unseen", "DISLIKE", 100)
     assert ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=lambda _: _song("other"))) == set()
     assert store.tracks.identity_key_for_video("unseen") is None
@@ -86,7 +87,7 @@ def test_mismatched_metadata_is_not_bound_to_the_rating(store):
 
 
 def test_unlike_arriving_during_metadata_fetch_prevents_stale_learning(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     ratings.record_confirmed(store, iid, "unseen", "LIKE", 100)
 
     def resolve(video_id):
@@ -99,7 +100,7 @@ def test_unlike_arriving_during_metadata_fetch_prevents_stale_learning(store):
 
 
 def test_failed_native_request_does_not_queue_learning(store):
-    store.accounts.upsert_account("main", "cred", None, True)
+    store.accounts.upsert_account("main", None, True)
     calls = []
     ctx = SimpleNamespace(store=store, rec_worker=SimpleNamespace(
         trigger_rating_update=lambda: calls.append(True)))
@@ -109,7 +110,7 @@ def test_failed_native_request_does_not_queue_learning(store):
 
 
 def test_backend_rating_retains_pending_feedback_without_waiting_for_metadata(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     writes = []
     remote = SimpleNamespace(get_song=lambda _: pytest.fail("metadata must be resolved by the worker"),
                              rate_song=lambda *args: writes.append(args))
@@ -120,12 +121,13 @@ def test_backend_rating_retains_pending_feedback_without_waiting_for_metadata(st
         {"video_id": "unseen", "status": "LIKE", "observed_at": 100}]
     assert ratings.reconcile_pending(store, iid, SimpleNamespace(get_song=_song)) == {"unseen song|artist"}
     assert store.rec_model.recent_liked_with_ts() == [("unseen song|artist", 100)]
-    assert store.rec_signals.get_theme("artist:Artist") == 1
+    assert transient.facet_leans(store, 100)["artist:Artist"] > 0
+    assert "artist:Artist" not in store.rec_model.baseline_weights(now=100)
 
 
 @pytest.mark.parametrize("endpoint", ["/track/like", "/now-playing/rate"])
 def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(store, monkeypatch, endpoint):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     reads = []
     remote = SimpleNamespace(rate_song=lambda *args: None,
         get_song=lambda video_id: reads.append(video_id) or _song(video_id))
@@ -157,7 +159,7 @@ def test_both_heart_routes_schedule_unknown_subjects_after_confirming_rating(sto
 
 
 def test_later_catalog_observation_resolves_pending_rating_without_network(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     ratings.record_confirmed(store, iid, "unseen", "DISLIKE", 100)
     store.tracks.observe_track("unseen", "Unseen song", "Artist", now=200)
     assert ratings.reconcile_pending(store, iid, None) == {"unseen song|artist"}
@@ -165,7 +167,7 @@ def test_later_catalog_observation_resolves_pending_rating_without_network(store
 
 
 def test_rating_worker_coalesces_and_resolves_before_background_refresh(store, monkeypatch):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     ratings.record_confirmed(store, iid, "unseen", "LIKE", 100)
     calls = []
     worker = rec_worker.RecWorker(SimpleNamespace(store=store, now_fn=lambda: 200,

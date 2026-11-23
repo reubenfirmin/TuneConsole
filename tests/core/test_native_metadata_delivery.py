@@ -6,7 +6,7 @@ import sqlite3
 import pytest
 
 from tests.metadata_catalog_support import catalog
-from yt_playlist.core import metadata_native
+from yt_playlist.core import metadata_deliveries
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.metadata_observations import MetadataObservation
 
@@ -24,16 +24,39 @@ def _record(store, entry, observations, run='one', provider='native'):
     store.enrichment_state.record_metadata_observations(entry, provider, observations, run_id=run, now=20)
 
 
+def test_current_capture_slots_keep_separate_history_with_shared_response_bytes(catalog):
+    store, entry = catalog, _entry(catalog)
+    capture = store.metadata_deliveries.capture_state
+    first = capture(entry, 'provider', 'title', {'title': 'First'}, now=10)
+    other = capture(entry, 'provider', 'album', {'title': 'First'}, now=11)
+    assert other != first
+    assert capture(entry, 'provider', 'title', {'title': 'First'}, now=12) == first
+    with store.conn:
+        store.conn.execute('BEGIN IMMEDIATE')
+        changed = metadata_deliveries.capture_state(store.conn, entry, 'provider', 'title', {'title': 'Next'}, now=13)
+    restored = capture(entry, 'provider', 'title', {'title': 'First'}, now=14)
+    assert len({first, other, changed, restored}) == 4
+    assert [tuple(row) for row in store.conn.execute('SELECT id,capture_slot FROM metadata_deliveries '
+                                                   "WHERE provider='provider' ORDER BY id")] == [
+        (first, None), (other, 'album'), (changed, None), (restored, 'title')]
+    assert store.metadata_deliveries.response(changed) == {'title': 'Next'}
+    assert store.conn.execute('SELECT count(DISTINCT raw_filename) FROM metadata_deliveries '
+                              'WHERE id IN (?,?,?)', (first, other, restored)).fetchone()[0] == 1
+    with pytest.raises(sqlite3.IntegrityError, match='Current metadata capture'), store.conn:
+        store.conn.execute('DELETE FROM metadata_deliveries WHERE id=?', (restored,))
+
+
 def test_native_delivery_replay_preserves_history_and_does_not_roll_current_source_back(catalog):
     store, entry = catalog, _entry(catalog)
     first = _observation()
     _record(store, entry, [first])
     _record(store, entry, [first])
     _record(store, entry, [_observation(.8)], run='two')
-    selected = list(map(tuple, store.conn.execute('SELECT * FROM musical_source_observations')))
+    selection = 'SELECT source_key,selected_observations FROM rec_musical_sources'
+    selected = list(map(tuple, store.conn.execute(selection)))
     revision = store.conn.execute('SELECT revision FROM rec_musical_sources').fetchone()[0]
     _record(store, entry, [first])
-    assert list(map(tuple, store.conn.execute('SELECT * FROM musical_source_observations'))) == selected
+    assert list(map(tuple, store.conn.execute(selection))) == selected
     assert store.conn.execute('SELECT revision FROM rec_musical_sources').fetchone()[0] == revision
     history = store.enrichment_state.metadata_observations('song|artist')
     assert [row['value'] for row in history] == [.2, .8]
@@ -75,13 +98,14 @@ def test_native_source_selection_rejects_a_different_provider_entity(catalog):
     other = store.conn.execute('SELECT max(id) FROM native_metadata_observations').fetchone()[0]
     with pytest.raises(sqlite3.IntegrityError, match='different provider entity'):
         with store.conn:
-            store.conn.execute('UPDATE musical_source_observations SET observation_id=? WHERE source_key=?', (other, key))
+            store.conn.execute("UPDATE rec_musical_sources SET selected_observations=json_object('mood_party',?) "
+                               'WHERE source_key=?', (other, key))
 
 
 def test_interrupted_native_publication_preserves_selection_and_reuses_the_committed_delivery(catalog, monkeypatch):
     store, entry = catalog, _entry(catalog)
     _record(store, entry, [_observation()])
-    tables = ('native_metadata_observations', 'musical_source_observations', 'rec_musical_sources', 'rec_musical_links')
+    tables = ('native_metadata_observations', 'rec_musical_sources', 'rec_musical_links')
     before = {table: list(map(tuple, store.conn.execute('SELECT * FROM ' + table))) for table in tables}
     deliveries = store.conn.execute('SELECT COUNT(*) FROM metadata_deliveries').fetchone()[0]
     repository = store.enrichment_state.repository

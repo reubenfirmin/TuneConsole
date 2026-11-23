@@ -8,7 +8,7 @@ from dataclasses import dataclass
 
 
 RECORDING_FIELDS = (
-    'genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
+    'genre', 'bpm', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
     'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental',
 )
 ITEM_FIELDS = (
@@ -16,7 +16,17 @@ ITEM_FIELDS = (
     'artist_browse_id', 'album_browse_id', 'thumbnail', 'mb_year', 'loudness', 'dynamic_complexity',
     'popularity', 'gain', 'label',
 )
-PROBABILITIES = ('energy', 'danceability', 'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental')
+CANONICAL_FIELDS = ('title', 'artist', *RECORDING_FIELDS)
+
+# Append new names to preserve persisted field codes. Code 3 is reserved for
+# historical energy receipts.
+RUNTIME_FIELDS = ('genre', 'bpm', 'energy', 'danceability', 'mb_recording_id', 'music_key', 'music_scale',
+                  'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental', 'title', 'artist',
+                  'orig_title', 'orig_artist', 'album', 'duration_s', 'available', 'video_type', 'artist_browse_id',
+                  'album_browse_id', 'thumbnail', 'mb_year', 'loudness', 'dynamic_complexity', 'popularity', 'gain', 'label')
+RUNTIME_CODES = {name: index + 1 for index, name in enumerate(RUNTIME_FIELDS) if name != 'energy'}
+
+PROBABILITIES = ('danceability', 'mood_happy', 'mood_sad', 'mood_relaxed', 'mood_acoustic', 'instrumental')
 INTEGER_FIELDS = ('duration_s', 'available', 'popularity')
 NUMBER_FIELDS = (*PROBABILITIES, *INTEGER_FIELDS, 'bpm', 'loudness', 'dynamic_complexity', 'gain')
 TEXT_FIELDS = tuple(field for field in (*RECORDING_FIELDS, *ITEM_FIELDS) if field not in NUMBER_FIELDS)
@@ -25,10 +35,17 @@ UNITS = {
     'gain': ('decibels',), 'loudness': ('essentia.average_loudness',),
     'dynamic_complexity': ('essentia.dynamic_complexity',),
     **{field: ('classifier_probability', 'fraction') for field in PROBABILITIES},
-    'energy': ('legacy_energy_0_1', 'fraction'),
 }
 DEFAULT_UNIT = {field: units[-1] for field, units in UNITS.items()}
 MAX_TEXT_BYTES = 64 * 1024
+
+
+def column_type(field):
+    if field in INTEGER_FIELDS:
+        return 'INTEGER'
+    if field in NUMBER_FIELDS:
+        return 'REAL'
+    return 'TEXT'
 
 
 @dataclass(frozen=True)

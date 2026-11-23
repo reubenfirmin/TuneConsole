@@ -14,7 +14,7 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def live_cleanup_app(store):
-    iid = store.accounts.upsert_account("Main", "c1", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     tracks = [store.tracks.upsert_track(f"d{i}", f"D{i}", "X", None, None, 1) for i in range(2)]
     for ytm, title in (("PLD1", "Dup A"), ("PLD2", "Dup B")):
         pid = store.playlists.upsert_playlist(iid, ytm, title, 2, "h", 1.0)

@@ -16,7 +16,7 @@ pytestmark = pytest.mark.browser
 
 @pytest.fixture
 def music_app(store, without_metadata_providers, request):
-    account = store.accounts.upsert_account('main', 'cred', None, True)
+    account = store.accounts.upsert_account('main', None, True)
     store.settings.set_setting('last_sync_at', '999')
     catalog = getattr(request, 'param', SongCatalog)()
     catalog._catalog['exact-song'] = catalog.search('favorite')[0]
@@ -140,6 +140,56 @@ def test_overlay_adds_without_closing_and_restores_keyboard_focus(music_app, sto
     expect(page.locator('.omni-input')).to_be_focused()
     page.keyboard.press('Control+k')
     expect(field).to_have_value('favorite')
+    assert not errors
+
+
+@pytest.mark.parametrize('outcome', ['saved', 'uncertain', 'unavailable'])
+def test_song_bookmark_uses_the_query_that_found_it(music_app, page, outcome):
+    base, catalog = music_app
+    search = catalog.search
+    offered = True
+
+    def search_offered_songs(query, **options):
+        return search(query, **options) if offered and query in ('favorite', 'favorite song') else []
+
+    catalog.search = search_offered_songs
+    catalog.uncertain = outcome == 'uncertain'
+    errors = prepare_page(page, 1440)
+    page.goto(base + '/playlists')
+    page.keyboard.press('Control+k')
+    dialog = page.locator('#music-search')
+    field = dialog.get_by_role('searchbox', name='Search music')
+    field.fill('favorite')
+    dialog.get_by_role('tab', name='YouTube Music', exact=True).click()
+    bookmark = dialog.locator('[data-video-id="exact-song"] .music-search-add')
+    expect(bookmark).to_have_attribute('aria-label', 'Add to library: A favorite song')
+
+    # Trigger the click before the debounced search replaces the visible row.
+    offered = outcome != 'unavailable'
+    with page.expect_response('**/search/songs/save') as response:
+        field.evaluate('''input => {
+          input.value = 'another song';
+          input.dispatchEvent(new Event('input', {bubbles: true}));
+          document.querySelector('[data-video-id="exact-song"] .music-search-add').click();
+        }''')
+    assert response.value.request.post_data_json['query'] == 'favorite'
+    assert response.value.json()['state'] == ('pending' if outcome == 'uncertain' else outcome)
+    expect(dialog.locator('#music-catalog-count')).to_have_text('0')
+    offered = True
+    field.fill('favorite song' if outcome == 'unavailable' else 'favorite')
+
+    if outcome == 'uncertain':
+        expect(bookmark).to_have_attribute('aria-label', 'Check library change: A favorite song')
+        catalog.saved.add('exact-song')
+        with page.expect_request('**/search/songs/save') as check:
+            bookmark.click()
+        assert check.value.post_data_json['check'] is True
+    elif outcome == 'unavailable':
+        expect(bookmark).to_have_attribute('aria-label', 'Add to library: A favorite song')
+        assert not catalog.writes
+        bookmark.click()
+    expect(bookmark).to_have_attribute('aria-label', 'Remove from library: A favorite song')
+    assert catalog.writes == [['private-add-token']]
     assert not errors
 
 
@@ -298,8 +348,7 @@ def test_existing_membership_and_sticky_source_tabs(music_app, store, page, widt
     assert not catalog.writes and not catalog.entity_writes and not catalog.rated and not errors
 
 
-@pytest.mark.parametrize('width', [1440, 1920])
-def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, width):
+def test_both_sources_share_entity_artwork_and_playback(music_app, store, page):
     base, catalog = music_app
     original = catalog.search
 
@@ -323,7 +372,7 @@ def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, 
         credits=[{'name': 'Favorite artist', 'id': 'UCfavorite'}])
     playlist = store.playlists.upsert_playlist(1, 'PLlocal', 'Favorite mix', 1, '', 999.)
     store.playlists.set_playlist_tracks(playlist, [track])
-    errors = prepare_page(page, width)
+    errors = prepare_page(page, 1440)
     page.route('**/play', lambda route: route.fulfill(json={'ok': True}))
     page.route('**/album/play', lambda route: route.fulfill(status=204))
     page.goto(base + '/playlists')
@@ -371,17 +420,20 @@ def test_both_sources_share_entity_artwork_and_playback(music_app, store, page, 
                 assert request.value.post_data_json == {'url': 'https://music.youtube.com/' + url}
             expect(search).to_be_visible()
             expect(field).to_have_value('favorite')
-        page.screenshot(path=f'/tmp/tuneconsole-1239-{source}-sections-{width}.png', full_page=True)
+        for width in (1920, 1440):
+            page.set_viewport_size({'width': width, 'height': 1000})
+            assert panel.locator('.pl-cover').evaluate_all(
+                'covers => covers.map(el => [el.clientWidth, el.clientHeight])') == [[58, 58]] * 4
+            page.screenshot(path=f'/tmp/tuneconsole-1239-{source}-sections-{width}.png', full_page=True)
     assert len(search.locator('#music-library-results .omni-section').all()) == 4
     assert not catalog.writes and not catalog.rated
-    if width == 1440:
-        page.evaluate('openMusicSearch({onboarding: true})')
-        choose = search.get_by_role('button', name='Choose Favorite artist', exact=True)
-        expect(choose).to_be_visible()
-        choose.click()
-        expect(search.get_by_role('button', name='Remove Favorite artist', exact=True)).to_have_attribute('aria-pressed', 'true')
-        assert [row['browse_id'] for row in store.discovery.starter_artists()] == ['UCfavorite']
-        expect(field).to_have_value('favorite')
+    page.evaluate('openMusicSearch({onboarding: true})')
+    choose = search.get_by_role('button', name='Choose Favorite artist', exact=True)
+    expect(choose).to_be_visible()
+    choose.click()
+    expect(search.get_by_role('button', name='Remove Favorite artist', exact=True)).to_have_attribute('aria-pressed', 'true')
+    assert [row['browse_id'] for row in store.discovery.starter_artists()] == ['UCfavorite']
+    expect(field).to_have_value('favorite')
     assert not errors
 
 

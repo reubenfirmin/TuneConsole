@@ -8,7 +8,7 @@ import time
 
 import pytest
 
-from yt_playlist.core import sample_files, audio_annotation_files
+from yt_playlist.core import sample_files, audio_annotations
 from yt_playlist.core.store import Store
 
 
@@ -48,12 +48,12 @@ def test_genuine_recording_vibe_upgrade(tmp_path, request, record_property):
                 row = store.conn.execute('SELECT filename,captured_at FROM sample_attributes WHERE id=?', (sid,)).fetchone()
                 assert sample_files.read(row[0]) == json.loads(raw)
                 assert row[1] == captured
-            documents = [audio_annotation_files.read(row[0]) for row in store.conn.execute(
-                'SELECT model_output_filename FROM audio_annotations')]
+            documents = [row['archive'] for row in audio_annotations.export_snapshot(store.conn)['annotations']]
             for table, rows in labels.items():
                 retained = [document['legacy'] for document in documents if document['legacy_source'] == table]
                 assert sorted(rows, key=repr) == sorted(retained, key=repr)
-            assert runs == list(map(tuple, store.conn.execute('SELECT * FROM audio_vibe_runs ORDER BY run_id')))
+            assert runs == list(map(tuple, store.conn.execute(
+                "SELECT run_key,video_id,title,artist,created_at FROM audio_annotations WHERE kind='playback' ORDER BY run_key")))
             current = {(key, vibe): (score, support, origin) for key, vibe, score, support, origin in store.conn.execute(
                 'SELECT r.identity_key,v.vibe,v.score,v.support,v.source FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id')}
             assert current == served
@@ -61,7 +61,7 @@ def test_genuine_recording_vibe_upgrade(tmp_path, request, record_property):
                 'FROM measurements m JOIN recordings r ON r.id=m.recording_id')))
             assert set(measured) <= retained
             assert not store.conn.execute('SELECT 1 FROM predictions p WHERE p.lineage_complete<>0').fetchone()
-            assert not store.conn.execute('SELECT 1 FROM prediction_inputs').fetchone()
+            assert not store.conn.execute("SELECT 1 FROM sqlite_schema WHERE name='prediction_inputs'").fetchone()
             files = store.conn.execute('SELECT COUNT(*),COUNT(DISTINCT filename) FROM sample_attributes').fetchone()
             report = {'source': str(source_path), 'source_schema': 60, 'source_sample_sha256': stamp,
                       'recordings': store.conn.execute('SELECT COUNT(*) FROM recordings').fetchone()[0],

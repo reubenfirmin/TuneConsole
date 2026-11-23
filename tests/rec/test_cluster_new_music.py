@@ -1,6 +1,6 @@
 import numpy as np
 
-from yt_playlist.rec import embed, embedding_vectors as vectors
+from yt_playlist.rec import cluster_ranking, embedding_vectors as vectors
 from tests import model_support
 from yt_playlist.util.matching import identity_key
 
@@ -24,7 +24,7 @@ def test_include_new_surfaces_discovered_tracks_in_the_shared_model_space(store)
     assert CV is not None and DV is not None
     assert DV.shape[1] == CV.shape[1]
 
-    new = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=True)]
-    base = [k for k, _ in embed.cluster_expand(s, pos_keys=[skey], topn=10, include_new=False)]
+    new = [k for k, _ in cluster_ranking.rank_candidates(s, pos_keys=[skey], topn=10, include_new=True)]
+    base = [k for k, _ in cluster_ranking.rank_candidates(s, pos_keys=[skey], topn=10, include_new=False)]
     assert dkey in new          # the techno out-of-corpus track is reachable from the techno seed
     assert dkey not in base     # ...only when opted in

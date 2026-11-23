@@ -2,13 +2,55 @@
 // unresolved across reloads; retrying playback must never submit another create.
 const generationWindows = new Map();
 const generationRequests = new WeakMap();
+const generationRestoredCards = new WeakMap();
 const generationWaitMs = 90000;
 let generationReturnRestored = false;
 
-function genReturnToMix(id, context = null) {
-  if (context) {
-    try { sessionStorage.setItem('tc-mix-return', JSON.stringify(context)); } catch (_) {}
-  }
+function generationTuning(node) {
+  const restored = generationRestoredCards.get(node);
+  if (restored) return restored.tuning;
+  if (!node.matches('.gen-card')) return '';
+  // Home may rotate the songs on reload. Recovery follows the chosen genre
+  // and vibe, so an intentional change can show a different mix in this lane.
+  const recipe = JSON.parse(node.querySelector('.gen-card-body')?.dataset.recipe || '{}');
+  return JSON.stringify([recipe.genre_request || null, recipe.vibe || null]);
+}
+
+function generationReturnKey(id, pathname, tuning) {
+  const lane = 'tc-mix-return:' + pathname + '#' + id;
+  return tuning ? lane + ':' + tuning : lane;
+}
+
+function generationRetainedReturn(node) {
+  const tuning = generationTuning(node);
+  const retained = JSON.parse(sessionStorage.getItem(generationReturnKey(node.id, location.pathname, tuning)));
+  if (retained || !tuning) return retained;
+  const earlier = JSON.parse(sessionStorage.getItem(generationReturnKey(node.id, location.pathname)));
+  return earlier && generationSelectionKey(earlier.id, earlier.tracks) === generationKey(node) ? earlier : null;
+}
+
+function generationRememberReturn(context, focus = false) {
+  try {
+    const pathname = new URL(context.returnUrl, location.origin).pathname;
+    const key = generationReturnKey(context.id, pathname, context.tuning);
+    const previous = JSON.parse(sessionStorage.getItem(key));
+    // A popup may only know the initial selection. Keep a destination already
+    // confirmed for that selection by the save response.
+    if ((previous?.recovery || previous?.saved) && !context.recovery && !context.saved &&
+        (!context.launchId || previous.launchId === context.launchId) &&
+        generationSelectionKey(previous.id, previous.tracks) === generationSelectionKey(context.id, context.tracks)) {
+      context = previous;
+    }
+    sessionStorage.setItem(key, JSON.stringify(context));
+    if (focus) sessionStorage.setItem('tc-mix-return', JSON.stringify({
+      id: context.id, returnUrl: context.returnUrl, tuning: context.tuning
+    }));
+  } catch (_) {}
+  return context;
+}
+
+function genReturnToMix(id, context = null, focus = true) {
+  if (context && focus) context = generationRememberReturn(context, true);
   const node = document.getElementById(id);
   if (!node) return false;
   if (context) {
@@ -21,7 +63,7 @@ function genReturnToMix(id, context = null) {
       const row = existing || document.createElement('li');
       row.className = 'gen-row' + (list.matches('.starter-tracks') ? ' starter-track' : '');
       Object.assign(row.dataset, {vid:track.video_id, title:track.title || '',
-        artist:track.artist || '', thumb:track.thumbnail || ''});
+        artist:track.artist || '', thumb:track.thumbnail || '', recordingId:track.recording_id || ''});
       row.replaceChildren();
       const number = document.createElement('span');
       number.className = list.matches('.starter-tracks') ? 'starter-number' : 'gen-index';
@@ -59,8 +101,10 @@ function genReturnToMix(id, context = null) {
     // These are the attempted choices, not a newly sampled preview. Keep its
     // existing unresolved-create guard and provide direct song playback.
     generationFailure({node, context, uncertain:true});
-    generationReturnRestored = true;
+    generationRestoredCards.set(node, context);
   }
+  if (!focus) return true;
+  generationReturnRestored = true;
   const state = window.Alpine?.$data(node);
   if (state && 'focus' in state) state.focus = id.replace(/^gen-/, '');
   node.scrollIntoView({block: 'center', behavior: 'smooth'});
@@ -69,10 +113,19 @@ function genReturnToMix(id, context = null) {
 }
 
 function generationRestoreReturn() {
-  if (generationReturnRestored) return;
   try {
-    const context = JSON.parse(sessionStorage.getItem('tc-mix-return'));
-    if (context && new URL(context.returnUrl, location.origin).pathname === location.pathname) genReturnToMix(context.id, context);
+    let target = JSON.parse(sessionStorage.getItem('tc-mix-return'));
+    if (target && new URL(target.returnUrl, location.origin).pathname !== location.pathname) target = null;
+    if (target?.tracks) {
+      if (target.explicitReturn) genReturnToMix(target.id, target);
+      else generationRememberReturn(target, true);
+    }
+    document.querySelectorAll('.gen-card[id], .starter-mix[id], .artist-first-set[id], .rt-draft[id]').forEach(node => {
+      if (generationRestoredCards.has(node)) return;
+      const context = generationRetainedReturn(node);
+      if (context) genReturnToMix(node.id, context, !generationReturnRestored && target?.id === node.id
+        && (target.tuning || '') === (context.tuning || ''));
+    });
   } catch (_) {}
 }
 document.addEventListener('DOMContentLoaded', generationRestoreReturn);
@@ -81,12 +134,12 @@ document.addEventListener('htmx:afterSettle', () => Alpine.nextTick(generationRe
 
 function generationContext(node) {
   const payload = node.querySelector('.gen-card-body');
-  return {id: node.id, name: payload?.dataset.name || '',
+  return {id: node.id, name: payload?.dataset.name || '', tuning: generationTuning(node),
     title: node.querySelector('.gen-theme')?.textContent.trim() || payload?.dataset.name || 'Your Mix Tape',
     returnUrl: location.origin + location.pathname + location.search + '#' + node.id,
     tracks: Array.from(node.querySelectorAll('.gen-row, .rt-row'), row => ({
       video_id: row.dataset.vid, title: row.dataset.title, artist: row.dataset.artist,
-      thumbnail: row.dataset.thumb
+      thumbnail: row.dataset.thumb, recording_id: row.dataset.recordingId || undefined
     }))};
 }
 
@@ -96,20 +149,32 @@ function generationLaunchContext(token) {
 }
 
 function generationKey(node) {
-  const videos = Array.from(node.querySelectorAll('[data-vid]')).map(row => row.dataset.vid).sort();
-  return 'tc-generation:' + node.id + ':' + JSON.stringify(videos);
+  const tracks = Array.from(node.querySelectorAll('[data-vid]'), row => ({
+    video_id: row.dataset.vid, recording_id: row.dataset.recordingId
+  }));
+  return generationSelectionKey(node.id, tracks);
+}
+
+function generationSelectionKey(id, tracks) {
+  const identities = tracks.map(track => track.recording_id ? 'recording:' + track.recording_id : track.video_id);
+  return 'tc-generation:' + id + ':' + JSON.stringify(identities.sort());
 }
 
 function generationUnresolved(node, key) {
   if (sessionStorage.getItem(key)) return true;
-  // Preserve unresolved saves recorded by the earlier order-sensitive key.
+  // Earlier saves used upload IDs, and some preserved playlist order in the key.
   const prefix = 'tc-generation:' + node.id + ':';
+  const uploads = Array.from(node.querySelectorAll('[data-vid]'), row => row.dataset.vid).sort();
+  const uploadKey = prefix + JSON.stringify(uploads);
   for (let index = 0; index < sessionStorage.length; index++) {
     const previous = sessionStorage.key(index);
     if (!previous?.startsWith(prefix)) continue;
     try {
       const videos = JSON.parse(previous.slice(prefix.length));
-      if (Array.isArray(videos) && prefix + JSON.stringify(videos.sort()) === key) return true;
+      if (Array.isArray(videos)) {
+        const previousKey = prefix + JSON.stringify(videos.sort());
+        if (previousKey === key || previousKey === uploadKey) return true;
+      }
     } catch (_) {}
   }
   return false;
@@ -131,9 +196,8 @@ function generationRestoreUnresolved() {
     if (existing?.node === node && existing.key === key && node.dataset.generationPending && !existing.uncertain) return;
     let context = generationContext(node);
     try {
-      const retained = JSON.parse(sessionStorage.getItem('tc-mix-return'));
-      if (retained?.id === node.id && 'tc-generation:' + retained.id + ':' +
-          JSON.stringify(retained.tracks.map(track => track.video_id).sort()) === key) context = retained;
+      const retained = generationRetainedReturn(node);
+      if (retained && generationSelectionKey(retained.id, retained.tracks) === key) context = retained;
     } catch (_) {}
     const record = existing?.key === key ? existing : {
       key, context, token: crypto.randomUUID(), sent: true
@@ -146,29 +210,81 @@ function generationRestoreUnresolved() {
 document.addEventListener('DOMContentLoaded', generationRestoreUnresolved);
 document.addEventListener('htmx:afterSettle', generationRestoreUnresolved);
 
+function generationSettled(node) {
+  if (!node.hasAttribute('data-generation-pending')) return;
+  delete node.dataset.generationPending;
+  // Let the save handler finish updating its card before Home swaps the board.
+  queueMicrotask(() => node.dispatchEvent(new Event('mix-save-settled', {bubbles: true})));
+}
+
+function generationNote(node) {
+  let note = node.querySelector('[data-generation-error]');
+  if (note) return note;
+  const focus = node.querySelector('.gen-focus');
+  note = document.createElement('div');
+  note.className = focus ? 'mix-save-status' : 'section-note';
+  note.dataset.generationError = '';
+  note.setAttribute('role', 'status');
+  const songs = node.querySelector('.gen-recovery-tracks');
+  if (focus) focus.prepend(note);
+  else if (songs) songs.before(note);
+  else node.append(note);
+  return note;
+}
+
+function generationOwnsCard(record) {
+  return record.node.isConnected && (!record.key || generationKey(record.node) === record.key);
+}
+
+function generationReceiptStatus(record) {
+  const {node, context} = record;
+  if (context.recovery) {
+    generationSavedStatus(node, context);
+    return;
+  }
+  const note = generationNote(node);
+  const link = document.createElement('a');
+  link.className = 'btn btn-sm';
+  link.target = '_blank'; link.rel = 'noopener';
+  if (context.saved) {
+    link.href = 'https://music.youtube.com/playlist?list=' + encodeURIComponent(context.saved);
+    link.textContent = 'Open saved mix';
+    const count = context.added;
+    note.replaceChildren(link, `${count} ${count === 1 ? 'song' : 'songs'} saved.`);
+    return;
+  }
+  link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(context.name);
+  link.textContent = 'Find mix in YouTube Music';
+  note.replaceChildren(link, 'This mix may already be saved.');
+  if (context.launchId) {
+    const check = document.createElement('button');
+    check.type = 'button'; check.className = 'btn-ghost btn-sm';
+    check.disabled = !!record.checkingReceipt;
+    check.textContent = record.checkingReceipt ? 'Checking saved mix…' : 'Check saved mix';
+    check.onclick = () => generationCheckReceipt(record);
+    note.append(check);
+  }
+}
+
 function generationFailure(record) {
   record.uncertain = true;
-  // A card can now show a deliberately different selection. A late failure
-  // still belongs to its original popup, not the newer card or request.
-  if (!record.key || generationKey(record.node) === record.key) {
-    delete record.node.dataset.generationPending;
-    const detail = 'We couldn’t confirm playback of “' + record.context.title +
-      '”. This mix may already be in your YouTube Music library.';
-    let note = record.node.querySelector('[data-generation-error]');
-    if (!note) {
-      note = document.createElement('p');
-      note.className = 'section-note';
-      note.dataset.generationError = '';
-      note.setAttribute('role', 'alert');
-      record.node.append(note);
+  clearTimeout(record.timer);
+  // A late failure belongs to the attempted selection even if the card has changed.
+  if (generationOwnsCard(record)) {
+    generationSettled(record.node);
+    const focused = record.node.classList.contains('is-focused');
+    if (record.context.launchId) record.context = generationRememberReturn(record.context, focused);
+    generationReceiptStatus(record);
+    record.node.querySelectorAll('[hx-post="/home/generate"], .gen-refresh, .gen-rm').forEach(button => {
+      button.disabled = true;
+    });
+    if (record.context.launchId) {
+      if (record.tab && !record.tab.closed && focused) window.focus();
+      generationCloseWindow(record);
+      if (record.token === record.context.launchId && !record.checkedReceipt &&
+          !record.context.saved && !record.context.recovery) generationCheckReceipt(record);
+      return;
     }
-    note.replaceChildren(document.createTextNode(detail + ' '));
-    const link = document.createElement('a');
-    link.href = 'https://music.youtube.com/search?q=' + encodeURIComponent(record.context.name);
-    link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Find this mix on YouTube Music';
-    note.append(link);
-    if (record.context.recovery) generationSavedStatus(record.node, record.context);
-    record.node.querySelectorAll('[hx-post="/home/generate"]').forEach(button => { button.disabled = true; });
   }
   try {
     const tab = record.tab;
@@ -181,54 +297,110 @@ function generationFailure(record) {
   } catch (_) {}
 }
 
+async function generationCheckReceipt(record) {
+  if (record.checkingReceipt || !generationOwnsCard(record)) return;
+  record.checkedReceipt = record.checkingReceipt = true;
+  generationReceiptStatus(record);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const response = await fetch('/home/generate/reconcile', {method: 'POST', signal: controller.signal,
+      body: new URLSearchParams({launch_id: record.context.launchId})});
+    const receipt = response.ok && await response.json();
+    if (!receipt || !generationOwnsCard(record)) return;
+    if (receipt.saved) Object.assign(record.context, {saved: receipt.saved, added: receipt.added});
+    if (receipt.recovery) Object.assign(record.context, {recovery: receipt.recovery, recoveryTracks: receipt.tracks});
+    generationRememberReturn(record.context);
+  } catch (error) { console.debug('saved mix receipt check deferred', error); }
+  finally {
+    clearTimeout(timer);
+    record.checkingReceipt = false;
+    if (generationOwnsCard(record)) generationReceiptStatus(record);
+  }
+}
+
+function generationCloseWindow(record) {
+  try { if (record.tab && !record.tab.closed) record.tab.close(); } catch (_) {}
+  if (record.popupUrl) URL.revokeObjectURL(record.popupUrl);
+  if (window.__ytTab === record.tab) window.__ytTab = null;
+}
+
+function generationReturnFromLaunch(token) {
+  const record = Array.from(generationWindows.values()).find(item => item.token === token);
+  if (record) {
+    if (!record.context.launchId || !generationOwnsCard(record)) return false;
+    generationFailure(record);
+    return true;
+  }
+
+  // Reloading Home drops the request object but preserves the launch and the
+  // exact selection that was sent. Require both before restoring its card.
+  let context, key;
+  try {
+    context = JSON.parse(sessionStorage.getItem('tc-mix-launch:' + token));
+    if (context?.launchId !== token || new URL(context.returnUrl).pathname !== location.pathname) return false;
+    key = generationSelectionKey(context.id, context.tracks);
+    if (sessionStorage.getItem(key) !== token) return false;
+  } catch (_) { return false; }
+  const node = document.getElementById(context.id);
+  if (!node || generationTuning(node) !== context.tuning || node.dataset.generationPending ||
+      generationRestoredCards.has(node) || !genReturnToMix(context.id, context)) return false;
+
+  const restored = {node, key, token, sent: true, uncertain: true, context: generationRestoredCards.get(node)};
+  generationWindows.set(node.id, restored);
+  if (!restored.context.saved && !restored.context.recovery) generationCheckReceipt(restored);
+  return true;
+}
+
 function generationSavedStatus(node, context) {
   const recovery = context.recovery;
-  let note = node.querySelector('[data-generation-error]');
-  if (!note) {
-    note = document.createElement('p');
-    note.className = 'section-note';
-    note.dataset.generationError = '';
-    const songs = node.querySelector('.gen-recovery-tracks');
-    if (songs) songs.before(note);
-    else node.append(note);
-  }
+  const attempted = context.recoveryTracks || context.tracks;
+  const replacements = new Map(attempted.filter(track => track.recording_id)
+    .map(track => [String(track.recording_id), track.video_id]));
+  const note = generationNote(node);
   const summary = node.querySelector('[data-generation-summary]');
   if (summary) summary.textContent = recovery.uncertain.length ? 'Some songs are still unconfirmed.' :
     recovery.rejected.length || recovery.unattempted.length ? 'Some selected songs were not saved.' : 'Your selected songs are saved.';
   const labels = {confirmed: 'Saved', uncertain: 'Unconfirmed', rejected: 'Not accepted', unattempted: 'Not saved'};
   const counts = [];
+  const showTrackStatus = Object.keys(labels).filter(state => recovery[state].length).length > 1;
+  node.querySelectorAll('[data-generation-progress]').forEach(progress => progress.remove());
   for (const [state, label] of Object.entries(labels)) {
     const videos = recovery[state];
-    if (videos.length) counts.push(videos.length + ' ' + label.toLowerCase());
-    node.querySelectorAll('.gen-row, [data-generation-video]').forEach(row => {
-      if (!videos.includes(row.dataset.vid || row.dataset.generationVideo)) return;
-      let progress = row.querySelector('[data-generation-progress]');
-      if (!progress) {
-        progress = document.createElement('span');
-        progress.className = 'gen-artist';
-        progress.dataset.generationProgress = '';
-        (row.querySelector('.gen-meta, .starter-meta') || row).append(progress);
-      }
+    if (videos.length) {
+      const songs = videos.length === 1 ? 'song' : 'songs';
+      const status = state === 'uncertain' ? 'still to check in YouTube Music' : label.toLowerCase();
+      counts.push(`${videos.length} ${songs} ${status}`);
+    }
+    if (showTrackStatus) node.querySelectorAll('.gen-row, [data-generation-video]').forEach(row => {
+      const video = replacements.get(row.dataset.recordingId) || row.dataset.vid || row.dataset.generationVideo;
+      if (!videos.includes(video)) return;
+      const progress = document.createElement('span');
+      progress.className = 'gen-artist';
+      progress.dataset.generationProgress = '';
       progress.textContent = label;
+      (row.querySelector('.gen-meta, .starter-meta') || row).append(progress);
     });
   }
-  note.replaceChildren(document.createTextNode(counts.join(' · ') + '. '));
   const link = document.createElement('a');
+  link.className = 'btn btn-sm';
   link.href = 'https://music.youtube.com/playlist?list=' + encodeURIComponent(recovery.playlist);
   link.target = '_blank'; link.rel = 'noopener'; link.textContent = 'Open saved mix';
+  note.replaceChildren(link, counts.join(' · ') + '.');
+  if (!recovery.uncertain.length && !recovery.rejected.length && !recovery.unattempted.length) return;
   const check = document.createElement('button');
-  check.type = 'button'; check.className = 'btn btn-sm'; check.textContent = 'Check saved mix';
+  check.type = 'button'; check.className = 'btn-ghost btn-sm'; check.textContent = 'Check saved mix';
   check.onclick = async () => {
     check.disabled = true; check.textContent = 'Checking saved mix…';
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
       const response = await fetch('/home/generate/reconcile', {method: 'POST', signal: controller.signal,
-        body: new URLSearchParams({tracks: JSON.stringify(context.tracks), recovery: JSON.stringify(recovery)})});
+        body: new URLSearchParams({tracks: JSON.stringify(attempted), recovery: JSON.stringify(recovery)})});
       const updated = response.ok && await response.json();
       if (updated) {
         context.recovery = updated;
-        if (context.id && context.returnUrl) sessionStorage.setItem('tc-mix-return', JSON.stringify(context));
+        if (context.id && context.returnUrl) generationRememberReturn(context);
       }
     } catch (error) { console.debug('saved mix check deferred', error); }
     finally {
@@ -236,7 +408,7 @@ function generationSavedStatus(node, context) {
       generationSavedStatus(node, context);
     }
   };
-  note.append(link, document.createTextNode(' '), check);
+  note.append(check);
 }
 
 // Home and Road Trip share the generation window. Save ownership is attached to
@@ -253,6 +425,7 @@ function genOpenYT(id) {
   let unresolved = false;
   try { unresolved = generationUnresolved(node, key); } catch (_) {}
   const record = {node, key, context: generationContext(node), token: crypto.randomUUID(), sent: unresolved, uncertain: unresolved};
+  if (!unresolved && node.matches('.gen-card')) record.context.launchId = record.token;
   generationWindows.set(id, record);
   if (unresolved) { generationFailure(record); return; }
   try {
@@ -330,7 +503,14 @@ document.addEventListener('htmx:beforeRequest', event => {
 document.addEventListener('htmx:afterRequest', event => {
   const record = generationRequests.get(event.detail.xhr);
   if (!record) return;
-  if (event.detail.failed || event.detail.xhr.status === 0) {
+  if (event.detail.xhr.getResponseHeader('X-Mix-Recovery') === '1') {
+    const {recovery, tracks} = JSON.parse(event.detail.xhr.responseText);
+    delete record.context.launchId;
+    genComplete(record.token, null, true, true, false, recovery, tracks);
+    generationFailure(record);
+    // HTMX restores disabled elements after dispatching its lifecycle events.
+    setTimeout(() => generationFailure(record), 0);
+  } else if (event.detail.failed || event.detail.xhr.status === 0) {
     clearTimeout(record.timer);
     generationFailure(record);
     // HTMX restores disabled elements after dispatching its lifecycle events.
@@ -338,28 +518,36 @@ document.addEventListener('htmx:afterRequest', event => {
   }
 });
 
-function genComplete(token, playlist, error, uncertain = false, redirecting = false, recovery = null) {
+function genComplete(token, playlist, error, uncertain = false, redirecting = false, recovery = null, attempted = null) {
   const record = Array.from(generationWindows.values()).find(item => item.token === token);
   if (record) {
     clearTimeout(record.timer);
-    delete record.node.dataset.generationPending;
+    generationSettled(record.node);
     if (uncertain) {
-      if (recovery) record.context.recovery = recovery;
-      try { sessionStorage.setItem('tc-mix-return', JSON.stringify(record.context)); } catch (_) {}
+      if (recovery) {
+        record.context.recovery = recovery;
+        record.context.recoveryTracks = attempted;
+      }
+      generationRememberReturn(record.context, true);
+      generationRestoredCards.set(record.node, record.context);
     } else {
       try { sessionStorage.removeItem(record.key); } catch (_) {}
       try { sessionStorage.removeItem('tc-mix-launch:' + token); } catch (_) {}
       try {
-        const previous = JSON.parse(sessionStorage.getItem('tc-mix-return'));
-        const previousKey = previous && 'tc-generation:' + previous.id + ':' +
-          JSON.stringify(previous.tracks.map(track => track.video_id).sort());
-        if (!previous || previousKey === record.key) sessionStorage.removeItem('tc-mix-return');
+        const pathname = new URL(record.context.returnUrl, location.origin).pathname;
+        const key = generationReturnKey(record.node.id, pathname, record.context.tuning);
+        const previous = JSON.parse(sessionStorage.getItem(key));
+        if (previous && generationSelectionKey(previous.id, previous.tracks) === record.key) {
+          sessionStorage.removeItem(key);
+          const target = JSON.parse(sessionStorage.getItem('tc-mix-return'));
+          if (target?.returnUrl === record.context.returnUrl && (target.tuning || '') === record.context.tuning) {
+            sessionStorage.removeItem('tc-mix-return');
+          }
+        }
       } catch (_) {}
     }
-    try { if (record.tab && !record.tab.closed) record.tab.close(); } catch (_) {}
-    if (record.popupUrl) URL.revokeObjectURL(record.popupUrl);
+    generationCloseWindow(record);
     if (generationWindows.get(record.node.id) === record) generationWindows.delete(record.node.id);
-    if (window.__ytTab === record.tab) window.__ytTab = null;
   } else if (!token && !Array.from(generationWindows.values()).some(item => item.tab === window.__ytTab)) {
     // Clusters also uses this receipt with its untokened loading window.
     // An unmatched mix token must never close another selection's popup.

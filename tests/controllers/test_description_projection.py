@@ -1,15 +1,16 @@
 """Exercise real prose rules without dispatch and a paid command with bounded ports."""
 import json
-from unittest.mock import Mock, create_autospec
+from unittest.mock import create_autospec
 
 import pytest
 
 from tests.repository_mock_support import no_database
 from tests.providers.test_deepseek import ALBUM, TEXT, response
 from yt_playlist.controllers.album_descriptions import AlbumDescriptions
+from yt_playlist.controllers.description_access import DescriptionAccess
 from yt_playlist.integrations.deepseek import description_response
 from yt_playlist.providers import deepseek
-from yt_playlist.rec.album_descriptions import DescriptionAccess, admit
+from yt_playlist.rec.album_descriptions import admit
 
 pytestmark = pytest.mark.usefixtures('no_database')
 

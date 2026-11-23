@@ -21,19 +21,12 @@ from yt_playlist.core.db_diagnostics import database_operation
 #     back, not a preference the user expressed. Exclude it. Trends violated this for its whole life
 #     because the rule was only ever a comment; tests/test_generated_quarantine.py now enforces it.
 #
-#   MODE-LEVEL selection signal (rec_mode_picks, rec_mode_impressions, ledger_mode_plays)
+#   MODE-LEVEL selection signal (playlist mode picks, Home rotation offers, ledger_mode_plays)
 #     RETAINED DELIBERATELY. Each generated playlist is built from one taste mode, so choosing to play
 #     it is weak evidence for THAT MODE at the top of the model stack (it feeds the Thompson sampler
 #     via rec.mode_eval.mode_bandit_stats). It is evidence about the mode, never about the tracks.
 #     Do not "fix" this tier by quarantining it: that deletes the only non-circular signal we have.
 GENERATED_GROUP = "Generated"
-
-def _refresh_listening_reads(owner):
-    store = getattr(owner, '_store', owner)
-    if getattr(store, '_schema_compatibility', False) and not getattr(store, '_read_only', False):
-        from yt_playlist.core.entity_names import refresh_listening_reads
-        refresh_listening_reads(store.conn)
-
 
 def synchronized(method):
     """Serialize a DAO method on the shared connection's re-entrant lock.
@@ -49,7 +42,6 @@ def synchronized(method):
             borrowed = conn.in_transaction
             try:
                 check_cancellable_work()
-                _refresh_listening_reads(self)
                 return method(self, *args, **kwargs)
             except BaseException:
                 # A bare execute or commit can fail with its transaction still
@@ -75,7 +67,6 @@ def snapshot_read(method):
                     or getattr(self._lock, 'held_by_current_thread', False)):
                 with self._lock:
                     check_cancellable_work()
-                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
             with self._store.read_view() as view:
                 reader = type(self)(view)
@@ -96,12 +87,10 @@ def lookup_read(method):
                     or self._store._db_path is None):
                 with self._lock:
                     check_cancellable_work()
-                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
             if self._lock.acquire(blocking=False):
                 try:
                     check_cancellable_work()
-                    _refresh_listening_reads(self)
                     return method(self, *args, **kwargs)
                 finally:
                     self._lock.release()
@@ -133,13 +122,3 @@ class Repo:
     @lookup_read
     def album_tracks_table(self):
         return 'album_tracks'
-
-    @property
-    @lookup_read
-    def album_fetch_state_table(self):
-        return 'album_fetch_state'
-
-    @property
-    @lookup_read
-    def album_track_links_table(self):
-        return 'album_track_links'

@@ -25,3 +25,17 @@ def tokens(sql):
         else:
             result.append(token.lower())
     return tuple(result)
+
+
+def table_clauses(tokens):
+    """Split column and table constraints while keeping expressions intact."""
+    start = tokens.index('(') + 1
+    depth = 0
+    for position in range(start, len(tokens)):
+        token = tokens[position]
+        if depth == 0 and token in (',', ')'):
+            yield tokens[start:position]
+            start = position + 1
+            if token == ')':
+                return
+        depth += (token == '(') - (token == ')')

@@ -36,7 +36,7 @@ def recipe_schema():
 
 def test_recipe_capacity_schema_has_real_empty_owners_and_revision_guards(recipe_schema):
     source = recipe_schema.source
-    assert source.conn.execute('SELECT COUNT(*) FROM rec_recipes').fetchone()[0] == 0
+    assert source.conn.execute('SELECT COUNT(recipe_id) FROM playlist_scopes').fetchone()[0] == 0
     assert source.conn.execute('PRAGMA foreign_keys').fetchone()[0] == 1
     assert recipe_schema.revision_guards
 
@@ -54,8 +54,9 @@ def recipe_documents(recipe_schema, tmp_path_factory):
         with store.conn.atomic():
             store.conn.executemany("INSERT INTO playlist_scopes(id,provider_playlist_id,kind) VALUES (?,?,'shared')",
                                    [(row[1], row[1]) for row in rows])
-            store.conn.executemany('INSERT INTO rec_recipes(id,playlist_scope_id,revision,created_at,model,'
-                'recovery_filename,recovery_digest,recovery_bytes) VALUES (?,?,?,?,?,?,?,?)', rows)
+            store.conn.executemany('UPDATE playlist_scopes SET recipe_id=?,recipe_revision=?,recipe_created_at=?,'
+                "recipe_model=?,recipe_recovery_filename=?,recipe_recovery_digest=?,recipe_recovery_bytes=?,recipe_facets='[]' "
+                'WHERE id=?', [(row[0], *row[2:], row[1]) for row in rows])
         yield capture_template(store, 1024)
 
 
@@ -169,7 +170,7 @@ def recipe_collected(recipe_collection):
         assert not store.conn.in_transaction
         # One genuinely independent connection proves both reads and immediate
         # writer reservation after every turn, without repeated Store creation.
-        assert other.execute('SELECT COUNT(*) FROM rec_recipes').fetchone()[0] == 1024
+        assert other.execute('SELECT COUNT(recipe_id) FROM playlist_scopes').fetchone()[0] == 1024
         other.execute('BEGIN IMMEDIATE')
         with other:
             other.execute("INSERT INTO settings VALUES ('gc-probe','usable') "
@@ -195,7 +196,7 @@ def test_recipe_capacity_collection_keeps_all_1024_owned_files_and_removes_all_o
     assert all(path.is_file() for path in recipe_collected['held'])
     assert not any(path.exists() for path in recipe_collected['orphaned'])
     store = recipe_collected['store']
-    assert store.conn.execute('SELECT COUNT(*) FROM rec_recipes').fetchone()[0] == 1024
+    assert store.conn.execute('SELECT COUNT(recipe_id) FROM playlist_scopes').fetchone()[0] == 1024
     assert not store.conn.execute('PRAGMA foreign_key_check').fetchall()
 
 

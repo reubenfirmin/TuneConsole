@@ -16,7 +16,7 @@
       <label class="sr-only" for="music-search-query">Search music</label>
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true"><circle cx="10" cy="10" r="6.5"/><path d="m15 15 6 6"/></svg>
       <input id="music-search-query" x-ref="query" type="search" x-model="query" maxlength="80"
-             placeholder="Song, album, artist or playlist" autocomplete="off" @input.debounce.300ms="search()">
+             placeholder="Song, album, artist or playlist" autocomplete="off" @input="scheduleSearch()">
     </form>
     <div class="music-search-empty" x-show="query.trim().length < 2">Start with a song or artist you love.</div>
     <div class="music-search-tabs music-search-sources" role="tablist" aria-label="Search source"

@@ -100,9 +100,10 @@ def discovery_context(store, clock, monkeypatch):
     monkeypatch.setattr(discovery_composition, 'playlist_taste', Mock(return_value=SimpleNamespace()))
     monkeypatch.setattr(discovery_composition.embedding_vectors, 'load_vectors',
                         Mock(return_value=(['core'], np.ones((1, 1)), {'core': 0})))
-    anchors = Mock(return_value=[('CoreBand', 1, np.ones(1))])
+    artist = store.artists.ensure_artist('CoreBand')
+    anchors = Mock(return_value=[(store.artists.key(artist), 1, np.ones(1))])
     monkeypatch.setattr(discovery_composition.artist_bridges, 'anchor_values', anchors)
-    monkeypatch.setattr(discovery_composition.artist_model, 'artist_neighbors', Mock(return_value=[]))
+    monkeypatch.setattr(discovery_composition.artist_model, 'ranked_artist_neighbors', Mock(return_value=[]))
     return SimpleNamespace(store=store, now_fn=lambda: clock[0]), anchors
 
 

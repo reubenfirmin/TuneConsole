@@ -30,7 +30,7 @@
      YouTube Music tab open to run the request). #}
   <script>(function () {
     const context = genComplete({{ launch_id|default('')|tojson }}, null, true, {{ save_uncertain|default(false)|tojson }}, false,
-      {{ addition_recovery|default(none)|tojson }});
+      {{ addition_recovery|default(none)|tojson }}, {{ selected_tracks|default(none)|tojson }});
     {% if addition_recovery %}generationSavedStatus(document.currentScript.closest('section'), context || {
       tracks: {{ selected_tracks|tojson }}, recovery: {{ addition_recovery|tojson }}
     });{% endif %}

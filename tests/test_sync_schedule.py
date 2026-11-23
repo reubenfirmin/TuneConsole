@@ -2,6 +2,7 @@
 import json
 from collections import Counter
 from contextlib import nullcontext
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -18,6 +19,7 @@ from yt_playlist.library.sync_outcomes import RETRY_BASE_S, sync_due
 from yt_playlist.core import playlist_scopes, sync_state
 from yt_playlist.core.album_snapshot import PlaylistSnapshot
 from yt_playlist.core.store import Store
+from yt_playlist.repos.sync import SyncRepo
 from yt_playlist.web.app import _background_sync_loop
 
 
@@ -87,12 +89,25 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no
     store.settings.set_setting.side_effect = settings.__setitem__
     store.settings.publish_values.side_effect = settings.update
     store.playlists.playlist_reference.side_effect = lambda pid, account_id: (account_id, pid)
-    repository = Mock(spec_set=['state_facts', 'has_attempt_state', 'require_revision'])
-    repository.state_facts.side_effect = lambda: {'raw': settings.get('library_sync_state', '{}')}
-    repository.has_attempt_state.return_value = False
-    recovery = Mock(spec_set=['retained'])
+    repository = Mock(spec_set=SyncRepo)
+    saved = {'attempt': None, 'cursors': []}
+    result_file = {}
+
+    def publish_attempt(now, result, *, checkpoint=False, **options):
+        result_file.update(result=deepcopy(result))
+        saved['attempt'] = {
+            'recovery_filename': 'sync-result', 'recovery_digest': 'digest', 'recovery_bytes': 17,
+            'finished_at': result['last_attempt_at'] if checkpoint else now,
+            'phase': 'running' if checkpoint else result['status'],
+        }
+
+    repository.state_facts.side_effect = lambda: deepcopy(saved)
+    repository.finish_attempt.side_effect = publish_attempt
+    repository.begin_attempt.return_value = 1
+    recovery = Mock(spec_set=['retained', 'read', 'describe', 'publish_reserved'])
     recovery.retained.side_effect = nullcontext
-    store.sync = LibrarySync(repository, store.settings, recovery, None)
+    recovery.read.side_effect = lambda *args, **kwargs: deepcopy(result_file['result'])
+    store.sync = LibrarySync(repository, recovery)
     # This case owns scheduling across a large mixed result. Membership and
     # rating writes have their own real-storage tests in test_sync and repos.
     monkeypatch.setattr(ratings, 'record_observations', Mock())
@@ -143,7 +158,7 @@ def test_two_accounts_retry_only_four_incomplete_playlists_and_failed_listing(no
 
 @pytest.mark.parametrize("manual", [True, False], ids=["explicit-retry", "reconnected"])
 def test_explicit_sync_and_reconnection_bypass_backoff(store, manual):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100, automatic=True)
@@ -158,7 +173,7 @@ def test_explicit_sync_and_reconnection_bypass_backoff(store, manual):
 
 
 def test_retry_deadlines_survive_new_schedule_and_keep_success_timestamps(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient()
     sync.sync_all(store, {iid: client}, 100)
     client.partial = {"PL0"}
@@ -178,7 +193,7 @@ def test_retry_deadlines_survive_new_schedule_and_keep_success_timestamps(store)
 
 
 def test_retaining_a_failed_listing_keeps_child_deadlines_and_blocks_ineffective_jobs(store):
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100)
@@ -199,7 +214,7 @@ def test_interrupted_import_reopens_and_resumes_after_committed_playlists(file_b
     from yt_playlist.core.activity import WorkClosing
 
     store = file_backed_store
-    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     client = CountedClient(4)
     client.partial = {'PL1'}
     client._tracks['PL0'][0]['likeStatus'] = 'LIKE'
@@ -255,7 +270,7 @@ def test_interrupted_import_reopens_and_resumes_after_committed_playlists(file_b
 @pytest.mark.parametrize('failed', [False, True], ids=['expired-success', 'failed-retry'])
 def test_deleted_playlist_history_does_not_reenter_active_sync(file_backed_store, failed):
     store = file_backed_store
-    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     client = CountedClient(2)
     if failed:
         client.partial = {'PL1'}
@@ -267,8 +282,7 @@ def test_deleted_playlist_history_does_not_reenter_active_sync(file_backed_store
     deleted = sync.sync_all(store, {iid: client}, 200)
     assert set(deleted['accounts'][str(iid)]['resources']['playlists']['items']) == {'PL0'}
     assert store.playlist_recipes.get_recipe(scope) == {'model': 'keep-curation'}
-    assert store.conn.execute("SELECT count(*) FROM sync_cursors WHERE collection='playlist' "
-                              'AND playlist_scope_id=?', (scope,)).fetchone()[0] == 1
+    assert sum(row['playlist_scope_id'] == scope for row in sync_state.cursors(store.conn)) == 1
     reopened = Store(store._db_path)
     reopened._bind_repositories()
     try:
@@ -297,7 +311,7 @@ def test_deleted_playlist_history_does_not_reenter_active_sync(file_backed_store
 @pytest.mark.parametrize('listing', ['unverified-empty', 'exception', 'verified-empty'])
 def test_only_verified_listing_can_retire_active_child_deadlines(file_backed_store, monkeypatch, listing):
     store = file_backed_store
-    iid = store.accounts.upsert_account('Main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     client = CountedClient(2)
     client.partial = {'PL1'}
     sync.sync_all(store, {iid: client}, 100)
@@ -344,7 +358,7 @@ def test_reconnect_retry_survives_a_busy_manual_sync_lock(store, monkeypatch, bl
     from yt_playlist.core.activity import Activity
     from yt_playlist.web.jobs import SyncJobs
 
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient(2)
     client.partial = {"PL1"}
     sync.sync_all(store, {iid: client}, 100)
@@ -389,7 +403,7 @@ def test_first_sync_starts_without_waiting_for_periodic_poll(store, monkeypatch,
     from yt_playlist.core.activity import Activity
     from yt_playlist.web import jobs
 
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient()
     stop, wake, observed, finished = (threading.Event() for _ in range(4))
 
@@ -449,7 +463,7 @@ def test_slow_update_check_cannot_delay_an_extension_connection(store, monkeypat
     from yt_playlist.web.routes import app_update
     from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
 
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     client = CountedClient()
     checking, finish_update, synced = (threading.Event() for _ in range(3))
     original_updates = web_app._background_update_loop

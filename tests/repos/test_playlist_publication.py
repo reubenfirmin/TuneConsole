@@ -7,7 +7,7 @@ from yt_playlist.core.store import Store
 
 
 def seed(store, remote='PL', identity=None):
-    identity = identity or store.accounts.upsert_account('main', 'bridge', None, True)
+    identity = identity or store.accounts.upsert_account('main', None, True)
     ids = [store.tracks.upsert_track(v, v.upper(), 'Artist', 'Album', 200, library=False)
            for v in ('a', 'b', 'c')]
     revision = store.playlists.playlist_revision(identity, remote)
@@ -49,7 +49,8 @@ def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch, co
                 assert store.conn.in_transaction
                 assert reader.execute('SELECT title,track_count,last_seen FROM playlists WHERE id=?',
                                       (pid,)).fetchone() == ('Mix', 2, 100)
-                assert reader.execute('SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position',
+                assert reader.execute('SELECT s.video_id FROM playlist_items p JOIN track_sources s '
+                                      'ON s.id=p.track_source_id WHERE p.playlist_id=? ORDER BY p.position',
                                       (pid,)).fetchall() == [('a',), ('b',)]
                 original(playlist_id, track_ids)
             monkeypatch.setattr(store.playlists.repository, '_set_playlist_tracks', observed)
@@ -57,7 +58,8 @@ def test_metadata_and_order_publish_in_one_transaction(tmp_path, monkeypatch, co
                 iid, 'PL', 'New title', [ids[2], ids[0]], 200, expected_revision=revision) == pid
             assert reader.execute('SELECT title,track_count,last_seen FROM playlists WHERE id=?',
                                   (pid,)).fetchone() == ('New title', 2, 200)
-            assert reader.execute('SELECT video_id FROM playlist_items WHERE playlist_id=? ORDER BY position',
+            assert reader.execute('SELECT s.video_id FROM playlist_items p JOIN track_sources s '
+                                  'ON s.id=p.track_source_id WHERE p.playlist_id=? ORDER BY p.position',
                                   (pid,)).fetchall() == [('c',), ('a',)]
     finally:
         store.conn.close()
@@ -69,18 +71,19 @@ def test_failed_publication_rolls_back_metadata_membership_and_revision(store):
     revision = store.playlists.playlist_revision(iid, 'PL')
     with store.conn:
         store.conn.execute("CREATE TEMP TRIGGER reject_snapshot BEFORE INSERT ON playlist_items "
-                           "WHEN NEW.video_id='c' BEGIN SELECT RAISE(ABORT,'injected failure'); END")
+                           "WHEN NEW.track_source_id=(SELECT id FROM track_sources WHERE video_id='c') "
+                           "BEGIN SELECT RAISE(ABORT,'injected failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='injected failure'):
         store.playlists.publish_playlist_snapshot(iid, 'PL', 'New title', ids, 200,
                                                   expected_revision=revision)
     assert store.playlists.get_playlist(pid) == before
     assert store.playlists.get_playlist_track_ids(pid) == ids[:2]
     assert store.playlists.playlist_revision(iid, 'PL') == revision
-    assert not store.conn.execute('SELECT 1 FROM library_memberships WHERE entry_id=?', (ids[2],)).fetchone()
+    assert not store.conn.execute('SELECT 1 FROM track_sources WHERE library_origin IS NOT NULL AND id=?', (ids[2],)).fetchone()
 
 
 def test_tokens_survive_removal_and_reappearance_including_initial_absence(store):
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     absent = store.playlists.playlist_revision(iid, 'PL')
     _, pid, ids = seed(store, identity=iid)
     store.playlists.remove_playlist(pid)
@@ -97,7 +100,7 @@ def test_tokens_survive_removal_and_reappearance_including_initial_absence(store
 @pytest.mark.parametrize('remote', ['PL', 'LM'])
 def test_another_account_or_playlist_does_not_invalidate_this_owner(store, remote):
     iid, pid, ids = seed(store, remote)
-    other = store.accounts.upsert_account('other', 'bridge', 'other', False)
+    other = store.accounts.upsert_account('other', 'other', False)
     seed(store, remote, other)
     revision = store.playlists.playlist_revision(iid, remote)
     other_pid = store.playlists.upsert_playlist(other, remote, 'Other account', 0, '', 200)
@@ -110,16 +113,33 @@ def test_another_account_or_playlist_does_not_invalidate_this_owner(store, remot
 def test_explicit_membership_writers_advance_the_same_owner(store):
     iid, pid, ids = seed(store)
     unresolved = store.tracks.upsert_track(None, 'Unresolved', 'Artist', 'Album', 200)
-    operations = [
-        ('INSERT INTO playlist_items VALUES (?,?,?)', (pid, 'c', 2)),
-        ('UPDATE playlist_items SET position=5 WHERE playlist_id=? AND video_id=?', (pid, 'c')),
-        ('DELETE FROM playlist_items WHERE playlist_id=? AND video_id=?', (pid, 'c')),
-        ('INSERT INTO unresolved_playlist_items VALUES (?,?,?)', (pid, unresolved, 2)),
-        ('UPDATE unresolved_playlist_items SET position=5 WHERE playlist_id=?', (pid,)),
-        ('DELETE FROM unresolved_playlist_items WHERE playlist_id=? AND entry_id=?', (pid, unresolved)),
-    ]
-    for sql, args in operations:
-        revision = store.playlists.playlist_revision(iid, 'PL')
-        with store.conn:
-            store.conn.execute(sql, args)
-        assert store.playlists.playlist_revision(iid, 'PL') > revision
+    for source in (ids[2], unresolved):
+        operations = (
+            ('INSERT INTO playlist_items VALUES (?,?,?)', (pid, source, 2)),
+            ('UPDATE playlist_items SET position=5 WHERE playlist_id=? AND track_source_id=?', (pid, source)),
+            ('DELETE FROM playlist_items WHERE playlist_id=? AND track_source_id=?', (pid, source)),
+        )
+        for sql, args in operations:
+            revision = store.playlists.playlist_revision(iid, 'PL')
+            with store.conn:
+                store.conn.execute(sql, args)
+            assert store.playlists.playlist_revision(iid, 'PL') > revision
+
+
+def test_placement_update_advances_every_account_in_the_same_playlist_scope(store):
+    first, _, _ = seed(store)
+    second = store.accounts.upsert_account('other', 'other', False)
+    _, second_playlist, _ = seed(store, identity=second)
+    action = store.actions.record_action('add_tracks', '{}', '{}', 'pending', '{}', 1)
+    with store.conn:
+        store.conn.executemany('INSERT INTO action_targets(action_id,position,role,account_id,playlist_scope_id,'
+                               "provider_playlist_id_snapshot) VALUES (?,?,'placement',?,'PL','PL')",
+                               [(action, 0, first), (action, 1, second), (action, 2, second)])
+    before = {account: store.playlists.playlist_revisions(account)['PL'] for account in (first, second)}
+    with store.conn:
+        store.conn.execute("UPDATE actions SET status='cancelled' WHERE id=?", (action,))
+    assert store.playlists.playlist_revision(first, 'PL') == before[first] + 1
+    assert store.playlists.playlist_revision(second, 'PL') == before[second] + 2
+
+    store.playlists.remove_playlist(second_playlist)
+    assert store.playlists.playlist_revisions(second)['PL'] > before[second] + 2

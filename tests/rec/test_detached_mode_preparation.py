@@ -66,7 +66,7 @@ def test_assignment_keeps_the_only_mode_that_can_fill_fresh():
 def test_full_card_requests_no_backfill():
     tracks = [{'key': f'k{i}', 'artist': f'a{i}', 'genre': 'Jazz'} for i in range(24)]
     bundles = {'1': {'wheelhouse': tracks, 'explore': tracks}, '_meta': {}}
-    inputs = {'blocked': set(), 'muted': set(), 'dislike_deltas': {}}
+    inputs = {'blocked': set(), 'muted': set()}
     steps = mode_surfaces.assembly_steps(inputs, bundles, [{'mode_id': 1}], [1], 0, 4, {},
         home_vibe.Ranker(None), cap_a=2, cap_al=2, ab_share=0, comfort_minimum=30)
     requests, response = [], None
@@ -77,10 +77,10 @@ def test_full_card_requests_no_backfill():
             cards = completed.value
             break
         requests.append(request)
-        assert request in {'negative', 'decision'}, 'Full card unexpectedly requested metadata/backfill'
+        assert request == 'decision', 'Full card unexpectedly requested metadata/backfill'
         response = {}
     assert len(cards) == 1 and len(cards[0]['tracks']) == 12
-    assert requests == ['negative', 'decision']
+    assert requests == ['decision']
 
 
 def test_group_page_rules_use_supplied_metadata_and_keep_temporal_band():
@@ -94,18 +94,19 @@ def test_group_page_rules_use_supplied_metadata_and_keep_temporal_band():
 
 def test_preview_caps_continue_across_detached_pages():
     frame = stored_groups.PreviewFrame()
-    first = stored_groups.preview_page([{'key': '1', 'artist': 'A', 'album': 'X'}], set(), set(), 2, 1, frame)
-    second = stored_groups.preview_page([{'key': '2', 'artist': 'A', 'album': 'X'},
+    stored_groups.preview_page([{'key': '1', 'artist': 'A', 'album': 'X'}], set(), set(), 2, 1, frame)
+    assert frame.count == 1
+    stored_groups.preview_page([{'key': '2', 'artist': 'A', 'album': 'X'},
         {'key': '3', 'artist': 'A', 'album': 'Y'}, {'key': '4', 'artist': 'A', 'album': 'Z'}],
         set(), set(), 2, 1, frame)
-    assert first['count'] == second['count'] == 1
+    assert frame.count == 2 and frame.available == 4
     assert [track['key'] for track in frame.tracks] == ['1', '3']
 
 
 def test_basis_and_full_fit_admission_keep_distinct_change_floors_and_age_escape():
-    previous = {'rows': 10, 'at': 100, 'modes': [], 'config': []}
+    previous = {'rows': 10, 'at': 100, 'config': []}
     facts = dict(changed=1, has_model=True, has_evidence=True, coherent=True,
-                 genre_revision=genre_catalog.REVISION, modes=[], now=101)
+                 genre_revision=genre_catalog.REVISION, now=101)
     assert progressive.basis_reason(previous, **facts) == 'accumulated-evidence'
     assert not progressive.full_due_values(previous, [], True, True, 1, 0, 101)
     assert progressive.full_due_values(previous, [], True, True, 1, 0, 1000)

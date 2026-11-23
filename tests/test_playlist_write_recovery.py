@@ -90,8 +90,8 @@ def test_uncertain_new_playlist_keeps_confirmed_membership_and_undo(store, monke
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    source_identity = store.accounts.upsert_account("Source", "cred", None, True)
-    target_identity = store.accounts.upsert_account("Target", "cred", None, False)
+    source_identity = store.accounts.upsert_account("Source", None, True)
+    target_identity = store.accounts.upsert_account("Target", None, False)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200)
             for t in tracks]
@@ -146,7 +146,7 @@ def test_partial_merge_does_not_claim_a_concurrent_addition_for_undo(store, monk
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor, playlist_undo
 
-    iid = store.accounts.upsert_account('Main', 'cred', None, True)
+    iid = store.accounts.upsert_account('Main', None, True)
     keeper = store.playlists.upsert_playlist(iid, 'KEEP', 'Keeper', 1, '', 1)
     source = store.playlists.upsert_playlist(iid, 'SOURCE', 'Source', 2, '', 1)
     tracks = {v: _track(v, v, 'Artist') for v in ('a', 'b', 'c', 'd')}
@@ -184,7 +184,7 @@ def test_other_mutation_boundaries_retain_partial_progress(store, monkeypatch, o
     from tests.conftest import FakeClient, _track
     from yt_playlist.library import executor
 
-    identity = store.accounts.upsert_account("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)
@@ -239,7 +239,7 @@ def test_http_result_exposes_partial_destination_and_recovery(route_store, monke
 
     store = route_store
     install_routes(monkeypatch, 'playlists', 'home_generation', 'actions')
-    identity = store.accounts.upsert_account("Main", "cred", None, True)
+    identity = store.accounts.upsert_account("Main", None, True)
     tracks = [_track("v1", "One", "Artist"), _track("v2", "Two", "Artist")]
     tids = [store.tracks.upsert_track(t["videoId"], t["title"], "Artist", None, 200) for t in tracks]
     source = store.playlists.upsert_playlist(identity, "SOURCE", "Source", 2, "", 1)

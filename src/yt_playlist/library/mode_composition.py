@@ -1,6 +1,7 @@
 """Mode preparation uses existing guarded SQL/file publication owners."""
 from yt_playlist.controllers.mode_preparation import ModePreparation
 from yt_playlist.core.db_revisions import column_group_reads
+from yt_playlist.library import mix_listening
 from yt_playlist.rec import candidate_refresh, measurement, mode_inputs as mode_surfaces
 
 
@@ -36,8 +37,10 @@ def preparation(store):
             settings = candidate_refresh.prepared_settings(reader, now)
         return payload, fresh, policies, settings
 
-    return ModePreparation(maintain=lambda now: measurement.maintain_storage(store, now),
+    def maintain(now):
+        measurement.maintain_storage(store, now)
+        mix_listening.prepare(store, now)
+
+    return ModePreparation(maintain=maintain,
         resume=resume, snapshot=store.read_snapshot, capture=capture,
-        typed_publish=(lambda snapshot, *args: mode_surfaces._publish_typed_bundles(store, snapshot, *args))
-            if getattr(store, '_recommendation_files', False) else None,
-        proposals=store.rec_proposals, ledger=store.rec_ledger, settings=store.settings)
+        publish=lambda snapshot, *args: mode_surfaces._publish_typed_bundles(store, snapshot, *args))

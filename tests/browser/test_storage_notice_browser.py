@@ -11,7 +11,7 @@ import uvicorn
 from tests.browser_fixtures import _free_port
 from tests.live_server import LiveServer
 from tests.conftest import FakeClient
-from yt_playlist.core import db_space, playback_feedback
+from yt_playlist.core import playback_feedback
 from yt_playlist.web.app import create_app
 from yt_playlist.web import app as app_module
 
@@ -31,18 +31,18 @@ def drain_captured_feedback(store, capture):
 
 @pytest.fixture
 def notice_app(store):
-    identity = store.accounts.upsert_account('Main', 'credential', None, True)
+    identity = store.accounts.upsert_account('Main', None, True)
     store.playlists.upsert_playlist(identity, 'library', 'My music', 0, '', 1)
     app = create_app(store, lambda: {identity: FakeClient()}, now_fn=lambda: 1, background_work=False)
     port = _free_port()
     server = uvicorn.Server(uvicorn.Config(app, host='127.0.0.1', port=port, log_level='warning'))
     with LiveServer(server):
-        yield f'http://127.0.0.1:{port}', app.state.ctx.storage_maintenance
+        yield f'http://127.0.0.1:{port}', app.state.ctx
 
 
 @pytest.mark.parametrize('width',[1536])
 def test_history_cleanup_with_available_cards_keeps_library_quiet_and_writable(notice_app,store,page,width):
-    url,maintenance = notice_app
+    url, _ = notice_app
     store._evidence_recovery_pending = True
     store.rec_proposals.put_proposals('home_prepared',{'schema':1,'protos':[
         {'label':'Available mix','tracks':[{'videoId':'prepared-track'}]}]},1)
@@ -61,18 +61,18 @@ def test_history_cleanup_with_available_cards_keeps_library_quiet_and_writable(n
 
 
 def test_cleanup_pending_after_recovery_does_not_keep_the_frontend_paused(notice_app, store, page):
-    url, maintenance = notice_app
-    maintenance.active = True
+    url, _ = notice_app
+    store._recommendation_retirement_pending = True
     store._evidence_recovery_pending = True
     page.goto(url + '/playlists')
     banner = page.locator('#storage-maintenance')
     expect(banner).to_have_text('Optimizing app storage; some recommendations are temporarily unavailable.')
-    page.wait_for_function('document.documentElement.dataset.storageCompacting === "true"')
-    maintenance.active = False
+    page.wait_for_function('document.documentElement.dataset.libraryWritesPaused === "true"')
+    store._recommendation_retirement_pending = False
     # The existing page must recover while cleanup still awaits another worker
     # turn. Clearing pending intent or restarting the frontend is unnecessary.
     expect(banner).to_be_hidden()
-    page.wait_for_function('document.documentElement.dataset.storageCompacting === "false"')
+    page.wait_for_function('document.documentElement.dataset.libraryWritesPaused === "false"')
     status = page.request.get(url + '/storage-maintenance/status').json()
     assert status['evidence_maintenance']['pending'] and status['recording'] and not status['active']
     assert page.request.post(url + '/settings/lastfm-key', form={'key': 'cleanup-pending'}).status == 204
@@ -83,8 +83,9 @@ def test_cleanup_pending_after_recovery_does_not_keep_the_frontend_paused(notice
 
 
 @pytest.mark.parametrize('width,text_size', [(1536, 16)])
-def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, page, tmp_path, width, text_size, record_property):
-    url, maintenance = notice_app
+def test_single_line_notice_with_sidebar_and_without_polling(
+        notice_app, store, page, width, text_size, record_property, monkeypatch):
+    url, ctx = notice_app
     timings, polls = {}, 0
 
     def measured(name, operation, *args, **kwargs):
@@ -108,7 +109,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         record_property('notice_delivered_polls', polls)
         return state
 
-    maintenance.active = True
+    store._recommendation_retirement_pending = True
     page.set_viewport_size({'width': width, 'height': 900})
     # Advance only the polling schedule. Every poll still reaches the real
     # server; production animation and status rendering remain enabled.
@@ -151,7 +152,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     measured('screenshot', page.screenshot, path=f'/tmp/tuneconsole-650-active-{width}-{text_size}.png', full_page=True)
 
     if width == 1536:
-        maintenance.active = False
+        store._recommendation_retirement_pending = False
         store._evidence_recovery_pending = True
         store._evidence_recovery_failed = True
         assert poll()['warning']
@@ -161,8 +162,9 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         store._evidence_recovery_failed = False
 
     store._evidence_recovery_pending = False
-    maintenance.active = False
-    maintenance.ready.clear()
+    store._recommendation_retirement_pending = False
+    preparing = True
+    monkeypatch.setattr(type(ctx.enrich_worker), 'busy', property(lambda _: preparing))
     assert not poll()['active']
     preparation = 'Preparing library data. Features will appear as they are ready.'
     expect(banner).to_have_text(preparation)
@@ -183,7 +185,7 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
     measured('screenshot', page.screenshot, path=f'/tmp/tuneconsole-824-preparation-{width}-{text_size}.png', full_page=True)
     page.unroute('**/static/storage-maintenance.js*')
     measured('reload', page.reload)
-    maintenance.ready.set()
+    preparing = False
     poll()
     expect(banner).to_be_hidden()
     if width == 1536:
@@ -195,34 +197,3 @@ def test_single_line_notice_with_sidebar_and_without_polling(notice_app, store, 
         drain_captured_feedback(store, capture)
         assert poll()['pending_feedback'] == 0
         expect(banner).to_be_hidden()
-
-    maintenance.phase = 'deferred'
-    maintenance.ready.clear()
-    maintenance._deferred(db_space.LowDiskSpace('insufficient scratch space'))
-    assert poll()['warning']
-    expect(banner).to_be_hidden()
-    expect(banner).to_have_attribute('role', 'status')
-    page.wait_for_function('document.documentElement.dataset.storageCompacting === "false"')
-    measured('screenshot', page.screenshot, path=f'/tmp/tuneconsole-879-low-space-{width}.png', full_page=True)
-
-    if width == 1536:
-        maintenance._deferred(RuntimeError('interrupted'))
-        assert poll()['warning']
-        expect(banner).to_be_hidden()
-        maintenance.phase = 'schema_retry'
-        assert poll()['warning']
-        expect(banner).to_be_hidden()
-        maintenance.phase = 'deferred'
-        maintenance._deferred(db_space.LowDiskSpace('insufficient scratch space'))
-        assert poll()['warning']
-        expect(banner).to_be_hidden()
-
-    # Diagnostics remain quiet when polling is unavailable as well.
-    page.route('**/static/storage-maintenance.js*', lambda route: route.abort())
-    measured('reload', page.reload)
-    expect(banner).to_be_hidden()
-    maintenance.phase, maintenance.message = 'done', ''
-    maintenance.ready.set()
-    page.unroute('**/static/storage-maintenance.js*')
-    measured('reload', page.reload)
-    expect(banner).to_be_hidden()

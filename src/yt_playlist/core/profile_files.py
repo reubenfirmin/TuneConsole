@@ -4,14 +4,15 @@ import hashlib
 import json
 from collections import OrderedDict
 from contextlib import ExitStack, contextmanager
+from itertools import batched, groupby
 from pathlib import Path
 from threading import RLock
 
 from . import fao, file_pack
 from .evidence_ledger import canonical
-from .activity import WorkBudgetExceeded
+from .activity import WorkBudgetExceeded, check_cancellable_work
 from .profile_paths import record_id, record_path
-from yt_playlist.repos.profile_file_writes import head_definitions
+from .file_receipts import native_profile_definition, profile_head_definitions
 from yt_playlist.repos.profile_file_references import KINDS, identity as _identity, install_references
 
 MAX_ROWS = file_pack.MAX_ROWS
@@ -123,6 +124,15 @@ class ProfileFiles:
     def remove(path, info):
         return fao.delete(path, expected=info.identity, missing_ok=True)
 
+    def read_ordered_pages(self, kind, rows):
+        """Read selected recording heads in file order, with the usual page bounds."""
+        ordered = sorted(rows, key=_head_order)
+        for _, group in groupby(ordered, key=_head_order):
+            for page in batched(group, 512):
+                check_cancellable_work()
+                for bounded in file_pack.batches(page, size=_head_size, max_rows=512):
+                    yield self.read_page(kind, bounded)
+
     def read_page(self, kind, rows, *, max_bytes=MAX_BYTES):
         """Decode detached exact heads, bounded by logical and chunk work bytes."""
         rows = list(rows)
@@ -136,9 +146,7 @@ class ProfileFiles:
         cache, result = Cache(), {}
         # Corpus order interleaves profiles from many publications. Decode each
         # chunk once per page while retaining the same two-chunk/byte bounds.
-        for key, raw, version, digest, identity, publication, byte_size in sorted(
-                rows, key=lambda row: ((row[5][0], row[5][1]) if isinstance(row[5], tuple)
-                                       else (row[5] or b'', 0))):
+        for key, raw, version, digest, identity, publication, byte_size in sorted(rows, key=_head_order):
             if not raw:
                 value = _chunk_at(self.root, kind, publication, cache).get(str(identity))
                 if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
@@ -151,8 +159,17 @@ class ProfileFiles:
         return result
 
 
+def _head_order(row):
+    publication = row[5]
+    return publication if isinstance(publication, tuple) else (publication or b'', 0)
+
+
+def _head_size(row):
+    return len(row[1].encode()) if row[1] else max(1, row[6] or 0)
+
+
 def definitions():
-    yield from head_definitions()
+    yield from profile_head_definitions()
     yield ('recording_profile_file_delete', 'CREATE TRIGGER recording_profile_file_delete AFTER DELETE ON rec_musical_profiles '
         'BEGIN DELETE FROM recording_profile_files WHERE recording_id=(SELECT id FROM recordings WHERE identity_key=OLD.identity_key); END')
     for kind, (table, key, marker, column) in KINDS.items():
@@ -160,10 +177,6 @@ def definitions():
         name = kind + '_profile_plain_update'
         yield name, (f'CREATE TRIGGER {name} AFTER UPDATE OF payload ON {table} WHEN NEW.payload<>\'\' '
                      f'BEGIN DELETE FROM {marker} WHERE {column}={subject}; END')
-
-
-def available(conn):
-    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name='recording_profile_files'").fetchone() is not None
 
 
 def install(conn, context=None):
@@ -178,8 +191,7 @@ def validate(conn):
     actual = read_definitions(conn, (name for name, _ in expected))
     for name, sql in expected:
         if name in ('recording_profile_files', 'source_profile_files') and 'file_id' in _tokens(actual.get(name) or ''):
-            from yt_playlist.repos.profile_file_writes import native_definition
-            sql = native_definition(sql)
+            sql = native_profile_definition(sql)
         if actual.get(name) is None or _tokens(actual[name]) != _tokens(sql):
             raise ValueError('Incompatible musical-profile file owner: ' + name)
 
@@ -200,10 +212,6 @@ def relative(kind, publication):
 def _physical_identity(path):
     value = path.stat()
     return value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns
-
-
-def _chunk(conn, kind, publication, cache):
-    return _chunk_at(directory(conn), kind, publication, cache)
 
 
 def _chunk_at(root, kind, publication, cache):
@@ -252,44 +260,17 @@ def _chunk_at(root, kind, publication, cache):
     return value['profiles']
 
 
-def size(conn, kind, key):
-    table, column, marker, subject = KINDS[kind]
-    row = conn.execute(f'SELECT length(CAST(payload AS BLOB)) FROM {table} WHERE {column}=?', (key,)).fetchone()
-    if row is None:
-        return 0
-    if row[0] or not available(conn):
-        return row[0]
-    head = conn.execute(f'SELECT byte_size FROM {marker} WHERE {subject}=?', (_identity(conn, kind, key),)).fetchone()
-    if head is None:
-        raise fao.CorruptFile('Required musical-profile file head is missing')
-    return head[0]
-
-
 def read(conn, kind, key, *, cache=None, max_bytes=MAX_BYTES):
-    table, column, marker, subject = KINDS[kind]
-    row = conn.execute(f'SELECT payload,version,digest FROM {table} WHERE {column}=?', (key,)).fetchone()
-    if row is None:
+    rows = reference_rows(conn, kind, (key,))
+    if not rows:
         return None
-    if row[0]:
-        if len(row[0].encode()) > max_bytes:
-            raise fao.FileBudgetExceeded('Musical profile exceeds its logical byte budget')
-        return row[0]
-    identity = _identity(conn, kind, key)
-    from yt_playlist.repos.profile_file_writes import native
-    file_id = 'file_id' if native(conn) else 'NULL'
-    head = conn.execute(f'SELECT publication,byte_size,{file_id} FROM {marker} WHERE {subject}=?', (identity,)).fetchone()
-    if head is None:
+    _, raw, version, digest, identity, publication, byte_size = rows[0]
+    if not raw and publication is None:
         raise fao.CorruptFile('Required musical-profile file head is missing')
-    if head[1] > max_bytes:
+    if (len(raw.encode()) if raw else byte_size) > max_bytes:
         raise fao.FileBudgetExceeded('Musical profile exceeds its logical byte budget')
-    publication = (head[0], head[2]) if head[2] is not None else head[0]
-    value = _chunk(conn, kind, publication, cache).get(str(identity))
-    if (not isinstance(value, dict) or set(value) != {'body', 'version', 'digest'}
-            or not isinstance(value['body'], str) or (value['version'], value['digest']) != tuple(row[1:])
-            or len(value['body'].encode()) != head[1]
-            or hashlib.sha256(value['body'].encode()).hexdigest() != row[2]):
-        raise fao.CorruptFile('Musical profile differs from its exact head')
-    return value['body']
+    return raw or ProfileFiles(directory(conn))._original(
+        kind, (key, identity, publication, byte_size, version, digest), cache)
 
 
 def read_page(conn, kind, keys, *, max_bytes=MAX_BYTES):
@@ -303,28 +284,20 @@ def read_page(conn, kind, keys, *, max_bytes=MAX_BYTES):
 
 
 def reference_rows(conn, kind, keys):
-    """SQL-only heads and inline predecessors, detached before file access."""
+    """Read the selected file heads before accessing the files."""
     keys = list(dict.fromkeys(keys))
     if len(keys) > 512:
         raise ValueError('Musical profile page exceeds 512 identities')
     if not keys:
         return []
-    table, column, marker, subject = KINDS[kind]
     marks = ','.join('?' for _ in keys)
-    if available(conn):
-        from yt_playlist.repos.profile_file_writes import native
-        file_id = 'h.file_id' if native(conn) else 'NULL'
-        owner = 'r.id' if kind == 'recording' else 'p.source_key'
-        join = 'JOIN recordings r ON r.identity_key=p.identity_key ' if kind == 'recording' else ''
-        rows = conn.execute(f'SELECT p.{column},p.payload,p.version,p.digest,{owner},'
-            f'h.publication,h.byte_size,{file_id} FROM {table} p {join}'
-            f'LEFT JOIN {marker} h ON h.{subject}={owner} WHERE p.{column} IN ({marks}) '
-            'ORDER BY h.publication', keys).fetchall()
-        return [tuple(row[:5]) + ((row[5], row[7]) if row[7] is not None else row[5], row[6]) for row in rows]
-    else:
-        rows = conn.execute(f'SELECT {column},payload,version,digest,NULL,NULL,NULL '
-            f'FROM {table} WHERE {column} IN ({marks})', keys).fetchall()
-    return [tuple(row) for row in rows]
+    table, key, identity = {'recording': ('recordings', 'identity_key', 'id'),
+                            'source': ('rec_musical_sources', 'source_key', 'source_key')}[kind]
+    rows = conn.execute(f"SELECT {key},'',musical_profile_version,musical_profile_digest,{identity},"
+        f'musical_profile_publication,musical_profile_size,musical_profile_file_id FROM {table} '
+        f'WHERE {key} IN ({marks}) AND musical_profile_version IS NOT NULL '
+        'ORDER BY musical_profile_publication', keys)
+    return [tuple(row[:5]) + ((row[5], row[7]) if row[7] is not None else row[5], row[6]) for row in rows]
 
 
 def publish(conn, kind, values):
@@ -349,20 +322,33 @@ def prepare_batch(conn, kind, limit=MAX_ROWS):
     return ProfilePreparation(ProfileSources(conn), ProfileFiles(directory(conn))).prepare(kind, limit)
 
 
+def available(conn):
+    return conn.execute("SELECT 1 FROM main.sqlite_schema WHERE name IN "
+                        "('ix_recordings_musical_profile_version','recording_profile_files') LIMIT 1").fetchone() is not None
+
+
 def references(conn):
-    if available(conn):
-        from yt_playlist.repos.profile_file_writes import native
-        column = 'file_id' if native(conn) else 'NULL'
-        for kind, (_, _, marker, _) in KINDS.items():
-            for digest, file_id in conn.execute(f'SELECT DISTINCT publication,{column} FROM {marker}'):
-                publication = (digest, file_id) if file_id is not None else digest
-                yield directory(conn) / relative(kind, publication)
+    from .schema_contract import tokens
+    from .schema_inspection import definitions as schema_objects
 
-
-def recording_size_sql(alias='m'):
-    return (f'CASE WHEN length(CAST({alias}.payload AS BLOB))>0 THEN length(CAST({alias}.payload AS BLOB)) '
-            f'ELSE (SELECT f.byte_size FROM recording_profile_files f JOIN recordings pr ON pr.id=f.recording_id '
-            f'WHERE pr.identity_key={alias}.identity_key) END')
+    # Snapshot export also reads installed databases before the cutover.
+    owners = (('recording', 'recordings', 'recording_profile_files'),
+              ('source', 'rec_musical_sources', 'source_profile_files'))
+    names = [name for _, table, old_table in owners
+             for name in (f'ix_{table}_musical_profile_version', old_table)]
+    objects = schema_objects(conn, names)
+    root = directory(conn)
+    for kind, table, old_table in owners:
+        if f'ix_{table}_musical_profile_version' in objects:
+            sql = ('SELECT DISTINCT musical_profile_publication,musical_profile_file_id FROM ' + table +
+                   ' WHERE musical_profile_version IS NOT NULL')
+        elif old_table in objects:
+            column = 'file_id' if 'file_id' in tokens(objects[old_table]) else 'NULL'
+            sql = f'SELECT DISTINCT publication,{column} FROM {old_table}'
+        else:
+            continue
+        for digest, file_id in conn.execute(sql):
+            yield root / relative(kind, (digest, file_id) if file_id is not None else digest)
 
 
 @contextmanager

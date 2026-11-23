@@ -7,6 +7,7 @@ from unittest.mock import Mock
 import pytest
 
 from yt_playlist.rec import embed, embedding_vectors as vectors, model_calculations, model_refresh
+from yt_playlist.core.model_state import RecordingModelUpdate
 from yt_playlist.core.rec_model_policy import VectorChanges
 
 
@@ -41,30 +42,29 @@ def test_settings_publication_owns_its_write_without_an_outer_transaction(store)
     assert not store.conn.in_transaction
 
 
-def test_late_mode_failure_keeps_published_progress_and_pending_queue_for_retry(store, monkeypatch):
+def test_model_state_failure_keeps_published_vectors_and_pending_queue_for_retry(store, monkeypatch):
     old, new = struct.pack('f', 1), struct.pack('f', 2)
     store.rec_model.replace_rec_vectors([('song', old)])
-    store.settings.set_setting('generation', 'old')
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(generation='old'))
     store.rec_refresh.enqueue()
     revision = store.rec_refresh.revision()
-    prepared = {'vectors': {'rec_vectors': [('song', new)]}, 'settings': {'generation': 'new'},
-                'modes': ([(3, 'Mode', '[]', new, 1, '["song"]', 1, 1, 'space')], []), 'tracks': 1}
+    prepared = {'vectors': {'rec_vectors': [('song', new)]}, 'settings': {},
+                'recording': RecordingModelUpdate(generation='new'), 'artist': None, 'tracks': 1}
     calculate = Mock(return_value=prepared)
     monkeypatch.setattr(model_calculations, 'calculate', calculate)
     with store.conn:
-        store.conn.execute("CREATE TRIGGER fail_mode BEFORE INSERT ON taste_modes "
+        store.conn.execute("CREATE TRIGGER fail_model_state BEFORE UPDATE ON settings WHEN NEW.key='recording_model_state' "
                            "BEGIN SELECT RAISE(ABORT,'late publication failure'); END")
     with pytest.raises(sqlite3.IntegrityError, match='late publication failure'):
         model_refresh.rebuild(store, 10)
     assert not store.conn.in_transaction
     assert store.rec_model.get_rec_vectors() == [('song', new)]
-    assert store.settings.get_setting('generation') == 'new'
-    assert store.modes.list_modes() == []
+    assert store.rec_model.recording_state().generation == 'old'
     assert store.rec_refresh.revision() == revision
-    store.conn.execute('DROP TRIGGER fail_mode')
+    store.conn.execute('DROP TRIGGER fail_model_state')
     assert model_refresh.rebuild(store, 10) is prepared
     assert store.rec_model.get_rec_vectors() == [('song', new)]
-    assert len(store.modes.list_modes()) == 1
+    assert store.rec_model.recording_state().generation == 'new'
     assert store.rec_refresh.revision() is None
     assert [call.args[1] for call in calculate.call_args_list] == [10, 10]
 

@@ -316,8 +316,7 @@ def consumer_constraints(database, output, genres, *, common_seed_track):
                         for surface in surfaces}
             report['publication_generations'] = heads()
             report['uses_retained_publication'] = True
-            if not getattr(store, '_recommendation_files', False) or any(
-                    value is None for value in report['publication_generations'].values()):
+            if any(value is None for value in report['publication_generations'].values()):
                 raise ValueError('Restriction checks require all previously published consumer surfaces')
             for preset in home_vibe.PRESETS:
                 for family in genres:
@@ -416,6 +415,7 @@ def compare_outputs(target, names, *, paths=None):
 
 
 def reset_derived(store):
+    from yt_playlist.core.model_state import RecordingModelUpdate
     from yt_playlist.rec import progressive
     deleted = {}
     # Original samples, provider observations and immutable measurement history
@@ -427,11 +427,12 @@ def reset_derived(store):
             deleted[table] = store.conn.execute('DELETE FROM ' + table).rowcount
         deleted['content_embeddings'] = store.conn.execute(
             "DELETE FROM recording_embeddings WHERE space IN ('content_library','content_discovery')").rowcount
-        keys = ('rec_content_model', 'rec_content_generation', 'rec_content_genre_revision',
-                'rec_content_inputs', 'rec_vibe_version', progressive.BASIS_STATE, progressive.FIT_STATE)
-        store.conn.executemany('DELETE FROM settings WHERE key=?', [(key,) for key in keys])
         store.conn.execute('INSERT INTO rec_musical_pending(source_key,revision) '
                            'SELECT source_key,revision FROM rec_musical_sources ORDER BY source_key')
+    store.rec_model.publish_model_state(recording=RecordingModelUpdate(
+        encoder=None, generation=None, genre_revision=None, input_fingerprint=None))
+    for key in ('rec_vibe_version', progressive.BASIS_STATE, progressive.FIT_STATE):
+        store.settings.delete_setting(key)
     return deleted
 
 

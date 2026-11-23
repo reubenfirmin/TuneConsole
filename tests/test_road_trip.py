@@ -40,7 +40,7 @@ def test_road_trip_recipe_crud(store):
 
 
 def test_road_trip_draft_crud_and_recipe_delete_cascade(store):
-    store.accounts.upsert_account('Main','main.json',None,True)
+    store.accounts.upsert_account('Main',None,True)
     rid = store.road_trip.save_road_trip_recipe(None, "Beach Run", 60, [], [], 60, 1000.0)
     assert store.road_trip.get_road_trip_draft(rid) is None
     assert store.road_trip.latest_road_trip_draft() is None

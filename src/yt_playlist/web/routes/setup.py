@@ -12,7 +12,6 @@ from html import escape
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 
-from yt_playlist.core.setup import BROWSER_CREDENTIAL_FILENAME
 from yt_playlist.library.takeout import TakeoutFormatError
 from yt_playlist.library.spotify_data import SpotifyDataFormatError
 from yt_playlist.library.spotify_library import SpotifyLibraryFormatError
@@ -162,8 +161,7 @@ def build(ctx, *, identity_checks=None) -> APIRouter:
                 "id": identity_ids[idx] if idx < len(identity_ids) else "",
                 "label": label.strip(),
                 "brand_account_id": (brand or "").strip() or None,
-                "is_master": str(idx) == master,
-                "credential_ref": BROWSER_CREDENTIAL_FILENAME})
+                "is_master": str(idx) == master})
         try:
             for row in identities:
                 row["id"] = int(row["id"]) if row["id"] else None

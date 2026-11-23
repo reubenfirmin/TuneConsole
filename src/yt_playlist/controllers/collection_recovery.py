@@ -7,8 +7,9 @@ from yt_playlist.core.document_paths import record_id
 
 
 class CollectionRecovery:
-    def __init__(self, repository, files):
+    def __init__(self, repository, files, *, relocating):
         self.repository, self.files = repository, files
+        self.relocating = relocating
 
     def export(self):
         if not self.repository.pinned:
@@ -46,7 +47,9 @@ class CollectionRecovery:
                                            digest=digest, size=size)
                     identities[table, owner] = identity
             restored = {}
-            for key, record in records.items():
+            for table, owner, *_ in retained:
                 check_cancellable_work()
-                restored[key] = self.files.restore(record, identities.get(key))
-            self.repository.replace(restored)
+                record = records[plan.owner_key(table, owner)]
+                restored[table, owner] = self.files.restore(record, identities.get((table, owner)))
+            with self.relocating(table for table, _ in restored):
+                self.repository.replace(restored)

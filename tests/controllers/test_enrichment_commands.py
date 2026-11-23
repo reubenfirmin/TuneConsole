@@ -108,6 +108,50 @@ def test_drain_prefers_visible_radio_work_and_leaves_unfinished_jobs_queued():
     artwork.assert_not_called()
 
 
+@pytest.mark.parametrize('providers,pending', [([], True), ([], False), (['provider'], True)])
+def test_idle_drain_probes_pending_tracks_once_and_retries_artwork(providers, pending):
+    settings = Mock(spec_set=['get_setting'])
+    settings.get_setting.side_effect = lambda key, default=None: default
+    queue = Mock(spec_set=['priority_enrich_batch', 'next_enrich_batch', 'resweep_batch', 'save_caught_up_at'])
+    queue.priority_enrich_batch.return_value = []
+    queue.next_enrich_batch.return_value = []
+    queue.resweep_batch.return_value = []
+    reports = Mock(spec_set=['has_pending_tracks'])
+    reports.has_pending_tracks.return_value = pending
+    state = Mock(spec_set=['expire_provider_alternatives', 'reconcile_provider_configuration'])
+    configuration = {name: {'status': 'available'} for name in providers}
+    run_batch, artwork, activity = Mock(), Mock(return_value=1), Mock()
+    command = EnrichmentDrain(settings, queue, reports, state, now=lambda: 100,
+        configuration=lambda _: configuration, run_batch=run_batch, retry_artwork=artwork,
+        refresh=Mock(), logger=Mock())
+    command.had_work = True
+
+    assert command.drain(priority=['visible'], activity=activity) == (1, set())
+    assert command.had_work == pending
+    assert activity.call_args.kwargs['clear'] == (not pending)
+    assert activity.call_args.kwargs['state'] == ('waiting' if providers else 'blocked')
+    reports.has_pending_tracks.assert_called_once_with()
+    artwork.assert_called_once()
+    run_batch.assert_not_called()
+    if pending:
+        queue.save_caught_up_at.assert_not_called()
+    else:
+        queue.save_caught_up_at.assert_called_once_with(100)
+    if providers:
+        queue.priority_enrich_batch.assert_called_once()
+        queue.next_enrich_batch.assert_called_once()
+        queue.resweep_batch.assert_called_once()
+    else:
+        queue.priority_enrich_batch.assert_not_called()
+        queue.next_enrich_batch.assert_not_called()
+        queue.resweep_batch.assert_not_called()
+        configuration['provider'] = {'status': 'available'}
+        queue.priority_enrich_batch.return_value = [{'job_id': 1, 'identity_key': 'visible'}]
+        run_batch.return_value = {1}
+        assert command.drain(priority=['visible']) == (1, {'visible'})
+        reports.has_pending_tracks.assert_called_once_with()
+
+
 def test_matching_policies_use_supplied_envelopes_and_keep_version_qualifiers():
     recording = {'title': 'Song (Live)', 'artist-credit': [{'name': 'Artist'}]}
     assert musicbrainz._matches_recording(recording, 'Song (Live)', 'Artist')

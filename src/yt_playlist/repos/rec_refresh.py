@@ -1,28 +1,48 @@
 """A durable, coalesced notification that recommendation inputs changed."""
+from yt_playlist.core.content_preparation_state import ACKNOWLEDGED, FIT_VERSION, REFRESH_REVISION
+from yt_playlist.core.recommendation_invalidation import queue_refresh
+from yt_playlist.core.worker_settings import number, numbers, read, save
 from yt_playlist.repos.base import Repo, synchronized
+
 
 class RecRefreshRepo(Repo):
     @synchronized
+    def version(self):
+        return read(self.conn, FIT_VERSION)
+
+    @synchronized
+    def save_version(self, version):
+        with self.conn.atomic(join=True):
+            save(self.conn, FIT_VERSION, version)
+
+    @synchronized
+    def complete_fit(self, version, revision):
+        with self.conn.atomic(join=True):
+            save(self.conn, FIT_VERSION, version)
+            self._acknowledge(revision)
+
+    @synchronized
     def revision(self):
-        row = self.conn.execute("SELECT revision FROM rec_change_queue WHERE kind='refresh' AND item=''").fetchone()
-        return row[0] if row else None
+        revision, acknowledged = numbers(self.conn, REFRESH_REVISION, ACKNOWLEDGED)
+        return revision if revision != acknowledged else None
 
     @synchronized
     def enqueue(self):
-        self.conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
-                          "ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1")
+        queue_refresh(self.conn)
         self.conn.commit()
 
     @synchronized
     def publish_notification(self):
-        """Commit this notification, or join a legacy publisher of this row."""
+        """Commit this notification, or join the publisher's transaction."""
         with self.conn.atomic(join=True):
-            self.conn.execute("INSERT INTO rec_change_queue(kind,item) VALUES ('refresh','') "
-                              "ON CONFLICT(kind,item) DO UPDATE SET revision=revision+1")
+            queue_refresh(self.conn)
 
     @synchronized
     def acknowledge(self, revision):
         """Commit acknowledgement of only the notification captured before this fit."""
         with self.conn.atomic():
-            self.conn.execute("DELETE FROM rec_change_queue WHERE kind='refresh' AND item='' AND revision=?",
-                              (revision,))
+            self._acknowledge(revision)
+
+    def _acknowledge(self, revision):
+        if revision is not None and number(self.conn, REFRESH_REVISION) == revision:
+            save(self.conn, ACKNOWLEDGED, revision)

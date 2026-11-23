@@ -5,7 +5,7 @@ dependency indexes; their selected field references do not copy native values or
 matching documents into a second historical payload store.
 """
 from collections import OrderedDict
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 import json
 
 from . import metadata_deliveries as deliveries
@@ -18,6 +18,13 @@ RUNTIME_HEAD_SQL = '''CREATE TABLE metadata_native_delivery_heads (
     source_key TEXT PRIMARY KEY NOT NULL REFERENCES rec_musical_sources(source_key) ON DELETE CASCADE,
     run_id TEXT NOT NULL,accepted_at REAL NOT NULL,
     result_hash BLOB CHECK(result_hash IS NULL OR (typeof(result_hash)='blob' AND length(result_hash)=32))) WITHOUT ROWID'''
+SELECTED_OBSERVATIONS = ('FROM rec_musical_sources s JOIN json_each(s.selected_observations) f '
+                         'JOIN native_metadata_observations o ON o.id=f.atom ')
+
+
+def select_observation(conn, source_key, field, observation_id):
+    conn.execute('UPDATE rec_musical_sources SET selected_observations=json_set(selected_observations,?,?) '
+                 'WHERE source_key=?', ('$.' + field, observation_id, source_key))
 
 
 def install_runtime_heads(conn, context=None):
@@ -44,8 +51,7 @@ def installed_runtime_head(conn, key, previous):
     # At most the finite selected fields are inspected. This also retains a
     # newer identical legacy delivery, whose selection advanced without a new
     # model-input revision. No historical graph is rebuilt on ordinary startup.
-    row = conn.execute('SELECT d.id,d.delivery_key,d.observed_at FROM musical_source_observations s '
-        'JOIN native_metadata_observations o ON o.id=s.observation_id '
+    row = conn.execute('SELECT d.id,d.delivery_key,d.observed_at ' + SELECTED_OBSERVATIONS +
         'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? '
         'ORDER BY d.observed_at DESC,d.id DESC LIMIT 1', (key,)).fetchone()
     if row is None or row['observed_at'] is None:
@@ -57,9 +63,13 @@ def installed_runtime_head(conn, key, previous):
 
 
 def retain_runtime_head(conn, key, head):
-    conn.execute('INSERT INTO metadata_native_delivery_heads VALUES (?,?,?,?) ON CONFLICT(source_key) DO UPDATE SET '
-        'run_id=excluded.run_id,accepted_at=excluded.accepted_at,result_hash=excluded.result_hash',
-        (key, head['run_id'], head['accepted_at'], head['result_hash']))
+    conn.execute('UPDATE rec_musical_sources SET accepted_run=?,accepted_at=?,accepted_hash=? WHERE source_key=?',
+                 (head['run_id'], head['accepted_at'], head['result_hash'], key))
+
+
+def runtime_head(conn, key):
+    return conn.execute('SELECT accepted_run run_id,accepted_at,accepted_hash result_hash '
+                        'FROM rec_musical_sources WHERE source_key=? AND accepted_run IS NOT NULL', (key,)).fetchone()
 
 
 def available(conn):
@@ -110,6 +120,19 @@ def source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
     return installed_source_values(conn, source_key, max_bytes, store=store)
 
 
+@contextmanager
+def _observation_reads(conn, store, source_key):
+    with ExitStack() as guards:
+        if store is not None:
+            guards.enter_context(keyed_reads(store, 'rec_musical_sources', [source_key]))
+            with keyed_reads(store, 'native_metadata_observations', []):
+                references = conn.execute('SELECT o.id,o.delivery_id ' + SELECTED_OBSERVATIONS +
+                                          'WHERE s.source_key=?', (source_key,)).fetchall()
+            guards.enter_context(keyed_reads(store, 'native_metadata_observations', [row[0] for row in references]))
+            guards.enter_context(keyed_reads(store, 'metadata_deliveries', [row[1] for row in references]))
+        yield
+
+
 def source_reference(conn, source_key, max_bytes=256 * 1024, *, store=None):
     """Capture exact immutable source references without opening delivery files."""
     from . import metadata_runtime as runtime
@@ -118,18 +141,11 @@ def source_reference(conn, source_key, max_bytes=256 * 1024, *, store=None):
         row = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (source_key,)).fetchone()
         reference = metadata_file_writes.reference(conn, 'native', (source_key,), row[0], store=store) if row else None
         return {'key': source_key, 'revision': row[0] if row else None, **({'file': reference} if reference else {})}
-    with ExitStack() as guards:
-        if store is not None:
-            guards.enter_context(keyed_reads(store, 'musical_source_observations', [source_key]))
-            observations = [row[0] for row in conn.execute(
-                'SELECT observation_id FROM musical_source_observations WHERE source_key=?', (source_key,))]
-            guards.enter_context(keyed_reads(store, 'native_metadata_observations', observations))
-            delivery_ids = [row[0] for observation in observations for row in conn.execute(
-                'SELECT delivery_id FROM native_metadata_observations WHERE id=?', (observation,))]
-            guards.enter_context(keyed_reads(store, 'metadata_deliveries', delivery_ids))
-        rows = [dict(row) for row in conn.execute('SELECT o.*,d.raw_filename,d.raw_digest,d.raw_byte_size,d.raw_offset '
-            'FROM musical_source_observations s JOIN native_metadata_observations o ON o.id=s.observation_id '
-            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field', (source_key,))]
+    with _observation_reads(conn, store, source_key):
+        rows = [dict(row) for row in conn.execute('SELECT o.*,l.raw_filename,l.raw_digest,l.raw_byte_size,l.raw_offset '
+            + SELECTED_OBSERVATIONS +
+            'JOIN metadata_delivery_locations l ON l.id=o.delivery_id '
+            'WHERE s.source_key=? ORDER BY o.field', (source_key,))]
         if sum(row['raw_byte_size'] for row in rows) > max_bytes:
             raise WorkBudgetExceeded('Source profile input exceeds byte budget')
         return {'observations': rows}
@@ -137,18 +153,9 @@ def source_reference(conn, source_key, max_bytes=256 * 1024, *, store=None):
 
 def installed_source_values(conn, source_key, max_bytes=256 * 1024, *, store=None):
     """Read captured SQL evidence, including while verifying its replacement."""
-    with ExitStack() as guards:
-        if store is not None:
-            guards.enter_context(keyed_reads(store, 'musical_source_observations', [source_key]))
-            observations = [row[0] for row in conn.execute(
-                'SELECT observation_id FROM musical_source_observations WHERE source_key=?', (source_key,))]
-            guards.enter_context(keyed_reads(store, 'native_metadata_observations', observations))
-            delivery_ids = [row[0] for observation in observations for row in conn.execute(
-                'SELECT delivery_id FROM native_metadata_observations WHERE id=?', (observation,))]
-            guards.enter_context(keyed_reads(store, 'metadata_deliveries', delivery_ids))
-        rows = conn.execute('SELECT o.*,d.raw_byte_size FROM musical_source_observations s '
-                            'JOIN native_metadata_observations o ON o.id=s.observation_id '
-                            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY s.field',
+    with _observation_reads(conn, store, source_key):
+        rows = conn.execute('SELECT o.*,d.raw_byte_size ' + SELECTED_OBSERVATIONS +
+                            'JOIN metadata_deliveries d ON d.id=o.delivery_id WHERE s.source_key=? ORDER BY o.field',
                             (source_key,)).fetchall()
         # Conservative bound includes repeated delivery reads; no unbounded provider
         # document is loaded to discover that the profile budget was exceeded.
@@ -171,10 +178,8 @@ def _publish_source(conn, observation_id, payload, provider, recording_id, run_i
     if scope not in ('recording', 'artist', 'release'):
         return
     key = json.dumps([provider, scope, entity], separators=(',', ':'), ensure_ascii=False)
-    previous = conn.execute('SELECT observation_id FROM musical_source_observations WHERE source_key=? AND field=?',
-                            (key, payload['field'])).fetchone()
-    changed = previous is None or _profile_value(read(conn, previous[0])) != _profile_value(payload)
-    source = conn.execute('SELECT 1 FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
+    source = conn.execute('SELECT selected_observations->>? FROM rec_musical_sources WHERE source_key=?',
+                          (payload['field'], key)).fetchone()
     if source is None:
         # The legacy payload column is removed by the final owner cutover. The
         # staged adapter keeps only an empty placeholder, never another value.
@@ -182,11 +187,9 @@ def _publish_source(conn, observation_id, payload, provider, recording_id, run_i
         columns, placeholder = (',payload', ",'{}'") if has_payload else ('', '')
         conn.execute(f'INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id{columns}) VALUES (?,?,?,?{placeholder})',
                      (key, provider, scope, entity))
-    elif changed:
+    elif source[0] is None or _profile_value(read(conn, source[0])) != _profile_value(payload):
         conn.execute('UPDATE rec_musical_sources SET revision=revision+1 WHERE source_key=?', (key,))
-    conn.execute('INSERT INTO musical_source_observations(source_key,field,observation_id) VALUES (?,?,?) '
-                 'ON CONFLICT(source_key,field) DO UPDATE SET observation_id=excluded.observation_id '
-                 'WHERE observation_id<>excluded.observation_id', (key, payload['field'], observation_id))
+    select_observation(conn, key, payload['field'], observation_id)
     conn.execute('DELETE FROM rec_musical_links WHERE recording_id=? AND source_key<>? AND delivery_id<>? '
                  'AND EXISTS(SELECT 1 FROM rec_musical_sources s WHERE s.source_key=rec_musical_links.source_key '
                  'AND s.provider=? AND s.scope=?)', (recording_id, key, run_id, provider, scope))
@@ -210,7 +213,7 @@ def _record(conn, entry_id, provider, observations, *, run_id, now, recording_id
         group = grouped.setdefault((payload['scope'], payload['entity_id']), [])
         group.append(payload)
         prepared.append(payload)
-    subject = conn.execute('SELECT video_id FROM catalog_entries WHERE id=? AND recording_id=?',
+    subject = conn.execute('SELECT video_id FROM track_sources WHERE id=? AND recording_id=?',
                            (entry_id, recording_id)).fetchone()
     if subject is None:
         raise ValueError('Native metadata input changed before capture')
@@ -244,8 +247,7 @@ def _record_runtime(conn, entry_id, provider, grouped, *, run_id, now, recording
         source = conn.execute('SELECT revision FROM rec_musical_sources WHERE source_key=?', (key,)).fetchone()
         previous = files.read(conn, 'native', (key,), source[0]) if source else {}
         normalized = {payload['field']: _profile_value(payload) for payload in values}
-        head = conn.execute('SELECT run_id,accepted_at,result_hash FROM metadata_native_delivery_heads WHERE source_key=?',
-                            (key,)).fetchone()
+        head = runtime_head(conn, key)
         if head is None:
             head = installed_runtime_head(conn, key, previous)
         result_hash = _result_hash(values)
@@ -259,7 +261,8 @@ def _record_runtime(conn, entry_id, provider, grouped, *, run_id, now, recording
             # First accepted delivery wins a timestamp tie. Replays retain
             # their original capture time rather than renewing freshness.
             continue
-        current = {**previous.get('observations', {}), **normalized}
+        current = {**{field: value for field, value in previous.get('observations', {}).items() if field in FIELDS},
+                   **normalized}
         changed = not source or current != previous.get('observations', {})
         if changed:
             revision = source[0] + 1 if source else 1

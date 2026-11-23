@@ -12,7 +12,7 @@ def stamp(local, timezone='UTC'):
 
 
 def account(store, timezone='UTC'):
-    iid = store.accounts.upsert_account('main', 'bridge', None, True)
+    iid = store.accounts.upsert_account('main', None, True)
     with store.conn:
         listening.calendar(store.conn, iid, timezone)
     return iid
@@ -208,7 +208,7 @@ def test_alias_collisions_do_not_reproject_unrelated_foreign_history(store, monk
 
 @pytest.mark.parametrize('partial', [False, True])
 def test_recording_association_scopes_accounts_sources_dst_and_ambiguity(store, monkeypatch, partial):
-    iids = [store.accounts.upsert_account(name, name, None, index==0) for index,name in enumerate(('a', 'b'))]
+    iids = [store.accounts.upsert_account(name, None, index==0) for index,name in enumerate(('a', 'b'))]
     for iid in iids:
         with store.conn:
             listening.calendar(store.conn, iid, 'UTC')

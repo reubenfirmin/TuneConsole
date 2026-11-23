@@ -6,9 +6,9 @@ import pytest
 
 
 def _configure_accounts(s, *, with_brand=False):
-    s.accounts.upsert_account("main", "bridge", None, True)
+    s.accounts.upsert_account("main", None, True)
     if with_brand:
-        s.accounts.upsert_account("band", "bridge", "10345", False)
+        s.accounts.upsert_account("band", "10345", False)
     return s
 
 
@@ -140,7 +140,7 @@ def test_playlist_provenance_recorded(store):
 
 def test_main_remote_account_matches_without_a_configured_master(store):
     s = store
-    s.accounts.upsert_account("only", "bridge", None, False)     # configured, but nothing is master
+    s.accounts.upsert_account("only", None, False)     # configured, but nothing is master
     ident = s.accounts.get_accounts()[0].id
     assert live_plays.handle_play_event(_ctx(s), _msg(), 1000.0) is True
     assert s.history.play_events_since(0)[0]["account_id"] == ident
@@ -159,25 +159,36 @@ def test_live_play_and_history_backfill_share_browser_date(store):
     assert s.history.play_events_since(0)[0]["played_at"] == now
 
 
-def test_selected_album_playback_is_context_evidence_not_organic_track_learning(store):
+@pytest.mark.parametrize('already_in_history', [False, True])
+@pytest.mark.parametrize('browse_only', [False, True])
+def test_selected_album_playback_is_context_evidence_not_organic_track_learning(
+        store, already_in_history, browse_only):
     from yt_playlist.core import album_playback_context
-    from yt_playlist.library import listening_composition as layers
-    from yt_playlist.rec import choice_evidence
+    from yt_playlist.library import listening_composition as layers, player_events
+    from yt_playlist.rec import choice_evidence, choice_learning, transient
 
     s = _configure_accounts(store, with_brand=True)
     s.tracks.upsert_track('v1', 'Song', 'Artist', None, None)
     s.tracks.upsert_track('v2', 'Next', 'Artist', None, None)
-    oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}],
-                                990, context={})
+    oid = choice_evidence.issue(s, 'albums', [{'id': 'album', 'keys': ['song|artist']}], 990, context={})
     choice_evidence.respond(s, oid, 'choice', 991, option_id='album', action_id='chosen')
     with s.conn:
         album_playback_context.put(s.conn, {'opportunity_id': oid,
             'browse': 'album', 'playlist': 'OLAK-album', 'videos': ['v1', 'v2'],
             'at': 991, 'action_id': 'chosen'})
-    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album'), 1000)
+    if already_in_history:
+        s.history.import_play_events(1, [('song|artist', 'v1', 1000)])
+    queue = {'playlist': '', 'albumBrowseId': 'album'} if browse_only else {'playlist': 'OLAK-album'}
+    assert live_plays.handle_play_event(_ctx(s), _msg(**queue), 1000) is not already_in_history
+    event, = s.history.play_events_since(0)
+    assert event['played_at'] == 1000
+    assert event['playlist_ytm_id'] == (None if browse_only else 'OLAK-album')
     assert s.conn.execute('SELECT is_generated FROM play_events').fetchone()[0] == 1
     assert layers._plays(s, 0) == []
+    assert dict(transient.recent_sources(s, 1001)[1]) == {}
     assert choice_evidence.compile_report(s, 1001)['formats']['albums']['starts'] == 1
+    interest, = choice_learning.contexts(s, 1001)
+    assert interest['choice_action_id'] == 'chosen' and interest['choice_start_at'] == 1000
     # The first verified account owns the pending queue; another account is not attributed.
     pending = album_playback_context.load(s.conn)
     assert pending['account_id'] == 1
@@ -185,12 +196,30 @@ def test_selected_album_playback_is_context_evidence_not_organic_track_learning(
                                                  account_id=2) is None
     assert choice_evidence.album_playback_context(s, _msg(playlist='OLAK-album', videoId='outside'),
                                                  1001, account_id=1) is None
+    if browse_only:
+        ending = {'kind': 'ended', 'videoId': 'v1', 'brandId': '', 'playlist': '',
+                  'position': 100, 'duration': 100}
+        assert player_events.handle_player_event(_ctx(s), {**ending, 'videoId': 'v2'}, 1101)
+        assert player_events.handle_player_event(_ctx(s), {**ending, 'brandId': '10345'}, 1102)
+        assert player_events.handle_player_event(_ctx(s), {**ending, 'playlist': 'PL-unrelated'}, 1102.5)
+        episodes = choice_evidence.compile_report(s, 1103)['formats']['albums']
+        assert episodes['unknown_ending_episodes'] == 1
+        assert episodes['completion_episodes'] == 0
+        assert player_events.handle_player_event(_ctx(s), ending, 1104)
+        assert player_events.handle_player_event(_ctx(s), {**ending, 'kind': 'track_exit'}, 1105)
+        episodes = choice_evidence.compile_report(s, 1106)['formats']['albums']
+        assert episodes['observed_exit_episodes'] == episodes['completion_episodes'] == 1
+        assert episodes['unknown_ending_episodes'] == 0
     # Album continuation stays quarantined even though it contains multiple tracks.
-    assert live_plays.handle_play_event(_ctx(s), _msg(playlist='OLAK-album', title='Next', videoId='v2'), 1200)
+    assert live_plays.handle_play_event(_ctx(s), _msg(**queue, title='Next', videoId='v2'), 1200)
     assert layers._plays(s, 0) == []
     # A later independent direct choice has its own organic evidence.
     assert live_plays.handle_play_event(_ctx(s), _msg(), 5000)
     assert [row['identity_key'] for row in layers._plays(s, 0)] == ['song|artist']
+    if browse_only:
+        assert player_events.handle_player_event(_ctx(s), {**ending, 'kind': 'track_exit', 'position': 2}, 5002)
+        outcomes = list(s.rec_ledger.evidence().records('response'))
+        assert sorted(row['at'] for row in outcomes if row['details'].get('player_event_id')) == [1104, 1105]
 
 
 def test_album_attribution_reads_committed_context_during_another_write(file_backed_store):
@@ -202,7 +231,7 @@ def test_album_attribution_reads_committed_context_during_another_write(file_bac
     store = file_backed_store
     writing, release = Event(), Event()
     try:
-        account = store.accounts.upsert_account('main', 'bridge', None, True)
+        account = store.accounts.upsert_account('main', None, True)
         pending = {'opportunity_id': 'chosen', 'browse': 'album', 'playlist': 'OLAK-album',
                    'videos': ['v1'], 'at': 991, 'account_id': account}
         with store._lock, store.conn:

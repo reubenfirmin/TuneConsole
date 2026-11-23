@@ -17,7 +17,7 @@ def source(store, tmp_path, monkeypatch):
     monkeypatch.setenv("YT_PLAYLIST_HOME", str(tmp_path))
     monkeypatch.setattr(executor, "with_retry", lambda read: read())
     monkeypatch.setattr(playlist_backups, "with_retry", lambda read: read())
-    iid = store.accounts.upsert_account("Main", "bridge", None, True)
+    iid = store.accounts.upsert_account("Main", None, True)
     pid = store.playlists.upsert_playlist(iid, "SOURCE", "Cached title", 1, "", 1)
     tid = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
     store.playlists.set_playlist_tracks(pid, [tid])
@@ -42,7 +42,7 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
         new = store.tracks.upsert_track("new", "Added remotely", "Artist", None, 200)
         one = store.tracks.upsert_track("one", "Cached song", "Artist", None, 200)
         store.playlists.set_playlist_tracks(pid, [one, new])
-        target = store.accounts.upsert_account("Other", "bridge", None, False)
+        target = store.accounts.upsert_account("Other", None, False)
         destination = FakeClient(catalog=client._catalog)
         result = executor.copy_or_move_playlist(store, pid, target, client, destination,
                                                 1000000, delete_source=True)
@@ -55,8 +55,8 @@ def test_every_deletion_path_backs_up_current_order_and_occurrences(store, sourc
             aid = executor.store_plan(store, executor.MergePlan(pid, keep, [], []),
                                       "delete", "SOURCE", 1)
             executor.execute_planned(store, aid, {iid: client}, 1000000)
-    owner, = store.conn.execute('SELECT id,playlist_id,account_id,provider_playlist_id,file_status '
-                               "FROM playlist_backup_writes WHERE provider_playlist_id='SOURCE'").fetchall()
+    owner, = store.conn.execute('SELECT owner_id AS id,playlist_id,playlist_account_id,playlist_provider_id,file_status '
+                               "FROM collection_file_writes WHERE kind='playlist-backup' AND playlist_provider_id='SOURCE'").fetchall()
     backup = tmp_path / 'backups' / (owner['id'] + '.json')
     assert tuple(owner) == (backup.stem, pid, iid, 'SOURCE', 'ready')
     from yt_playlist.core import fao
@@ -153,7 +153,7 @@ def test_failed_backup_does_not_delete_or_overwrite_prior_recovery(
     assert not client.deleted
     assert store.playlists.get_playlist(pid) is not None
     assert store.actions.get_actions() == []
-    statuses = [row[0] for row in store.conn.execute('SELECT file_status FROM playlist_backup_writes')]
+    statuses = [row[0] for row in store.conn.execute("SELECT file_status FROM collection_file_writes WHERE kind='playlist-backup'")]
     assert statuses.count('ready') == 1
     assert statuses.count('pending') == (0 if failure in {'fetch', 'write'} else 1)
     if failure in {"file_fsync", "directory_fsync"}:

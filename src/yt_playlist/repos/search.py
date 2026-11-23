@@ -1,7 +1,6 @@
 """Bounded library search facts, without sampling or display construction."""
 from yt_playlist.repos.base import Repo, synchronized
-from yt_playlist.core.catalog_query import playable_tracks_sql
-from yt_playlist.core import album_memberships
+from yt_playlist.core.catalog_query import EXPLICIT_TRACKS_SQL, library_tracks_sql, playable_tracks_sql
 from yt_playlist.util.music_matching import match_score
 
 
@@ -16,18 +15,19 @@ class SearchRepo(Repo):
         pattern = _like(query)
         return [dict(row) for row in self.conn.execute(
             "WITH library_artists AS ("
-            " SELECT ta.artist_id,t.identity_key,t.thumbnail,CASE WHEN COALESCE(t.available,1)<>0 THEN NULLIF(t.video_id,'') END video_id,NULL album_browse FROM tracks t "
+            " SELECT ta.artist_id,t.identity_key,t.thumbnail,CASE WHEN COALESCE(t.available,1)<>0 "
+            f"THEN NULLIF(t.video_id,'') END video_id,NULL album_browse FROM ({library_tracks_sql()}) t "
             f" JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id UNION ALL "
-            " SELECT aa.artist_id,NULL,a.thumbnail,NULL,(SELECT p.provider_id FROM album_primary_provider_ids p "
-            " WHERE p.album_id=a.id AND p.provider='youtube') FROM albums a "
+            " SELECT aa.artist_id,NULL,a.thumbnail,NULL,(SELECT p.provider_id FROM album_provider_ids p "
+            " WHERE p.album_id=a.id AND p.provider='youtube' AND p.is_primary=1) FROM albums a "
             " JOIN album_artists aa ON aa.album_id=a.id "
-            f" WHERE EXISTS (SELECT 1 FROM {album_memberships.read_relation(self.conn)} m WHERE m.album_id=a.id)"
+            " WHERE EXISTS (SELECT 1 FROM saved_album_memberships m WHERE m.album_id=a.id)"
             ") SELECT a.id artist_id,a.name artist,COUNT(DISTINCT l.identity_key) n,MIN(l.thumbnail) thumb,"
             "MIN(l.video_id) video_id,MIN(l.album_browse) album_browse,"
             "(SELECT p.provider_id FROM artist_provider_ids p WHERE p.artist_id=a.id AND p.provider='youtube' "
             "ORDER BY p.provider_id LIMIT 1) browse_id "
             "FROM artists a JOIN library_artists l ON l.artist_id=a.id "
-            "WHERE NOT EXISTS (SELECT 1 FROM artist_redirects r WHERE r.retired_id=a.id) "
+            'WHERE a.redirect_artist_id IS NULL '
             "AND (a.name LIKE ? ESCAPE '\\' OR EXISTS (SELECT 1 FROM artist_aliases aa "
             "WHERE aa.artist_id=a.id AND aa.alias LIKE ? ESCAPE '\\')) "
             "GROUP BY a.id ORDER BY n DESC,a.name,a.id LIMIT ?", (pattern, pattern, limit))]
@@ -35,7 +35,7 @@ class SearchRepo(Repo):
     @synchronized
     def artist_tracks(self, artist_id, *, limit):
         eligible = playable_tracks_sql(
-            f'SELECT t.* FROM tracks t WHERE EXISTS (SELECT 1 FROM {self.entry_artists_table} ta '
+            f'SELECT t.* FROM ({library_tracks_sql()}) t WHERE EXISTS (SELECT 1 FROM {self.entry_artists_table} ta '
             'WHERE ta.entry_id=t.id AND ta.artist_id=?)')
         return [dict(row) for row in self.conn.execute(
             'SELECT title, artist, identity_key key, video_id vid, thumbnail thumb '
@@ -45,13 +45,13 @@ class SearchRepo(Repo):
     def artist_albums(self, artist_id, *, limit):
         return [dict(row) for row in self.conn.execute(
             "SELECT a.title album,p.provider_id browse,COALESCE(a.thumbnail,("
-            f" SELECT MIN(t.thumbnail) FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id "
+            f" SELECT MIN(t.thumbnail) FROM {self.album_tracks_table} at JOIN ({EXPLICIT_TRACKS_SQL}) t ON t.id=at.entry_id "
             " WHERE at.album_id=a.id)) thumb FROM albums a "
-            "JOIN album_primary_provider_ids p ON p.album_id=a.id AND p.provider='youtube' "
+            "JOIN album_provider_ids p ON p.album_id=a.id AND p.provider='youtube' AND p.is_primary=1 "
             "WHERE NULLIF(a.title,'') IS NOT NULL AND NULLIF(p.provider_id,'') IS NOT NULL AND ("
-            f" EXISTS (SELECT 1 FROM {self.album_tracks_table} at JOIN tracks t ON t.id=at.entry_id "
+            f" EXISTS (SELECT 1 FROM {self.album_tracks_table} at JOIN ({EXPLICIT_TRACKS_SQL}) t ON t.id=at.entry_id "
             f" JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id WHERE at.album_id=a.id AND ta.artist_id=?) "
-            f" OR (EXISTS (SELECT 1 FROM {album_memberships.read_relation(self.conn)} m WHERE m.album_id=a.id) "
+            " OR (EXISTS (SELECT 1 FROM saved_album_memberships m WHERE m.album_id=a.id) "
             " AND EXISTS (SELECT 1 FROM album_artists aa WHERE aa.album_id=a.id AND aa.artist_id=?))) "
             'ORDER BY a.id LIMIT ?', (artist_id, artist_id, limit))]
 
@@ -59,8 +59,8 @@ class SearchRepo(Repo):
     def artist_playlists(self, artist_id, *, excluded_group, limit):
         return [dict(row) for row in self.conn.execute(
             "SELECT p.id pid, p.provider_playlist_id ytm, p.title title, p.thumbnail thumb "
-            "FROM playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
-            "JOIN tracks t ON t.id=pt.track_id "
+            "FROM active_playlists p JOIN playlist_tracks pt ON pt.playlist_id=p.id "
+            "JOIN catalog_tracks t ON t.id=pt.track_id "
             f"JOIN {self.entry_artists_table} ta ON ta.entry_id=t.id "
             "LEFT JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id "
             "WHERE ta.artist_id=? AND (g.name IS NULL OR g.name<>?) "
@@ -70,15 +70,16 @@ class SearchRepo(Repo):
     def song_matches(self, query, *, limit):
         self.conn.create_function('music_search_score', 2,
                                   lambda title, artist: match_score(query, title, artist), deterministic=True)
-        eligible = playable_tracks_sql('SELECT * FROM tracks WHERE music_search_score(title,artist)>0')
+        score = 'max(music_search_score(title,artist),music_search_score(orig_title,orig_artist))'
+        eligible = playable_tracks_sql(f'SELECT * FROM ({library_tracks_sql()}) WHERE {score}>0')
         return [dict(row) for row in self.conn.execute(
             'SELECT title, artist, identity_key key, video_id vid, thumbnail thumb '
-            f'FROM ({eligible}) ORDER BY music_search_score(title,artist) DESC,title,video_id LIMIT ?', (limit,))]
+            f'FROM ({eligible}) ORDER BY {score} DESC,title,video_id LIMIT ?', (limit,))]
 
     @synchronized
     def playlist_matches(self, query, *, excluded_group, limit):
         return [dict(row) for row in self.conn.execute(
             "SELECT p.id pid, p.provider_playlist_id ytm, p.title title, p.thumbnail thumb "
-            "FROM playlists p LEFT JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id "
+            "FROM active_playlists p LEFT JOIN quarantined_playlists g ON g.playlist_scope_id=p.playlist_scope_id "
             "WHERE p.title LIKE ? ESCAPE '\\' AND (g.name IS NULL OR g.name<>?) "
             'GROUP BY p.id LIMIT ?', (_like(query), excluded_group, limit))]

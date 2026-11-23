@@ -179,7 +179,7 @@ def selected_vibe_inputs(store, monkeypatch, vibe_read_costs):
                         lambda *args, **kwargs: ('vibe-read-fixture', {'fixture': 'selected-vibe-read'}))
     with measured(vibe_read_costs, 'typed_publication'):
         publish_bundles(store, value, 1)
-    assert store.conn.execute('SELECT count(*) FROM prepared_outputs WHERE first_rank>0').fetchone()[0] > 0
+    assert store.conn.execute('SELECT count(*) FROM recommendation_chunks WHERE first_rank>0').fetchone()[0] > 0
     return value
 
 
@@ -220,7 +220,7 @@ def test_preparation_preserves_raw_genre_groups_and_refreshes_taxonomy(store):
                 ('fixture-left', 'Shared fixture label', 'jazz'),
                 ('fixture-right', 'Other fixture label', 'house'),
             ])
-        store.conn.execute("INSERT INTO genre_redirects VALUES ('fixture-old','fixture-current')")
+        store.conn.execute("UPDATE genre_catalog SET redirect_key='fixture-current' WHERE key='fixture-old'")
         store.conn.execute("INSERT INTO genre_alias VALUES ('shared fixture label','Shared fixture label',"
                            "'fixture-right','custom')")
     labels = ['Retired fixture style', 'fixture-old', 'Current fixture style',

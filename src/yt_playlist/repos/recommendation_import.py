@@ -1,7 +1,7 @@
 """SQL operations for importing a prepared legacy recommendation generation."""
 from .bundle_storage import BundleInputs
-from . import recommendation_publication as publication
-from yt_playlist.core import recommendation_pools
+from . import recommendation_file_writes, recommendation_publication as publication
+from yt_playlist.core import recommendation_chunks, recommendation_pools
 
 
 class RecommendationImportRepo(BundleInputs):
@@ -20,17 +20,13 @@ class RecommendationImportRepo(BundleInputs):
 
     def published_group(self, generation):
         with self._lock:
-            return bool(self.conn.execute('SELECT 1 FROM group_publications WHERE generation_id=?', (generation,)).fetchone())
-
-    def group_contains(self, generation, version):
-        with self._lock:
-            return bool(self.conn.execute('SELECT 1 FROM generation_groups WHERE generation_id=? AND group_version_id=?',
-                                          (generation, version)).fetchone())
+            return bool(self.conn.execute('SELECT 1 FROM group_generations WHERE id=? AND is_published=1',
+                                          (generation,)).fetchone())
 
     def pool_owner(self, digest):
         with self._lock:
-            row = self.conn.execute('SELECT p.id,p.complete,EXISTS(SELECT 1 FROM recommendation_pool_retirements r '
-                'WHERE r.pool_id=p.id) AS retiring FROM recommendation_pools p WHERE p.content_digest=?', (digest,)).fetchone()
+            row = self.conn.execute('SELECT id,complete,retiring FROM recommendation_pools WHERE content_digest=?',
+                                    (digest,)).fetchone()
             return {'id': row[0], 'complete': row[1], 'retiring': row[2]} if row else None
 
     def known_recordings(self, identities):
@@ -60,12 +56,20 @@ class RecommendationImportRepo(BundleInputs):
 
     def attach_pool(self, generation, slot, identity):
         with self._lock:
-            self.conn.execute('INSERT INTO recommendation_surface_pools VALUES (?,?,?,?,?)',
+            self.conn.execute('INSERT INTO recommendation_surface_pools (generation_id,surface,mode_key,purpose,pool_id) '
+                              'VALUES (?,?,?,?,?)',
                 (generation, slot.surface, slot.mode_key, slot.purpose, identity))
 
-    def record_output(self, plan, generation, output, file):
+    def reserve_output(self, output, integrity):
         with self._lock:
-            publication._output(self.conn, plan, generation, output, file)
+            return recommendation_file_writes.reserve(
+                self.conn, recommendation_chunks.OWNER, output.surface, output.chunk_key, integrity)
+
+    def record_output(self, plan, generation, output, reference, identity):
+        with self._lock:
+            recommendation_file_writes.complete(
+                self.conn, identity, recommendation_chunks.OWNER, output.surface, output.chunk_key, reference)
+            publication._output(self.conn, plan, generation, output, reference[0], identity)
 
     def ready(self, plan, generation):
         with self._lock:

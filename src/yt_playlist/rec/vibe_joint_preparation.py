@@ -1,10 +1,9 @@
 """Compatibility entry points for bounded joint Vibe preparation."""
 from yt_playlist.rec.vibe_joint_state import *
-from yt_playlist.rec.vibe_joint_state import _refresh_ready
 
 
-def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
-    work = steps(store, seconds=seconds, memory_bytes=memory_bytes)
+def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES, waiting=False):
+    work = steps(store, seconds=seconds, memory_bytes=memory_bytes, waiting=waiting)
     try:
         while True:
             next(work)
@@ -14,6 +13,6 @@ def step(store, *, seconds=10, memory_bytes=model.MEMORY_BYTES):
         work.close()
 
 
-def steps(store, *, seconds=10, input_seconds=2, memory_bytes=model.MEMORY_BYTES):
+def steps(store, *, seconds=10, input_seconds=2, memory_bytes=model.MEMORY_BYTES, waiting=False):
     from yt_playlist.library.vibe_composition import joint_preparation
-    return (yield from joint_preparation(store).steps(memory_bytes))
+    return (yield from joint_preparation(store).steps(memory_bytes, waiting=waiting))

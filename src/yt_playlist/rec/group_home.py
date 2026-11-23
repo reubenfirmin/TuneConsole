@@ -1,173 +1,218 @@
 """Assemble real Home offers from prepared graph regions, without fitting on requests."""
-import json
+from itertools import islice
 import math
 import random
 
 from yt_playlist.core.activity import check_stopping
-from yt_playlist.rec import group_learning, group_serving, home_themes, home_vibe, mode_surfaces, rec_params
-from yt_playlist.rec.eligibility import home_exclusions
+from yt_playlist.rec import artist_variety, group_learning, group_serving, group_viz, home_vibe, mode_surfaces, rec_params
 
 
 def inputs(store, now, preparation=None):
-    # A Ranker retains its reader; keep it and mutable ranking/filter caches
-    # local to this attempt.
-    # Full pools contain repeated musical profiles. Copying that cache on every
-    # hit costs more than these bounded reads and can exhaust the Home deadline
-    # before assembly starts. Completed selections/cards own retry reuse instead.
-    result = _inputs(store, now, preparation)
-    if result:
-        result = {**result, 'vibe_rank': (preparation['vibe_rank'] if preparation is not None
-                                        else home_vibe.ranker(store, now)),
-                  'filtered': {}, 'ranked': {}}
-    return result
+    head = (preparation['group_head'] if preparation is not None and 'group_head' in preparation
+            else group_viz.prepared(store))
+    if not head:
+        return None
+    vibe_rank = preparation['vibe_rank'] if preparation is not None else home_vibe.ranker(store, now)
+    if vibe_rank.preset:
+        # Vibe assembly reads ranks and group membership directly. The saved
+        # preview owns the recommendation generation, but its candidate lists are unused.
+        generations = (store.rec_proposals.preview_recommendations(head['generation'], group_serving.SCHEMA)
+                       if group_serving.enabled(store) else [])
+        preview = _selection_preview(head, generations[0]) if len(generations) == 1 else None
+    else:
+        preview = (preparation['group_preview'] if preparation is not None and 'group_preview' in preparation else
+                   group_serving.matching_preview(store, head['generation']))
+    generations = (preview or {}).get('recommendation_generations', [])
+    uses_preview = bool(preview and preview['generation'] == head['generation'] and len(generations) == 1)
+    if not uses_preview:
+        preview = _published_fallback(store, head)
+        if preview is None:
+            return None
+        generations = preview['recommendation_generations']
+    allocation = group_learning.mix_allocation(store, preview, now)
+    return {'preview': preview, 'uses_preview': uses_preview,
+            'recommendation_generation': generations[0], 'allocation': allocation,
+            'context': {**preview['context'], 'at': now, 'group_allocation': allocation,
+                        'group_choice_policy': group_learning.POLICY,
+                        'group_choice_parameters': group_learning.choice_bandit.parameters(store)},
+            'by_version': {group['version']: group for group in preview['groups']},
+            'meta': mode_surfaces.bundle_metadata(store, generation=generations[0]),
+            'vibe_rank': vibe_rank}
 
 
-def _inputs(store, now, preparation):
-    preview = (preparation['group_preview'] if preparation is not None and 'group_preview' in preparation else
-               store.rec_proposals.get_proposals(group_serving.SURFACE)
-               if group_serving.checkpoint(store) else None)
-    result = None
-    if preview:
-        if getattr(store, '_recommendation_files', False):
-            generations = preview.get('recommendation_generations', [])
-            if len(generations) != 1:
-                return None  # the worker must replace a preview of the retired JSON pools
-            allocation = group_learning.current_allocation(store, preview, now)
-            return {'preview': preview, 'typed_generation': generations[0], 'allocation': allocation,
-                    'context': {**preview['context'], 'at': now, 'group_allocation': allocation,
-                                'group_choice_policy': group_learning.POLICY,
-                                'group_choice_parameters': group_learning.choice_bandit.parameters(store)},
-                    'by_version': {group['version']: group for group in preview['groups']},
-                    'meta': mode_surfaces.bundle_metadata(store, generation=generations[0])}
-        bundles = (preparation['bundles'] if preparation is not None else
-                   json.loads(store.rec_proposals.group_pools_json() or '{}'))
-        pools = bundles.get('all', {})
-        keys = {item['key'] for pool in pools.values() for item in pool if item.get('key')}
-        # Allocation needs only the immutable hierarchy, not loaded memberships.
-        allocation = group_learning.current_allocation(store, preview, now)
-        blocked = home_exclusions(store, keys, now)
-        muted = store.rec_model.muted_artists()
-        owned = store.rec_query.group_candidates(keys)
-        genres = {key: t['genre'] for key, t in owned.items()}
-        weights = store.rec_model.get_weights(now=now)
-        maximum = 60 * rec_params.get_param(store, 'max_track_minutes')
-        ranked_genres = {t['key']: t.get('genre') or '' for pool in pools.values() for t in pool}
-        genre_axes = {'': ('', None), None: ('', None),
-                      **store.genres.feature_axes(set(genres.values()) | set(ranked_genres.values()))}
-        current = {}
-        for key, track in owned.items():
-            genre = genres.get(key) or ranked_genres.get(key) or ''
-            family, subgenre = genre_axes[genre]
-            duration = track['duration_s']
-            if (key not in blocked and track['artist'] not in muted
-                    and weights.get(f'genre:{family}', 1) != 0
-                    and weights.get(f'genre:{subgenre}', 1) != 0
-                    and not (duration and duration > maximum)):
-                current[key] = {**track, 'genre': genre}
-        pools = {lane: [{**item, **current[item['key']]} for item in pool
-                       if item['key'] in current and (not item.get('genre') or not genres.get(item['key'])
-                           or genre_axes[item['genre']][0] == genre_axes[genres[item['key']]][0])]
-                 for lane, pool in pools.items()}
-        result = {'preview': preview, 'pools': pools, 'allocation': allocation,
-                  'context': {**preview['context'], 'at': now, 'group_allocation': allocation,
-                              'group_choice_policy': group_learning.POLICY,
-                              'group_choice_parameters': group_learning.choice_bandit.parameters(store)},
-                  'by_version': {g['version']: g for g in preview['groups']},
-                  'blocked': blocked, 'muted': muted,
-                  'meta': bundles.get('_meta', {})}
-    return result
+def _published_fallback(store, head):
+    """Assemble over published membership while the Home preview catches up."""
+    publication = store.recommendations.head('home')
+    if publication is None:
+        return None
+    return _selection_preview(head, publication['id'])
 
 
-def assemble(store, now, epoch, data, *, include=(), avoid=()):
+def _selection_preview(head, generation):
+    context = {'schema': 1, 'group_generation': head['generation'],
+               'musical_groups': [{key: group.get(key) for key in
+                   ('group_id', 'version', 'parent_version', 'name', 'size')} for group in head['groups']]}
+    return {**head, 'context': context, 'recommendation_generations': [generation]}
+
+
+def assemble(store, now, epoch, data, *, include=(), avoid=(), mix_candidates=None):
     """Spend each leaf's allocation once, combining mass at a usable parent as needed."""
-    if 'typed_generation' in data:
-        from yt_playlist.rec import stored_groups
-        with stored_groups.selection(store, data['typed_generation'], now) as selected:
-            return _assemble(store, now, epoch, data, include, avoid, selected)
-    return _assemble(store, now, epoch, data, include, avoid)
+    from yt_playlist.rec import stored_groups
+    with stored_groups.selection(store, data['recommendation_generation'], now) as selected:
+        return _assemble(store, epoch, data, include, avoid, selected, mix_candidates)
 
 
-def _assemble(store, now, epoch, data, include, avoid, selected=None):
-    cap_artist = int(rec_params.get_param(store, 'modes_artist_cap'))
-    cap_album = int(rec_params.get_param(store, 'modes_album_cap'))
-    filter_key = (tuple(sorted(include)), tuple(sorted(avoid)))
-    if selected is None and filter_key not in data['filtered']:
-        pools = {lane: home_themes.matching_genres(store, pool, include=include, avoid=avoid)
-                 for lane, pool in data['pools'].items()}
-        data['filtered'][filter_key] = {lane: {t['key']: t for t in pool
-            if t.get('video_id') and t['key'] not in data['blocked'] and t.get('artist') not in data['muted']}
-            for lane, pool in pools.items()}
-    pools = data['filtered'][filter_key] if selected is None else {}
-    by_version = data['by_version']
-    meta = data['meta']
+def library_lanes(store, meta):
     comfort = meta.get('comfort_pool', 0) >= rec_params.get_param(store, 'comfort_min_pool')
     fourth = 'comfort' if comfort else 'temporal' if meta.get('year_cuts') else None
     lanes = ['wheelhouse', 'explore'] + ([fourth] if fourth else [])
     if comfort and meta.get('year_cuts'):
         lanes.append('temporal')
+    return lanes
+
+
+def _assemble(store, epoch, data, include, avoid, selected, mix_candidates):
+    cap_artist = int(rec_params.get_param(store, 'modes_artist_cap'))
+    cap_album = int(rec_params.get_param(store, 'modes_album_cap'))
+    filter_key = (tuple(sorted(include)), tuple(sorted(avoid)))
+    by_version = data['by_version']
+    meta = data['meta']
+    lanes = library_lanes(store, meta)
     vibe = data['vibe_rank']
-    rng = random.Random(f"{data['preview']['generation']}:{epoch}:{filter_key}:{vibe.preset}")
+    group_generation = data['preview']['generation']
+    rng = random.Random(f"{group_generation}:{epoch}:{filter_key}:{vibe.preset}")
+    defer_temporal = selected.preset and lanes[-2:] == ['comfort', 'temporal']
+    initial_lanes = lanes[:-1] if defer_temporal else lanes
+    ranks, memberships = selected.load_lanes(group_generation, initial_lanes, mix_candidates, data.get('memberships'))
+    use_matches = bool(selected.preset and ranks)
+    if selected.preset and not use_matches:
+        ranks, memberships = selected.load_lanes(group_generation, initial_lanes, memberships=memberships or None,
+                                                  matching_vibe=False)
+    eligibility = selected.lane_eligibility(ranks)
     cards, seen, used = [], set(), set()
+    pending_display = []
     for lane in lanes:
         if lane == 'temporal' and any(card['lane'] == 'comfort' for card in cards):
             continue
         check_stopping()
-        pool = pools.get(lane, {})
-        candidates = {}
-        def tracks(group):
-            if selected is not None:
-                return selected.tracks(group['version'], lane, epoch, include, avoid, seen,
-                                       cap_artist, cap_album, meta)
-            cache_key = (filter_key, vibe.preset, lane, epoch % 3 if lane == 'temporal' else None, group['version'])
-            if cache_key not in data['ranked']:
-                frame = group['frames'].get(lane, {})
-                items = [pool[key] for key in frame.get('keys', []) if key in pool]
-                if lane == 'temporal':
-                    lo, hi = meta['year_cuts']
-                    items = [t for t in items if mode_surfaces._in_band(t.get('year'), epoch % 3, lo, hi)]
-                data['ranked'][cache_key] = vibe(items)
-            items = [t for t in data['ranked'][cache_key] if t['key'] not in seen]
-            # Rotation starts within the first two mixes. Nothing beyond the
-            # third mix can affect feasibility, affinity or the selected tracks.
-            return mode_surfaces._diversify(items, cap_artist, cap_album,
-                                            limit=mode_surfaces.PROTO_SIZE * 3)
-        for leaf in data['preview']['groups']:
-            if not leaf.get('leaf'):
-                continue
-            group = leaf
-            while group:
-                version = group['version']
-                if version not in candidates:
-                    candidates[version] = tracks(group)
-                if group.get('display') and len(candidates[version]) >= mode_surfaces.PROTO_SIZE:
-                    break
-                group = by_version.get(group['parent_version'])
-            if group and group['version'] not in used:
-                candidates.setdefault('_weights', {}).setdefault(group['version'], 0.)
-                candidates['_weights'][group['version']] += data['allocation'].get(leaf['group_id'], 0.)
-        weights = candidates.pop('_weights', {})
+        lane_ranks, lane_eligibility, lane_uses_matches = ranks, eligibility, use_matches
+        if lane == 'temporal' and defer_temporal:
+            lane_ranks, memberships = selected.load_lanes(group_generation, [lane], memberships=memberships or None)
+            lane_eligibility = selected.lane_eligibility(lane_ranks)
+            lane_uses_matches = True
+        groups = selected.lane_groups(lane_ranks, memberships, lane, epoch, include, avoid, seen, meta,
+                                      eligibility=lane_eligibility)
+        fallback = {}
+
+        def choose_tracks(version):
+            if groups is None:
+                if version not in fallback:
+                    fallback[version] = selected.tracks(version, lane, epoch, include, avoid, seen,
+                                                        cap_artist, cap_album, meta)
+                return fallback[version]
+            return artist_variety.select(groups[version], cap_artist, cap_album,
+                                        limit=mode_surfaces.PROTO_SIZE * 3)
+
+        weights = _group_weights(data, used, choose_tracks if groups is None else groups.get,
+                                 distinct=bool(selected.preset))
+        if not weights and lane_uses_matches and groups is not None:
+            # Sparse scores or active filters may leave no group with a full mix.
+            lane_ranks, memberships = selected.load_lanes(group_generation, [lane], memberships=memberships or None,
+                                                          matching_vibe=False)
+            groups = selected.lane_groups(lane_ranks, memberships, lane, epoch, include, avoid, seen, meta,
+                                          eligibility=selected.lane_eligibility(lane_ranks))
+            weights = _group_weights(data, used, groups.get, distinct=True)
         if not weights:
             continue
-        # The graph supplies area mass; the current sound preference can select
-        # a different group as well as reordering tracks inside it.
-        def priority(version):
-            fit = (sum(t['serving_context']['vibe_affinity'] if selected is not None else vibe.affinity(t)
-                       for t in candidates[version][:mode_surfaces.PROTO_SIZE])
-                   / mode_surfaces.PROTO_SIZE)
-            weight = weights[version] * (math.exp(6 * (fit - .5)) if vibe.preset else 1)
-            return -math.log(max(rng.random(), 1e-12)) / max(weight, 1e-12)
-        version = min(weights, key=priority)
+        if selected.preset and groups is not None:
+            version, items = _vibe_group(groups, weights, rng, selected, cap_artist, cap_album)
+        else:
+            def priority(version):
+                weight = weights[version]
+                if vibe.preset:
+                    weight *= _vibe_weight(choose_tracks(version), vibe.affinity)
+                return -math.log(max(rng.random(), 1e-12)) / max(weight, 1e-12)
+
+            version = min(weights, key=priority)
+            items = choose_tracks(version)
         group = by_version[version]
-        items = candidates[version]
         # Rotate through a bounded ranked head rather than replaying the same
         # twelve tracks each time this region returns.
         start = (epoch * 3) % max(1, min(len(items), mode_surfaces.PROTO_SIZE * 2))
-        items = (items[start:] + items[:start])[:mode_surfaces.PROTO_SIZE]
+        rotated = items[start:] + items[:start]
+        if selected.preset:
+            rotated = artist_variety.distinct_edits(rotated)
+        size = mode_surfaces.PROTO_SIZE
+        items = list(islice(rotated, size))
+        if selected.preset and groups is not None and len(items) < size:
+            items = artist_variety.select(groups[version], cap_artist, cap_album,
+                                          limit=size, minimum=size, initial=items, unique_edits=True)
+        if not selected.preset:
+            selected.default_affinity(items)
+            if mix_candidates is None:
+                selected.reader.recommendations.explain_candidates(selected.source(lane), items)
         cards.append({'lane': lane, 'label': mode_surfaces._CARD_LABELS.get(lane,
                          mode_surfaces._BAND_LABELS[epoch % 3]),
                       'mode_id': None, 'ranker': 'musical-group', 'tracks': items,
                       'group_id': group['group_id'], 'group_version': version,
                       'group_generation': data['preview']['generation'], 'group_name': group['name']})
+        if selected.preset and groups is not None:
+            pending_display.append(cards[-1])
         seen.update(t['key'] for t in items)
         used.add(version)
+    if pending_display:
+        selected.hydrate(pending_display)
+        cards = [card for card in cards if len(card['tracks']) >= 4]
     return cards
+
+
+def _group_weights(data, used, members, *, distinct=False):
+    weights = {}
+    full = {}
+    for leaf in data['preview']['groups']:
+        if not leaf.get('leaf'):
+            continue
+        group = leaf
+        while group:
+            version = group['version']
+            if group.get('display'):
+                if version not in full:
+                    pool = members(version) or ()
+                    if distinct and len(pool) >= mode_surfaces.PROTO_SIZE:
+                        pool = list(islice(artist_variety.distinct_edits(pool), mode_surfaces.PROTO_SIZE))
+                    # Variety caps can relax to fill a mix. Edit uniqueness still applies.
+                    full[version] = len(pool) >= mode_surfaces.PROTO_SIZE
+                if full[version]:
+                    break
+            group = data['by_version'].get(group['parent_version'])
+        if group and version not in used:
+            weights[version] = weights.get(version, 0.) + data['allocation'].get(leaf['group_id'], 0.)
+    return weights
+
+
+def _vibe_weight(items, affinity):
+    size = mode_surfaces.PROTO_SIZE
+    fit = sum(affinity(track) for track in items[:size]) / size
+    return math.exp(6 * (fit - .5))
+
+
+def _vibe_group(grouped, weights, rng, selected, artist_cap, album_cap):
+    # Keep the same random draw and tie position for every feasible group.
+    # A perfect fit bounds the best possible score before sorting its tracks.
+    bounds = []
+    maximum = math.exp(3)
+    for position, (version, weight) in enumerate(weights.items()):
+        draw = -math.log(max(rng.random(), 1e-12))
+        bounds.append((draw / max(weight * maximum, 1e-12), position, version, weight, draw))
+    best = (math.inf, math.inf)
+    winner = None
+    for lower, position, version, weight, draw in sorted(bounds):
+        check_stopping()
+        if (lower, position) >= best:
+            break
+        items = selected.vibe_tracks(grouped[version], artist_cap, album_cap)
+        factor = _vibe_weight(items, lambda track: selected.affinities[track['key']])
+        score = (draw / max(weight * factor, 1e-12), position)
+        if score < best:
+            best, winner = score, (version, items)
+    return winner

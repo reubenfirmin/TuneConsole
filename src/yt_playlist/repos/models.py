@@ -9,8 +9,10 @@ from yt_playlist.library.models import Playlist, PlaylistMemberships, CleanupPre
 
 @dataclass
 class Account:
-    id: int; label: str; credential_ref: str
-    brand_account_id: str | None; is_master: bool; last_auth_ok: float | None
+    id: int
+    label: str
+    brand_account_id: str | None
+    is_master: bool
 
 
 @dataclass

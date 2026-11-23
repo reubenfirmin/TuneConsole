@@ -19,11 +19,6 @@ class WorkflowSettings:
                     for row in rows}
 
     def get(self, key, default=None):
-        if key.startswith(workflows.GC):
-            account, remote = workflows._gc_owner(key)
-            with self.files.retained():
-                rows = self.repository.workflow_documents('gc', account, remote)
-                return json.dumps(workflows.restore_gc(rows[0], self._read(rows[0], 'playlist-gc'))) if rows else default
         kind, account = workflows.receipt_key(key)
         value = self.receipts(account, kind=kind)
         return json.dumps(sorted(value) if kind == 'album' or account is None else value) if value else default
@@ -32,11 +27,6 @@ class WorkflowSettings:
         plans, next_ids = [], {}
         for key, raw in values.items():
             value = json.loads(raw) if raw is not None and raw != '' else None
-            if key.startswith(workflows.GC):
-                account, remote = workflows._gc_owner(key)
-                facts = self._facts('gc', account, remote, next_ids, reserve=value is not None)
-                plans.append(('gc', workflows.prepare_gc(account, remote, value, facts), None))
-                continue
             kind, account = workflows.receipt_key(key)
             if value is None:
                 plans.append(('delete', (kind, account), None))
@@ -49,16 +39,11 @@ class WorkflowSettings:
                 raise ValueError('Unsupported Spotify workflow receipt family')
         return self._publish(plans)
 
-    def _facts(self, kind, account, target, next_ids, *, reserve=True):
-        facts = self.repository.workflow_write_facts(kind, account, target)
-        table = 'gc' if kind == 'gc' else 'receipt'
-        facts = {**facts, 'next_id': max(facts['next_id'], next_ids.get(table, 1))}
-        if reserve and facts['prior'] is None:
-            next_ids[table] = facts['next_id']+1
-        return facts
-
     def _receipt(self, kind, account, fingerprint, value, next_ids, *, legacy=False, expected=None):
-        facts = self._facts(kind, account, fingerprint, next_ids)
+        facts = self.repository.workflow_write_facts(kind, account, fingerprint)
+        facts = {**facts, 'next_id': max(facts['next_id'], next_ids.get('receipt', 1))}
+        if facts['prior'] is None:
+            next_ids['receipt'] = facts['next_id']+1
         prepared = workflows.prepare_receipt(kind, account, fingerprint, value, facts, legacy=legacy, expected_revision=expected)
         return 'receipt', prepared, None
 
@@ -66,8 +51,8 @@ class WorkflowSettings:
         result = []
         for record, prepared, _ in plans:
             reference = None
-            if record != 'delete' and (record != 'gc' or prepared['value'] is not None):
-                kind = 'playlist-gc' if record == 'gc' else 'spotify-transfer'
+            if record == 'receipt':
+                kind = 'spotify-transfer'
                 integrity = self.files.describe(kind, prepared['identity'], prepared['value'])
                 prepared['file_id'] = self.repository.reserve_file(kind, prepared['identity'], integrity)
                 reference = self.files.publish_reserved(prepared['file_id'], kind, prepared['identity'], prepared['value'],

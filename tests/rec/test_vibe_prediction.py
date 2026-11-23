@@ -14,7 +14,7 @@ from tests.store_fixture_support import (
     bounded_consumer_schema, initialize_consumer, mock_snapshot_coordinator, native_sql_calls,
     reuse_reporting_reader, without_query_timing,
 )
-from yt_playlist.core import catalog, fao, schema_inspection, sqlite_database as store_core, vibe_provenance
+from yt_playlist.core import catalog, content_work, fao, schema_inspection, sqlite_database as store_core, vibe_provenance
 from yt_playlist.core.audio_vibe_contract import TAXONOMY_VERSION
 from yt_playlist.core.activity import WorkBudgetExceeded
 from yt_playlist.core.db_revisions import Revisions
@@ -42,14 +42,14 @@ def controlled_measurements(request, monkeypatch):
         return
     from types import SimpleNamespace
     from yt_playlist.library import vibe_composition
-    from yt_playlist.rec import audio_vibe_prediction
+    from experiments.audio_lab_tools.legacy import audio_vibe_prediction
 
     def predict(samples, **options):
         result = audio_vibe_prediction.predict(samples, use_model=False, **options)
         return {**result, 'suitability': {row['vibe']: row['score'] for row in result['ranking']}} if result else None
 
     monkeypatch.setattr(vibe_composition, 'prediction', lambda: SimpleNamespace(
-        capture=lambda: SimpleNamespace(predict=predict)))
+        capture=lambda: SimpleNamespace(predict=predict, usable_samples=lambda samples: samples)))
 
 
 @pytest.fixture(autouse=True)
@@ -127,16 +127,16 @@ def catalog_track(store, name, genre='Psybient', artist='Shared artist'):
     with atomic_write(store):
         seed_publication_subjects(store, [{'key': key, 'video_id': name, 'title': name,
             'artist': artist, 'genre': genre, 'duration_s': 240}])
-        tid = store.conn.execute('SELECT id FROM catalog_entries WHERE video_id=?', (name,)).fetchone()[0]
+        tid = store.conn.execute('SELECT id FROM track_sources WHERE video_id=?', (name,)).fetchone()[0]
         store.artists.observe(tid, artist, source='fixture')
     return tid, key
 
 
-def capture(store, video, *, calm=True, count=3):
-    run = str(uuid4())
+def capture(store, video, *, calm=True, count=3, run=None, start=0):
+    run = run or str(uuid4())
     now = 100 + store.conn.execute('SELECT COUNT(*) FROM sample_attributes').fetchone()[0]
     samples = []
-    for point in ('thirty', 'middle', 'two_thirds')[:count]:
+    for point in ('thirty', 'middle', 'two_thirds')[start:start + count]:
         row = sample(run_id=run, point=point, relaxed=.95 if calm else .05, aggressive=.05 if calm else .95)
         row['video_id'] = video
         row['traits']['arousal']['score'] = 1.4 if calm else 8.6
@@ -169,15 +169,13 @@ def drain(store, batch=8):
 
 
 def fits(store, key):
-    return store.musical_profiles.by_keys([key])[key]['vibes']['fits']
+    return store.musical_profiles.by_keys([key])[key].get('vibes', {}).get('fits', {})
 
 
 @pytest.fixture
 def individual_model_rollout(monkeypatch):
-    # Individual artifact rollout owns measured scores and their real cohort
-    # propagation. Do not refit the separate joint model at every refresh;
-    # test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift
-    # retains its real qualified preparation and durable generation references.
+    # Individual artifact rollout owns measured scores. Qualified joint
+    # preparation and its generation references have separate lifecycle coverage.
     monkeypatch.setattr(vibe_joint_preparation, 'qualified', lambda: False)
 
 
@@ -206,8 +204,6 @@ def fixed_measurement_version(monkeypatch):
 
 
 def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(file_backed_store, monkeypatch):
-    from yt_playlist.core import vibe_model_files
-
     store = file_backed_store
     assert vibe_joint_preparation.qualified()
     track(store, 'release-original')
@@ -218,14 +214,14 @@ def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(fi
     states = {vibe: vibe_joint_preparation.state(store, vibe) for vibe in vibe_joint_preparation.VIBES}
     assert all(vibe_joint_preparation.current(store, value) and value['outcome'] == 'ready'
                for value in states.values())
-    heads = [store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+    heads = [store.vibe_predictions.joint_state(vibe)[0]
              for vibe in vibe_joint_preparation.VIBES]
     assert len(set(heads)) == len(vibe_joint_preparation.VIBES)
     assert store.vibe_predictions.has_joint_scores(heads)
     assert store.conn.execute('SELECT 1 FROM recording_vibes v '
         'JOIN recordings r ON r.id=v.recording_id '
-        'JOIN prediction_model_generations g ON g.prediction_id=v.prediction_id '
-        'WHERE r.identity_key=?', (target,)).fetchone()
+        'JOIN predictions p ON p.id=v.prediction_id '
+        'WHERE r.identity_key=? AND p.model_generation IS NOT NULL', (target,)).fetchone()
     assert fits(store, target)['relax']['source'] == 'artist_genre'
 
     configuration = joint.configuration()
@@ -235,7 +231,7 @@ def test_ordinary_preparation_uses_qualified_release_and_rejects_config_drift(fi
     assert vibe_joint_preparation.posterior(store, 'relax') is None
 
 
-def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correction(store, monkeypatch):
+def test_direct_audio_stays_authoritative_after_a_provider_component_correction(store, monkeypatch):
     from fastapi.testclient import TestClient
 
     from tests.audio_model_support import disable_models
@@ -245,10 +241,11 @@ def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correcti
     disable_models(monkeypatch)
     entry, key = track(store, 'override-song')
     with store.conn:
-        catalog.choose_field(store.conn, entry, 'energy', .1, now=10)
+        catalog.choose_field(store.conn, entry, 'mood_relaxed', .9, now=10)
     drain(store)
     item = {'musical': musical_character.load(store, [key])[key]}
-    assert musical_character.intensity_evidence(item) == (.1, 1)
+    assert musical_character.dimension(item, 'intensity')[0] < .5
+    assert musical_character.intensity_evidence(item) == (None, 0)
 
     run = str(uuid4())
     app = create_app(store, lambda: {}, now_fn=lambda: 1000, background_work=False)
@@ -261,19 +258,21 @@ def test_explicit_intensity_stays_authoritative_after_audio_and_a_later_correcti
     frozen = store.audio_vibes.samples(run)
     assert len(frozen) == 3
 
-    for correction in (.1, .2):
-        if correction == .2:
+    intensity = None
+    for correction in (.9, .8):
+        if correction == .8:
             with store.conn:
-                catalog.choose_field(store.conn, entry, 'energy', correction, now=1001)
+                catalog.choose_field(store.conn, entry, 'mood_relaxed', correction, now=1001)
         drain(store)
         item = {'musical': musical_character.load(store, [key])[key]}
-        assert item['musical']['dimensions']['intensity']['override'] is True
+        assert item['musical']['dimensions']['relaxed']['override'] is True
         assert {fit['source'] for fit in item['musical']['vibes']['fits'].values()} == {'audio_measurement'}
-        assert musical_character.intensity_evidence(item) == (correction, 1)
-        assert musical_character.intensity(item) == correction
         context = musical_character.provenance(item)
-        assert context['intensity'] == correction and context['intensity_support'] == 1
-        assert context['intensity_source'] is None and context['intensity_vibe'] is None
+        assert context['intensity_support'] == 1 and context['intensity_source'] == 'specialist_ensemble'
+        assert {component['source'] for component in context['intensity_ensemble']['components'].values()} == {
+            'audio_measurement'}
+        intensity = context['intensity'] if intensity is None else intensity
+        assert musical_character.intensity_evidence(item) == (intensity, 1)
     assert store.audio_vibes.samples(run) == frozen
 
 
@@ -419,35 +418,201 @@ def test_consistent_distinct_songs_strengthen_sparse_prediction_and_disagreement
         joint.fit([crowded], 'relax', memory_bytes=12 * 1024 * 1024)
 
 
-def test_audio_wins_then_joint_artist_and_subgenre_then_sparse_fallback(
-        prediction_store, qualified_candidate, relax_joint_channel):
-    store = prediction_store
-    _tid, measured = catalog_track(store, 'measured')
-    _tid, same = catalog_track(store, 'same')
-    _tid, other_style = catalog_track(store, 'other-style', 'Detroit Techno')
-    _tid, other_artist = catalog_track(store, 'other-artist', artist='Another artist')
-    _tid, empty = catalog_track(store, 'empty', 'Electronic', 'Unrelated')
+def test_audio_wins_then_joint_projection_requires_a_sampled_artist(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel, fixed_measurement_version):
+    store = uncontended_prediction_store
+    _tid, measured = catalog_track(store, 'measured', 'Psybient', 'Artist A')
+    _tid, other_style = catalog_track(store, 'other-style', 'Detroit Techno', 'Artist B')
+    cases = {
+        'exact': ('Psybient', 'Artist A', 'artist_genre'),
+        'artist-only': (None, 'Artist A', 'artist'),
+        'split': ('Detroit Techno', 'Artist A', 'artist'),
+        'genre-only': ('Psybient', 'Artist C', None),
+        'unrelated': ('Electronic', 'Artist C', None),
+    }
+    targets = [(catalog_track(store, name, genre, artist)[1], source)
+               for name, (genre, artist, source) in cases.items()]
     capture(store, 'measured')
     capture(store, 'other-style', calm=False)
-    drain(store)
-    own, predicted, techno, genre, fallback = [fits(store, key) for key in
-                                            (measured, same, other_style, other_artist, empty)]
+    drain(store).close()
+    own, techno = fits(store, measured), fits(store, other_style)
     assert own['relax']['source'] == techno['relax']['source'] == 'audio_measurement'
     assert own['relax']['score'] > techno['relax']['score']
-    assert predicted['relax']['source'] == 'artist_genre'
-    assert predicted['relax']['recordings'] == 2
-    assert genre['relax']['source'] == 'genre'
-    assert fallback['relax']['source'] == 'artist'
-    prediction_id, = store.conn.execute('SELECT prediction_id FROM recording_vibes v '
-        'JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe=?',
-        (empty, 'relax')).fetchone()
-    receipt = vibe_provenance.read(store.conn, prediction_id)
-    assert receipt['new_track_variance'] > receipt['mean_variance'] > 0
-    assert predicted['relax']['score'] > fallback['relax']['score']
+    for key, source in targets:
+        row = store.conn.execute('SELECT v.source,v.prediction_id FROM recording_vibes v '
+            'JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe=?',
+            (key, 'relax')).fetchone()
+        fit = fits(store, key).get('relax')
+        if source is None:
+            assert row is None and fit is None
+            assert not store.vibe_predictions.fit_scores([key], 'relax')
+        else:
+            assert row['source'] == fit['source'] == source
+            assert fit['recordings'] == 2
+            receipt = vibe_provenance.read(store.conn, row['prediction_id'])
+            assert receipt['new_track_variance'] > receipt['mean_variance'] > 0
     compact = musical_character.load(store, [measured, other_style])
     assert home_vibe.affinity({'key': measured}, 'relax', compact) == own['relax']['score']
     assert musical_character.intensity({'musical': compact[measured]}) < .2
     assert musical_character.intensity({'musical': compact[other_style]}) > .8
+
+
+def test_full_on_uses_specialists_and_their_predictions_in_prepared_radio(
+        uncontended_prediction_store, qualified_candidate, tmp_path, monkeypatch):
+    from tests.musical_support import record_acousticbrainz
+    from tests.test_audio_vibe_cruise import samples
+    from tests.test_audio_vibe_energize import controlled as energize_artifact
+    from tests.test_audio_vibe_release import controlled as release_artifact
+    from yt_playlist.core.audio_vibe_contract import INTENSITY_CHANNELS
+    from yt_playlist.library import vibe_composition
+    from yt_playlist.rec import acousticbrainz_vibes, audio_vibe_specialists, radio_intensity, radio_ranking, radio_tuning
+
+    # Run actual specialist inference with controlled scores and compatible excerpts.
+    monkeypatch.setattr(vibe_composition, 'prediction', vibe_composition.configured)
+    artifacts = {'energize': energize_artifact(tmp_path, .94), 'release': release_artifact(tmp_path, .76)}
+    for name, specialist in audio_vibe_specialists.SPECIALISTS:
+        monkeypatch.setenv(specialist.MODE_KEY, 'active' if name in artifacts else 'off')
+        if name in artifacts:
+            monkeypatch.setenv(specialist.ENVIRONMENT_KEY, str(artifacts[name]))
+    monkeypatch.setattr(vibe_joint_preparation, 'VIBES', tuple(INTENSITY_CHANNELS))
+
+    store = uncontended_prediction_store
+    _entry, measured = catalog_track(store, 'sampled', 'Psybient', 'Artist A')
+    _entry, same_subgenre = catalog_track(store, 'same-subgenre', 'Psybient', 'Artist A')
+    _entry, other_subgenre = catalog_track(store, 'other-subgenre', 'Detroit Techno', 'Artist A')
+    entry, provider = catalog_track(store, 'provider', 'Psybient', 'Artist B')
+    record_acousticbrainz(store, entry, dict.fromkeys(acousticbrainz_vibes.FIELDS, .82))
+    excerpts = samples('sampled')
+    for now, row in enumerate(excerpts, 1):
+        store.audio_vibes.save_sample(row, now)
+    drain(store).close()
+
+    keys = [measured, same_subgenre, other_subgenre, provider]
+    profiles = musical_character.load(store, keys)
+    items = {key: {'key': key, 'musical': profiles[key]} for key in keys}
+    assert musical_character.intensity_evidence(items[measured]) == (pytest.approx(.94), 1.)
+    assert profiles[provider]['vibes']['fits']['energize']['source'] == acousticbrainz_vibes.SOURCE
+    assert musical_character.intensity_evidence(items[provider]) == (None, 0)
+
+    retained = store.vibe_predictions.retained_joint_fits([same_subgenre, other_subgenre])
+    for channel in INTENSITY_CHANNELS:
+        for key, source in ((same_subgenre, 'artist_genre'), (other_subgenre, 'artist')):
+            fit = retained[key][channel]
+            assert fit['source'] == source
+            receipt = vibe_provenance.read(store.conn, fit['prediction_id'])
+            [original] = store.vibe_predictions.joint_model(receipt['generation'])['inputs']
+            assert original['source'].startswith('audio_measurement/')
+            assert {sid for sid, in store.conn.execute('SELECT sample_id FROM measurement_samples '
+                'WHERE measurement_id=?', (original['measurement'],))} == {row['id'] for row in excerpts}
+
+    radio_catalog = {'members': {'style': keys}}
+    radio_intensity.prepare(store, radio_catalog, {}, {})
+    bands = radio_catalog['intensity']['clusters']['style']
+    assert {key for group in bands['25'].values() for key in group} == {provider}
+    assert {key for group in bands['47'].values() for key in group} == {measured}
+    for key in (same_subgenre, other_subgenre):
+        score, support = musical_character.intensity_evidence(items[key])
+        assert score is not None and support > 0
+        band = str(radio_intensity.band(score))
+        assert any(key in group for group in bands[band].values())
+    options = dict(prior=0, recent=[], target=None, feedback=[], breadth=0, genre_bonus=0,
+                   tuning={**radio_tuning.DEFAULTS, 'energy': 1.})
+    scores = {key: radio_ranking.candidate_score(item, **options) for key, item in items.items()}
+    assert len(set(scores.values())) == 1
+
+
+@pytest.mark.parametrize('installed', [False, True], ids=['new-capture', 'installed-fit'])
+def test_sampled_artist_dispatch_publishes_before_the_catalog_cursor(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel,
+        fixed_measurement_version, monkeypatch, installed):
+    from yt_playlist.controllers import vibe_joint_preparation as commands
+
+    store = uncontended_prediction_store
+    artist = 'Measured artist'
+    _entry, original = catalog_track(store, 'b-original', 'Psybient', artist)
+    unrelated = [catalog_track(store, f'a-unrelated-{index}', 'Psybient', 'Other artist')[1]
+                 for index in range(8)]
+    _entry, related = catalog_track(store, 'z-related', 'Detroit Techno', artist)
+    entry, collaboration = catalog_track(store, 'z-collaboration', 'Psybient', 'Measured artist & Guest')
+    store.artists.observe(entry, 'Measured artist & Guest', [{'name': artist}, {'name': 'Guest'}], source='youtube')
+    targets = {collaboration: 'artist_genre', related: 'artist'}
+    if not installed:
+        catalog_track(store, 'b-earlier-sample', 'Psybient', 'Earlier artist')
+        capture(store, 'b-earlier-sample', calm=False)
+    drain(store, batch=1).close()
+    previous_head = store.vibe_predictions.joint_state('relax')[0]
+    assert bool(previous_head) is not installed
+    capture(store, 'b-original')
+
+    worker = Preparation(store, budget=replace(Budget(), batch=1))
+    try:
+        if installed:
+            with monkeypatch.context() as legacy:
+                legacy.setattr(commands, 'sampled_artists', lambda *_args: [])
+                for _ in range(50):
+                    worker.capture(1000)
+                    if head := store.vibe_predictions.joint_state('relax')[0]:
+                        break
+                else:
+                    pytest.fail('The legacy fit did not publish')
+            state = vibe_joint_preparation.state(store, 'relax')
+            state.pop('dispatch_version')
+            store.vibe_predictions.repository.save_joint_outcome('relax', state)
+            assert all('relax' not in fits(store, key) for key in targets)
+
+            def unexpected_fit(*_args, **_kwargs):
+                pytest.fail('Dispatch from an installed generation should not refit it')
+
+            monkeypatch.setattr(joint, 'fit', unexpected_fit)
+
+        published = set()
+        for _ in range(80):
+            worker.capture(1000)
+            for key, source in targets.items():
+                if key in published or not (fit := fits(store, key).get('relax')):
+                    continue
+                cursor = store.conn.execute("SELECT cursor FROM rec_vibe_pending WHERE group_key='*'").fetchone()
+                assert cursor is not None and cursor[0] < key
+                assert fit['source'] == source
+                published.add(key)
+            if published == targets.keys():
+                break
+        assert published == targets.keys()
+        if installed:
+            assert store.vibe_predictions.joint_state('relax')[0] == head
+        else:
+            assert store.vibe_predictions.joint_state('relax')[0] != previous_head
+    finally:
+        worker.close()
+    drain(store, batch=1).close()
+    assert fits(store, original)['relax']['source'] == 'audio_measurement'
+    assert all('relax' not in fits(store, key) for key in unrelated)
+
+
+def test_artist_dispatch_coalesces_new_heads_without_restarting_an_active_page(
+        uncontended_prediction_store, fixed_measurement_version):
+    from yt_playlist.repos.vibe_predictions import JOINT_ARTIST
+
+    store = uncontended_prediction_store
+    entry, first = catalog_track(store, 'first')
+    _entry, second = catalog_track(store, 'second')
+    [artist] = json.loads(store.vibe_predictions.inputs([first])[first]['artist'])
+    key = f'{JOINT_ARTIST}relax:{artist}'
+    repo = store.vibe_predictions.repository
+    with store.conn:
+        store.conn.execute('DELETE FROM rec_vibe_pending WHERE position>0')
+        content_work.acknowledge(store.conn, content_work.pending(store.conn, -1))
+
+    repo.install_joint_model('relax', 'a' * 64, {}, [], True, artists=[artist])
+    assert repo.fanout(1)
+    assert tuple(repo.pending()) == (key, 1, str(entry))
+    for generation in (marker * 64 for marker in 'bcd'):
+        repo.install_joint_model('relax', generation, {}, [], True, artists=[artist])
+        assert tuple(repo.pending()) == (key, 2, str(entry))
+    for _ in range(5):
+        assert repo.fanout(1)
+    assert repo.pending()['group_key'] == '*'
+    assert [subject for subject, _ in content_work.pending(store.conn, 10)] == [first, second]
 
 
 def test_masked_metadata_refits_after_categorical_changes_without_learning_own_numeric_fields(
@@ -459,13 +624,13 @@ def test_masked_metadata_refits_after_categorical_changes_without_learning_own_n
     drain(store)
 
     def current():
-        value = store.vibe_predictions.joint_model(store.settings.get_setting('rec_vibe_joint_head_relax'))
+        value = store.vibe_predictions.joint_model(store.vibe_predictions.joint_state('relax')[0])
         assert value['format'] == 4 and len(value['inputs']) == 1
         return value['inputs'][0], value
 
     original, first = current()
     with store.conn:
-        catalog.choose_field(store.conn, entry, 'energy', .99)
+        catalog.choose_field(store.conn, entry, 'mood_relaxed', .99)
     drain(store)
     numeric, _value = current()
     assert numeric['metadata_prior'] == original['metadata_prior']
@@ -482,13 +647,13 @@ def test_masked_metadata_refits_after_categorical_changes_without_learning_own_n
     prediction, = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
         "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
     assert 'metadata_prior' in vibe_provenance.read(store.conn, prediction)['conditioning']
-    revision = store.settings.get_setting('rec_vibe_joint_revision')
+    revision = store.vibe_predictions.joint_revision()
     # A derived profile publication and queue admission cannot feed back into
     # fitting. The replay has exactly the same raw inputs and current originals.
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
+        content_work.enqueue(store.conn, (target,))
     drain(store)
-    assert store.settings.get_setting('rec_vibe_joint_revision') == revision
+    assert store.vibe_predictions.joint_revision() == revision
 
 
 def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monkeypatch):
@@ -513,6 +678,55 @@ def test_symbolic_cache_rechecks_memory_and_distinguishes_equal_size_graphs(monk
     assert actual[1] != expected[1]
 
 
+def test_partial_audio_has_less_influence_at_the_same_score():
+    row = {'recording': 1, 'measurement': 1, 'score': .9, 'artists': [1], 'genre': 'psybient',
+           'album': None, 'source': 'audio_measurement/fixture', 'metadata_prior': .5}
+    estimates = []
+    for support in (1/3, 2/3, 1.):
+        model = joint.fit([{**row, 'support': support}], 'relax', fixed=joint.INITIAL)
+        posterior = joint.Posterior(model)
+        estimates.append(posterior.predict([1], 'psybient', metadata_prior=.5))
+    one, two, three = estimates
+    assert .5 < one['score'] < two['score'] < three['score'] < .9
+    assert one['mean_variance'] > two['mean_variance'] > three['mean_variance']
+    assert one['new_track_variance'] > two['new_track_variance'] > three['new_track_variance']
+
+
+def test_complete_capture_upgrades_partial_measurement_with_exact_provenance(
+        prediction_store, qualified_candidate, relax_joint_channel):
+    store = prediction_store
+    _entry, measured = catalog_track(store, 'measured')
+    _entry, target = catalog_track(store, 'target')
+    drain(store).close()
+    assert 'relax' not in fits(store, measured)
+    assert 'relax' not in fits(store, target)
+
+    capture(store, 'measured', calm=False, start=1, count=1)
+    run, sample_ids, measurement_ids = str(uuid4()), set(), set()
+    for index in range(3):
+        [saved] = capture(store, 'measured', run=run, start=index, count=1)
+        sample_ids.add(saved['id'])
+        drain(store).close()
+        direct = fits(store, measured)['relax']
+        assert direct['source'] == 'audio_measurement'
+        assert direct['support'] == pytest.approx((index + 1) / 3)
+        prediction = fits(store, target)['relax']
+        assert prediction['source'] == 'artist_genre'
+        assert prediction['recordings'] == 1
+        assert prediction['support'] > 0
+        [measurement_id] = store.conn.execute(
+            'SELECT v.measurement_id FROM recording_vibes v JOIN recordings r ON r.id=v.recording_id '
+            "WHERE r.identity_key=? AND v.vibe='relax'", (measured,)).fetchone()
+        assert measurement_id not in measurement_ids
+        measurement_ids.add(measurement_id)
+        assert {sid for sid, in store.conn.execute('SELECT sample_id FROM measurement_samples '
+            'WHERE measurement_id=?', (measurement_id,))} == sample_ids
+        generation = store.vibe_predictions.joint_state('relax')[0]
+        [original] = store.vibe_predictions.joint_model(generation)['inputs']
+        assert original['measurement'] == measurement_id
+        assert original['support'] == direct['support']
+
+
 def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_annotations_never_seed(
         prediction_store, qualified_candidate, relax_joint_channel):
     store = prediction_store
@@ -532,31 +746,31 @@ def test_replays_are_one_recording_partial_runs_do_not_replace_complete_and_anno
     statements = []
     store.conn.set_trace_callback(statements.append)
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (two,))
+        content_work.enqueue(store.conn, (two,))
     drain(store)
     store.conn.set_trace_callback(None)
     assert not any('audio_annotation' in sql or 'audio_taxonom' in sql for sql in statements)
 
 
 @pytest.mark.parametrize('genre', ['Electronic', 'Techno', 'House', 'Ambient', 'Rock'])
-def test_broad_genres_cannot_seed_genre_predictions(store, genre):
+def test_broad_genres_cannot_seed_genre_predictions(store, relax_joint_channel, genre):
     track(store, 'measured', genre, 'One artist')
-    _tid, target = track(store, 'target', genre, 'Another artist')
+    _tid, target = track(store, 'target', genre, 'One artist')
+    _tid, unrelated = track(store, 'unrelated', genre, 'Another artist')
     capture(store, 'measured')
-    drain(store)
+    drain(store).close()
     predicted = fits(store, target)['relax']
-    # The learned population baseline can transfer to an unseen artist, but
-    # broad genres must not become shared genre effects or conditioning keys.
     assert predicted['source'] == 'artist'
+    assert 'relax' not in fits(store, unrelated)
     prediction, = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v JOIN recordings r '
         "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()
     assert vibe_provenance.read(store.conn, prediction)['conditioning']['genre'] is None
-    fitted = store.vibe_predictions.joint_model(store.settings.get_setting('rec_vibe_joint_head_relax'))
+    fitted = store.vibe_predictions.joint_model(store.vibe_predictions.joint_state('relax')[0])
     assert all(row['genre'] is None for row in fitted['inputs'])
     assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE subgenre_key IS NOT NULL').fetchone()
 
 
-def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepared_state(
+def test_unverified_provider_classifiers_do_not_supply_vibes_or_seed_predictions(
         prediction_store, qualified_candidate, relax_joint_channel):
     store = prediction_store
     tid, own = catalog_track(store, 'provider')
@@ -566,16 +780,102 @@ def test_provider_classifiers_seed_predictions_without_captured_audio_or_prepare
                             match_evidence={'method': 'title_artist_match'}),
         MetadataObservation('mood_aggressive', .01, 'recording', 'native-recording', 'prediction',
                             match_evidence={'method': 'title_artist_match'})], run_id='provider', now=100)
-    drain(store, batch=1)
-    assert fits(store, own)['relax']['source'] == 'provider_measurement'
-    assert fits(store, target)['relax']['source'] == 'artist_genre'
-    assert fits(store, target)['relax']['score'] > .5
+    drain(store, batch=1).close()
+    for key in (own, target):
+        profile = store.musical_profiles.by_keys([key])[key]
+        assert not profile.get('vibes', {}).get('fits')
+        assert home_vibe.affinity({'musical': profile}, 'relax') == .5
+    assert vibe_joint_preparation.state(store, 'relax')['outcome'] == 'empty'
     assert not store.audio_vibes.samples('provider')
 
 
-def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_content_refit(
+def test_acousticbrainz_estimates_and_daily_refit_use_verified_recording_pairs(
+        prediction_store, individual_model_rollout, monkeypatch):
+    from types import SimpleNamespace
+
+    from tests.musical_support import record_acousticbrainz
+    from yt_playlist.rec import acousticbrainz_vibe_preparation as daily, acousticbrainz_vibes as mapping
+
+    store = prediction_store
+    stamp = mapping.measurement_version()
+    monkeypatch.setattr(vibe_recording_rules, 'version', lambda: stamp)
+    now = 1000
+    monkeypatch.setattr(daily, 'time', SimpleNamespace(time=lambda: now))
+    assert daily.step(store)
+
+    def matched(name):
+        entry, key = catalog_track(store, name)
+        record_acousticbrainz(store, entry, dict.fromkeys(mapping.FIELDS, .82))
+        recording = store.conn.execute('SELECT id FROM recordings WHERE identity_key=?', (key,)).fetchone()[0]
+        return recording, key
+
+    rid, own = matched('sampled')
+    _unplayed, _unplayed_key = matched('unplayed')
+    target_rid, target = matched('estimated')
+    _other, other = catalog_track(store, 'unrelated')
+    account = store.accounts.upsert_account('listener', None, True)
+    store.history.record_play_event(account, own, 'sampled', 100)
+    store.history.record_play_event(account, own, 'sampled', 500)
+    capture(store, 'sampled')
+    capture(store, 'unplayed', calm=False)
+    drain(store).close()
+
+    direct = fits(store, own)['relax']
+    assert direct['source'] == 'audio_measurement'
+    initial = mapping.score([.82] * len(mapping.FIELDS), mapping.coefficients({}))
+    assert {vibe: fit['score'] for vibe, fit in fits(store, target).items()} == initial
+    assert all(fit['source'] == mapping.SOURCE for fit in fits(store, target).values())
+    profile = store.musical_profiles.by_keys([target])[target]
+    assert musical_character.intensity_evidence({'musical': profile}) == (None, 0)
+    rows = store.vibe_predictions.acousticbrainz_training_rows(stamp)
+    assert len(rows) == len(mapping.VIBES) and {row[0] for row in rows} == {rid}
+    assert not daily.step(store)
+
+    now += mapping.INTERVAL
+    assert daily.step(store)
+    assert daily.step(store) is False
+    assert daily.rescore(store, 1)
+    assert daily.rescore(store, 1)
+    assert daily.rescore(store, 1) is False
+    assert not store.prepared_content.has_pending()
+    changed = fits(store, target)['relax']['score']
+    assert abs(changed - direct['score']) < abs(initial['relax'] - direct['score'])
+    assert fits(store, own)['relax'] == direct
+    assert home_vibe.affinities(store, [target, other], 'relax') == {target: changed, other: .5}
+    assert {row['recording_id'] for row in store.vibe_predictions.ranked('relax')} >= {target_rid, rid}
+
+    now += mapping.INTERVAL
+    with monkeypatch.context() as unchanged:
+        unchanged.setattr(mapping, 'adjusted', lambda *_: pytest.fail('Refitted unchanged pairs'))
+        assert daily.step(store)
+    assert store.vibe_predictions.pending() is None
+
+    entry = store.conn.execute('SELECT id FROM track_sources WHERE recording_id=?', (target_rid,)).fetchone()[0]
+    store.metadata_choices.choose(entry, 'mb_recording_id', 'cc08a6cc-62a3-42ff-aa3c-844ce15e0cfa')
+    assert home_vibe.affinities(store, [target], 'relax') == {target: .5}
+    assert target not in store.vibe_predictions.acousticbrainz_matches([target])
+    store.metadata_choices.choose(entry, 'mb_recording_id', withdraw=True)
+    assert home_vibe.affinities(store, [target], 'relax') == {target: changed}
+
+    _source, selected = store.vibe_predictions.acousticbrainz_matches([target])[target]
+    store.metadata_choices.choose(entry, 'mb_recording_id', selected)
+    with store.conn:
+        store.conn.execute('UPDATE recordings SET mb_recording_id=? WHERE id=?',
+                           ('cc08a6cc-62a3-42ff-aa3c-844ce15e0cfa', target_rid))
+    drain(store).close()
+    assert home_vibe.affinities(store, [target], 'relax') == {target: changed}
+    with store.conn:
+        store.conn.execute("UPDATE recording_identifiers SET status='conflicting' WHERE recording_id=?", (target_rid,))
+    assert store.prepared_content.has_pending()
+    assert home_vibe.affinities(store, [target], 'relax') == {target: .5}
+    drain(store).close()
+    assert not store.conn.execute('SELECT 1 FROM rec_musical_links WHERE recording_id=? '
+                                  'AND acousticbrainz_classifiers IS NOT NULL', (target_rid,)).fetchone()
+
+
+def test_changed_measurement_invalidates_content_and_subgenre_retracts_old_cohort(
         uncontended_prediction_store, qualified_candidate, relax_joint_channel, fixed_measurement_version):
-    from yt_playlist.core import vibe_model_files, vibe_provenance
+    from yt_playlist.core import vibe_provenance
 
     store = uncontended_prediction_store
     assert store._snapshot_revisions.conn is store.conn
@@ -584,9 +884,9 @@ def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_
     _, target = catalog_track(store, 'target')
     capture(store, 'one')
     drain(store).close()
-    counters = store.prepared_content.counters()
+    content_changes, evidence_changes = store.prepared_content.counters()
     before = fits(store, target)['relax']['score']
-    first_generation = store.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax')
+    first_generation = store.vibe_predictions.joint_state('relax')[0]
     first_prediction = store.conn.execute("SELECT v.prediction_id FROM recording_vibes v JOIN recordings r "
         "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
     first_inputs = vibe_provenance.read(store.conn, first_prediction)['inputs']
@@ -599,14 +899,21 @@ def test_changed_measurement_and_subgenre_retract_old_cohort_and_notify_without_
         "ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe='relax'", (target,)).fetchone()[0]
     assert fits(store, target)['relax']['score'] == before
     assert equal_prediction != first_prediction
-    assert store.settings.get_setting(vibe_model_files.HEAD_PREFIX + 'relax') != first_generation
+    assert store.vibe_predictions.joint_state('relax')[0] != first_generation
     assert vibe_provenance.read(store.conn, equal_prediction)['inputs'] != first_inputs
     assert fits(store, target)['relax']['recordings'] == 1
+    assert store.prepared_content.counters() == (content_changes, evidence_changes)
+    refresh = store.rec_refresh.revision() or 0
+
     capture(store, 'one', calm=False)
     drain(store, batch=1).close()
     assert fits(store, target)['relax']['score'] < before
-    assert store.prepared_content.counters() == counters
-    assert store.rec_refresh.revision() is not None
+    assert fits(store, target)['relax']['recordings'] == 1
+    updated_content, updated_evidence = store.prepared_content.counters()
+    assert updated_content > content_changes
+    assert updated_evidence == evidence_changes
+    assert store.rec_refresh.revision() > refresh
+
     with store.conn:
         catalog.choose_field(store.conn, tid, 'genre', 'Detroit Techno')
     drain(store, batch=1).close()
@@ -638,16 +945,12 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
             patch.setattr(joint, 'fit', deferred)
             drain(store, batch=1).close()
         assert fits(store, own)['relax']['source'] == 'audio_measurement'
-        fallback = fits(store, target)['relax']
-        # Older layouts may still be preparing specific genre identities.
-        # Their available artist evidence must remain useful meanwhile.
-        assert fallback['source'] in {'artist', 'artist_genre'} and fallback['score'] > .5
-        assert not store.conn.execute('SELECT 1 FROM prediction_model_generations').fetchone()
+        assert 'relax' not in fits(store, target)
+        assert not store.conn.execute('SELECT 1 FROM predictions WHERE model_generation IS NOT NULL').fetchone()
 
         # Retry eligibility is controlled explicitly, without advancing global
         # clocks or treating the deliberately deferred model as ready.
-        for vibe in vibe_joint_preparation.VIBES:
-            store.settings.delete_setting(vibe_model_files.STATE_PREFIX + vibe)
+        store.vibe_predictions.repository.clear_joint_outcomes(vibe_joint_preparation.VIBES)
         drain(store, batch=1).close()
         before = fits(store, target)['relax']
         prediction = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v '
@@ -673,11 +976,11 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
             catalog.choose_field(store.conn, tid, 'genre', 'Detroit Techno')
         drain(store, batch=1).close()
         assert fits(store, target)['relax']['source'] == 'artist'
-        assert store.conn.execute('SELECT genre FROM tracks WHERE id=?', (tid,)).fetchone()[0] == 'Detroit Techno'
+        assert store.conn.execute('SELECT genre FROM catalog_tracks WHERE id=?', (tid,)).fetchone()[0] == 'Detroit Techno'
         with store.conn:
             store.conn.execute('DELETE FROM sample_attributes')
         drain(store, batch=1).close()
-        assert fits(store, target)['relax']['source'] == 'heuristic'
+        assert 'relax' not in fits(store, target)
         assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE measurement_id IS NOT NULL').fetchone()
         assert store.conn.execute('SELECT 1 FROM measurements').fetchone()
         assert [tuple(row) for row in store.conn.execute('SELECT * FROM schema_migrations')] == history
@@ -689,7 +992,6 @@ def test_installed_writes_survive_deferred_fit_restart_correction_and_retraction
 @pytest.mark.parametrize('failure', [WorkBudgetExceeded, fao.FileBudgetExceeded, fao.FileChanged])
 def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, monkeypatch, qualified_candidate, failure):
     """One deferred channel must not strand other newly published models."""
-    from yt_playlist.core import vibe_model_files
     store = prediction_store
 
     # Keep the real healthy/deferred interaction. Full taxonomy preparation is
@@ -704,15 +1006,15 @@ def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, mo
 
     def generation(key, vibe):
         return store.conn.execute(
-            'SELECT hex(g.generation) FROM recording_vibes v '
+            'SELECT hex(p.model_generation) FROM recording_vibes v '
             'JOIN recordings r ON r.id=v.recording_id '
-            'JOIN prediction_model_generations g ON g.prediction_id=v.prediction_id '
+            'JOIN predictions p ON p.id=v.prediction_id '
             'WHERE r.identity_key=? AND v.vibe=?', (key, vibe)).fetchone()[0].lower()
 
     healthy, deferred = 'relax', vibe_joint_preparation.VIBES[-1]
     previous_own_score = fits(store, own)[healthy]['score']
     previous_healthy = generation(target, healthy)
-    previous_deferred = store.settings.get_setting(vibe_model_files.HEAD_PREFIX + deferred)
+    previous_deferred = store.vibe_predictions.joint_state(deferred)[0]
     original_fit = joint.fit
     attempts = []
 
@@ -735,8 +1037,8 @@ def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, mo
     assert healthy_state['outcome'] == 'ready'
     assert deferred_state['outcome'] == 'deferred'
     assert deferred_state['retry_at'] > vibe_joint_preparation.time.time()
-    assert store.settings.get_setting(vibe_model_files.HEAD_PREFIX + deferred) == previous_deferred
-    current_healthy = store.settings.get_setting(vibe_model_files.HEAD_PREFIX + healthy)
+    assert store.vibe_predictions.joint_state(deferred)[0] == previous_deferred
+    current_healthy = store.vibe_predictions.joint_state(healthy)[0]
     assert current_healthy != previous_healthy
     assert generation(target, healthy) == current_healthy
     assert generation(target, deferred) == previous_deferred
@@ -756,21 +1058,19 @@ def test_ready_joint_vibes_refresh_when_last_channel_defers(prediction_store, mo
 
 
 def test_deferral_and_refresh_queue_roll_back_together(store, monkeypatch):
-    from yt_playlist.core import vibe_model_files
     from yt_playlist.repos.vibe_predictions import VibePredictionsRepo
 
-    key = vibe_model_files.STATE_PREFIX + 'relax'
     previous = {'outcome': 'deferred', 'retry_at': 0}
-    store.settings.set_values({key: json.dumps(previous)})
+    store.vibe_predictions.repository.save_joint_outcome('relax', previous)
     before = [tuple(row) for row in store.conn.execute(
         'SELECT group_key,revision,cursor FROM rec_vibe_pending ORDER BY position')]
-    original_queue = VibePredictionsRepo._queue
+    original_queue = VibePredictionsRepo._request_refresh
 
-    def fail_queue(repo, keys):
-        original_queue(repo, keys)
+    def fail_queue(repo, reason):
+        original_queue(repo, reason)
         raise RuntimeError('interrupted partial refresh enqueue')
 
-    monkeypatch.setattr(VibePredictionsRepo, '_queue', fail_queue)
+    monkeypatch.setattr(VibePredictionsRepo, '_request_refresh', fail_queue)
     with pytest.raises(RuntimeError, match='interrupted partial refresh enqueue'):
         store.vibe_predictions.defer_joint_model('relax', {**previous, 'retry_at': 60}, True)
     assert vibe_joint_preparation.state(store, 'relax') == previous
@@ -818,7 +1118,7 @@ def test_prediction_queue_retries_after_committed_derived_state_and_restart(
         assert reopened.prepared_content.counters()[0] == 0
         with mock_snapshot_coordinator(reopened, monkeypatch):
             drain(reopened, batch=1).close()
-        assert fits(reopened, target)['relax']['source'] == 'artist_genre'
+        assert 'relax' not in fits(reopened, target)
         assert not reopened.vibe_predictions.pending()
         assert not reopened.prepared_content.has_pending()
         measurements = {tuple(row) for row in reopened.conn.execute('SELECT * FROM measurements')}
@@ -827,7 +1127,6 @@ def test_prediction_queue_retries_after_committed_derived_state_and_restart(
 
 def test_model_version_change_recomputes_all_evidence_in_pages(
         prediction_store, monkeypatch, qualified_candidate, relax_joint_channel):
-    from yt_playlist.core import vibe_versions
     store = prediction_store
     catalog_track(store, 'one')
     _tid, target = catalog_track(store, 'two')
@@ -839,16 +1138,16 @@ def test_model_version_change_recomputes_all_evidence_in_pages(
     assert vibe_preparation.step(store, batch=1)
     assert store.vibe_predictions.pending()
     drain(store, batch=1)
-    assert fits(store, target) == old
-    assert store.conn.execute('SELECT COUNT(DISTINCT recording_id) FROM recording_vibes v WHERE instr(' +
-                              vibe_versions.expression(store.conn, 'recording_vibes', 'v') + ',?)>0',
+    refreshed = fits(store, target)
+    assert {vibe: (fit['score'], fit['support'], fit['source']) for vibe, fit in refreshed.items()} == {
+        vibe: (fit['score'], fit['support'], fit['source']) for vibe, fit in old.items()}
+    assert store.conn.execute('SELECT COUNT(DISTINCT recording_id) FROM vibe_recording_fits WHERE instr(inputs_version,?)>0',
                               ('changed-model',)).fetchone()[0] == 2
 
 
 def test_arithmetic_rollout_preserves_originals_and_reuses_new_identity_after_restart(
         prediction_store, monkeypatch, individual_model_rollout):
     from tests.test_audio_vibe_cruise import samples
-    from yt_playlist.core import vibe_versions
     from yt_playlist.rec import audio_vibe_runtime as runtime
     store = prediction_store
     entry, own = catalog_track(store, 'arithmetic-original')
@@ -880,11 +1179,11 @@ def test_arithmetic_rollout_preserves_originals_and_reuses_new_identity_after_re
     current = {row['vibe']: row for row in store.conn.execute('SELECT v.* FROM recording_vibes v JOIN recordings r '
         'ON r.id=v.recording_id WHERE r.identity_key=?', (own,))}
     assert current and all(row['measurement_id'] is not None and row['prediction_id'] is None for row in current.values())
-    assert fits(store, target)['cruise']['source'] == 'artist_genre'
-    assert all(runtime.ARITHMETIC_VERSION in row[0] for row in store.conn.execute('SELECT ' +
-        vibe_versions.expression(store.conn, 'recording_vibes', 'v') + ' FROM recording_vibes v'))
+    assert 'cruise' not in fits(store, target)
+    assert all(runtime.ARITHMETIC_VERSION in row[0] for row in
+               store.conn.execute('SELECT inputs_version FROM vibe_recording_fits'))
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (own,))
+        content_work.enqueue(store.conn, (own,))
     restarted = Store(store._db_path)
     try:
         restarted.init_schema()
@@ -919,12 +1218,12 @@ def test_artist_tags_never_become_recording_measurements_or_propagation_seeds(fi
         MetadataObservation('tags', [{'name': 'Ambient'}], 'artist', 'shared', 'reported',
                             match_evidence={'method': 'title_artist_match'})], run_id='artist-tags', now=1)
     drain(store)
-    assert fits(store, own)['relax']['source'] == fits(store, target)['relax']['source'] == 'heuristic'
+    assert not fits(store, own) and not fits(store, target)
     assert not store.conn.execute('SELECT 1 FROM measurements').fetchone()
     assert not vibe_joint_preparation.due(store)
 
 
-def test_removed_audio_retracts_predictions_and_keeps_recording_fallback(
+def test_removed_audio_retracts_predictions_and_leaves_missing_scores_unknown(
         prediction_store, qualified_candidate, relax_joint_channel):
     store = prediction_store
     catalog_track(store, 'one')
@@ -935,7 +1234,7 @@ def test_removed_audio_retracts_predictions_and_keeps_recording_fallback(
     with store.conn:
         store.conn.execute('DELETE FROM sample_attributes')
     drain(store)
-    assert fits(store, target)['relax']['source'] == 'heuristic'
+    assert 'relax' not in fits(store, target)
     assert not store.conn.execute('SELECT 1 FROM recording_vibes WHERE measurement_id IS NOT NULL').fetchone()
     assert store.conn.execute('SELECT 1 FROM measurements').fetchone()  # history survives retraction
 
@@ -952,7 +1251,8 @@ def test_many_interrupted_replays_preserve_last_complete_raw_measurement(store):
 
 
 def test_radio_chill_does_not_mistake_slow_forceful_music_for_low_intensity():
-    item = {'musical': {'vibes': {'intensity_fits': {
+    from yt_playlist.rec.vibe_score_policy import serving_prefix
+    item = {'musical': {'vibes': {'inputs_version': serving_prefix() + 'forceful', 'intensity_fits': {
         'energize': {'score': .1, 'support': 1, 'source': 'audio_measurement'},
         'release': {'score': .95, 'support': 1, 'source': 'audio_measurement'}}}}}
     assert musical_character.intensity(item) == .95
@@ -1002,7 +1302,9 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
         file_backed_store, monkeypatch, originals, qualified):
     from fastapi.testclient import TestClient
 
+    from tests.musical_support import record_acousticbrainz
     from yt_playlist.core import vibe_model_files
+    from yt_playlist.rec import acousticbrainz_vibes
     from yt_playlist.web.app import create_app
 
     store = file_backed_store
@@ -1020,7 +1322,8 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
 
     monkeypatch.setattr(joint, 'fit', forbidden)
     monkeypatch.setattr(vibe_model_files.VibeModelFiles, 'read', forbidden)
-    _entry, target = track(store, 'startup-new-target')
+    entry, target = track(store, 'startup-new-target')
+    record_acousticbrainz(store, entry, dict.fromkeys(acousticbrainz_vibes.FIELDS, .5))
     assert not store.vibe_predictions.fit_scores([target], 'relax')
     worker = Preparation(store)
     try:
@@ -1034,7 +1337,7 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
     finally:
         worker.close()
     assert 0 <= cached[target] <= 1
-    assert fits(store, target)['relax']['source'] == ('artist_genre' if originals else 'heuristic')
+    assert fits(store, target)['relax']['source'] == acousticbrainz_vibes.SOURCE
     assert not any(vibe_joint_preparation.state(store, vibe) for vibe in vibe_joint_preparation.VIBES)
 
     reopened = Store(store._db_path)
@@ -1052,13 +1355,12 @@ def test_first_new_score_and_reopened_home_do_not_require_joint_fit(
 
 
 @pytest.mark.parametrize('last_deferred', [False, True])
-def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(
+def test_continuing_evidence_publishes_and_scores_across_worker_restart(
         file_backed_store, monkeypatch, last_deferred):
-    from yt_playlist.core import vibe_model_files
     store = file_backed_store
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS', {})
     track(store, 'cycle-original')
-    track(store, 'cycle-target')
+    _entry, target = track(store, 'cycle-target')
     capture(store, 'cycle-original')
     drain(store)
     monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
@@ -1066,99 +1368,195 @@ def test_continuing_backlog_completes_a_model_cycle_across_worker_restart(
     monkeypatch.setattr(store.prepared_content, 'has_pending', lambda: True)
     monkeypatch.setattr(store.musical_profiles, 'pending', lambda: True)
     source_turns, fits_seen = [], []
+    clock = [time.time()]
+    monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: clock[0])
     original_fit = joint.fit
+
+    def evidence_changed():
+        with store.conn:
+            store.conn.execute('UPDATE rec_vibe_pending SET evidence_revision=evidence_revision+1 WHERE position=0')
+
     def source_step(*args, **kwargs):
-        assert not vibe_joint_preparation.active(store)
         source_turns.append(True)
+        evidence_changed()
         return True
+
     def fit(rows, vibe, **kwargs):
         fits_seen.append(vibe)
+        evidence_changed()
         if last_deferred and vibe == vibe_joint_preparation.VIBES[-1]:
-            from yt_playlist.core.activity import WorkBudgetExceeded
             raise WorkBudgetExceeded('Controlled final-channel deferral during a continuing backlog')
         return original_fit(rows, vibe, **kwargs)
+
     monkeypatch.setattr(musical_preparation, 'source_step', source_step)
     monkeypatch.setattr(joint, 'fit', fit)
     worker = Preparation(store)
-    for _ in range(4):
+    for _ in range(16):
         worker.capture(1000)
-        if fits_seen:
+        if fits(store, target).get('relax', {}).get('source') == 'artist_genre':
             break
-    assert len(fits_seen) == 1
-    assert vibe_joint_preparation.active(store)
-    started = vibe_joint_preparation.state(store, fits_seen[0])['attempted_at']
-    with monkeypatch.context() as interrupted:
-        interrupted.setattr(vibe_joint_preparation.time, 'time',
-            lambda: started + len(vibe_joint_preparation.VIBES) * 10 + 1)
-        # Repeated failed snapshot publications cannot reserve the worker
-        # indefinitely. An abandoned cycle returns to ordinary fair turns.
-        assert not vibe_joint_preparation.active(store)
-    # Durable per-channel state resumes after a worker restart. Our source
-    # worker cannot change originals between the remaining seven fits. Input
-    # batches and fitting have separate bounded admissions.
+    else:
+        pytest.fail('The first compatible fit did not score under continuing evidence writes')
+    assert 0 < len(fits_seen) < len(vibe_joint_preparation.VIBES)
+    assert not vibe_joint_preparation.current(store, vibe_joint_preparation.state(store, 'relax'))
+    assert vibe_joint_preparation.posterior(store, 'relax') is not None
     source_before = len(source_turns)
+    worker.close()
     worker = Preparation(store)
-    for _ in range(len(vibe_joint_preparation.VIBES) * 3):
+    for _ in range(len(vibe_joint_preparation.VIBES) * 6):
         count = len(fits_seen)
         worker.capture(1000)
         assert len(fits_seen) - count <= 1
-        assert len(source_turns) == source_before
         if len(fits_seen) == len(vibe_joint_preparation.VIBES):
             break
-    assert len(source_turns) == source_before
+    assert len(source_turns) > source_before
     assert fits_seen == list(vibe_joint_preparation.VIBES)
-    assert not vibe_joint_preparation.active(store)
     assert all(vibe_joint_preparation.state(store, vibe)['outcome'] ==
                ('deferred' if last_deferred and vibe == vibe_joint_preparation.VIBES[-1] else 'ready')
                for vibe in vibe_joint_preparation.VIBES)
-    assert store.vibe_predictions.pending() is not None
-    assert vibe_joint_preparation.scoring(store)
-    with monkeypatch.context() as expired:
-        expired.setattr(vibe_joint_preparation.time, 'time',
-            lambda: max(vibe_joint_preparation.state(store, vibe)['attempted_at']
-                        for vibe in vibe_joint_preparation.VIBES) + len(vibe_joint_preparation.VIBES) * 10 + 1)
-        assert not vibe_joint_preparation.scoring(store)
-    # A restart after the last model publication must deliver an actual
-    # generation-linked score before returning to the continuing source stream.
     worker.close()
-    worker = Preparation(store)
-    heads = [head for vibe in vibe_joint_preparation.VIBES
-             if (head := store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe))]
-    for _ in range(40):
-        worker.capture(1000)
-        assert len(source_turns) == source_before
-        if store.vibe_predictions.has_joint_scores(heads):
-            break
-    else:
-        pytest.fail('Completed model cycle was invalidated before publishing any useful scores')
-    assert not vibe_joint_preparation.scoring(store)
-    worker.close()
-    # New input revision during a backlog keeps the published heads and gives
-    # upstream work a full cadence before starting another expensive cycle.
-    heads = {v: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + v)
+    heads = {v: store.vibe_predictions.joint_state(v)[0]
              for v in vibe_joint_preparation.VIBES}
-    attempted = max(vibe_joint_preparation.state(store, v)['attempted_at']
-                    for v in vibe_joint_preparation.VIBES)
-    revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)
-    store.settings.set_setting(vibe_model_files.REVISION, str(revision + 1))
-    monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 1)
+    assert store.vibe_predictions.has_joint_scores([head for head in heads.values() if head])
     assert not vibe_joint_preparation.admitted(store, waiting=True)
     assert vibe_joint_preparation.admitted(store, waiting=False)
-    assert heads == {v: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + v)
-                     for v in vibe_joint_preparation.VIBES}
-    monkeypatch.setattr(vibe_joint_preparation.time, 'time', lambda: attempted + 61)
+    clock[0] += 61
     assert vibe_joint_preparation.admitted(store, waiting=True)
+
+
+@pytest.mark.parametrize('target_changed', [False, True], ids=['same-target', 'corrected-target'])
+def test_retained_prediction_requires_current_conditioning(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel,
+        fixed_measurement_version, monkeypatch, target_changed):
+    store = uncontended_prediction_store
+    catalog_track(store, 'retained-original')
+    entry, target = catalog_track(store, 'retained-target')
+    capture(store, 'retained-original')
+    drain(store).close()
+
+    def prediction_id():
+        row = store.conn.execute('SELECT v.prediction_id FROM recording_vibes v '
+            'JOIN recordings r ON r.id=v.recording_id WHERE r.identity_key=? AND v.vibe=?',
+            (target, 'relax')).fetchone()
+        return row[0] if row else None
+
+    previous = prediction_id()
+    assert previous and fits(store, target)['relax']['source'] == 'artist_genre'
+    receipt = vibe_provenance.read(store.conn, previous)
+    monkeypatch.setattr(vibe_joint_preparation, 'posterior', lambda _reader, _vibe: None)
     with store.conn:
-        store.conn.execute('DELETE FROM recording_vibes WHERE prediction_id IS NOT NULL')
-    assert store.conn.execute('SELECT 1 FROM prediction_model_generations').fetchone()
-    assert not store.vibe_predictions.has_joint_scores([head for head in heads.values() if head])
+        if target_changed:
+            catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        else:
+            content_work.enqueue(store.conn, (target,))
+    drain(store).close()
+
+    assert prediction_id() == (None if target_changed else previous)
+    assert fits(store, target).get('relax', {}).get('source') == (None if target_changed else 'artist_genre')
+    assert vibe_provenance.read(store.conn, previous) == receipt
 
 
-@pytest.mark.parametrize('interruption', ['complete', 'stale', 'shutdown'])
+@pytest.mark.parametrize('policy', ('measurement', 'masked_profile'))
+def test_policy_rollover_replaces_serving_scores_and_preserves_history(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel, monkeypatch, policy):
+    from yt_playlist.rec import audio_vibe_prediction, musical_profiles
+
+    store = uncontended_prediction_store
+    _original_entry, original = catalog_track(store, 'policy-original')
+    _entry, target = catalog_track(store, 'policy-target')
+    capture(store, 'policy-original')
+    drain(store).close()
+
+    keys = [target]
+    before = store.vibe_predictions.retained_joint_fits(keys)[target]['relax']
+    receipt = vibe_provenance.read(store.conn, before['prediction_id'])
+    assert receipt['inputs']
+    inputs = store.vibe_predictions.joint_inputs('relax', 32)
+    original_scores = store.vibe_predictions.fit_scores([original], 'relax')
+    generation, _posterior = vibe_joint_preparation.posterior(store, 'relax')
+    assert inputs and original_scores
+    assert home_vibe.affinities(store, keys, 'relax')[target] == before['score']
+
+    if policy == 'measurement':
+        monkeypatch.setattr(audio_vibe_prediction, 'VERSION', audio_vibe_prediction.VERSION + '-replacement')
+    else:
+        monkeypatch.setattr(musical_profiles, 'MASKED_VERSION', musical_profiles.MASKED_VERSION + '-replacement')
+        monkeypatch.setattr(vibe_joint_preparation, 'QUALIFICATIONS',
+                            {vibe_joint_preparation.config_identity(): 'controlled-replacement'})
+    assert vibe_joint_preparation.posterior(store, 'relax') is None
+    assert store.vibe_predictions.joint_inputs('relax', 32) == (inputs if policy == 'masked_profile' else [])
+    assert store.vibe_predictions.fit_scores([original], 'relax') == (original_scores if policy == 'masked_profile' else {})
+    assert not store.vibe_predictions.retained_joint_fits(keys).get(target)
+    assert not store.vibe_predictions.fit_scores(keys, 'relax')
+    assert 'relax' not in store.musical_profiles.readiness_state(keys)[1][target]['vibes']['fits']
+    assert home_vibe.affinities(store, keys, 'relax')[target] == .5
+
+    drain(store).close()
+    replacement, _posterior = vibe_joint_preparation.posterior(store, 'relax')
+    assert replacement != generation
+    after = store.vibe_predictions.retained_joint_fits(keys)[target]['relax']
+    assert after['prediction_id'] != before['prediction_id']
+    assert home_vibe.affinities(store, keys, 'relax')[target] == after['score']
+    assert vibe_provenance.read(store.conn, before['prediction_id']) == receipt
+
+
+def test_relationship_rollover_retires_unsupported_scores_and_preserves_history(
+        uncontended_prediction_store, qualified_candidate, relax_joint_channel, fixed_measurement_version, monkeypatch):
+    from yt_playlist.core.audio_vibe_contract import JOINT_AUDIO_POLICY
+    from yt_playlist.rec import vibe_score_versions
+
+    store = uncontended_prediction_store
+    _entry, original = catalog_track(store, 'relationship-original')
+    _entry, related = catalog_track(store, 'relationship-related')
+    _entry, unrelated = catalog_track(store, 'relationship-unrelated', None, 'Unrelated artist')
+    capture(store, 'relationship-original')
+    keys = [related, unrelated]
+    current_values = vibe_recording_rules.posterior_values
+
+    def legacy_values(posterior, eligible, recording_ids, tracks, albums, masked, vibe):
+        values = current_values(posterior, eligible, recording_ids, tracks, albums, masked, vibe)
+        if unrelated in eligible:
+            track = tracks[unrelated]
+            conditioning = vibe_recording_rules.conditioning(track, albums.get(unrelated), masked[unrelated], vibe)
+            values[unrelated] = posterior.predict(json.loads(track['artist']), recording=recording_ids[unrelated],
+                                                  **conditioning)
+        return values
+
+    with monkeypatch.context() as legacy:
+        legacy.setattr(vibe_score_versions, 'joint_prediction_policy', lambda: JOINT_AUDIO_POLICY)
+        legacy.setattr(vibe_recording_rules, 'posterior_values', legacy_values)
+        drain(store).close()
+        before = store.vibe_predictions.retained_joint_fits(keys)
+        assert before[unrelated]['relax']['source'] == 'artist'
+        generation, _posterior = vibe_joint_preparation.posterior(store, 'relax')
+
+    original_scores = store.vibe_predictions.fit_scores([original], 'relax')
+    assert original_scores
+    historical = [before[key]['relax']['prediction_id'] for key in keys]
+    receipts = [vibe_provenance.read(store.conn, pid) for pid in historical]
+    assert all(receipt['inputs'] for receipt in receipts)
+    assert not store.vibe_predictions.fit_scores(keys, 'relax')
+    assert not store.vibe_predictions.retained_joint_fits(keys)
+    readiness = store.musical_profiles.readiness_state(keys)[1]
+    assert all('relax' not in readiness[key]['vibes']['fits'] for key in keys)
+
+    drain(store).close()
+    after = store.vibe_predictions.retained_joint_fits(keys)
+    assert set(after) == {related}
+    assert after[related]['relax']['prediction_id'] != historical[0]
+    replacement, _posterior = vibe_joint_preparation.posterior(store, 'relax')
+    assert replacement == generation
+    assert store.vibe_predictions.fit_scores([original], 'relax') == original_scores
+    assert store.conn.execute('SELECT 1 FROM recording_vibes WHERE prediction_id=?', (historical[1],)).fetchone() is None
+    assert [vibe_provenance.read(store.conn, pid) for pid in historical] == receipts
+
+
+@pytest.mark.parametrize('interruption', ['complete', 'source-update', 'competing-head', 'policy-change', 'shutdown'])
 def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_readers(
-        file_backed_store, monkeypatch, interruption):
-    from yt_playlist.core import file_collection, vibe_model_files
+        file_backed_store, monkeypatch, caplog, interruption):
+    from yt_playlist.core import file_collection
     from yt_playlist.core import activity
+    from yt_playlist.rec import audio_vibe_specialists
     from types import SimpleNamespace
     from yt_playlist.core import vibe_models
 
@@ -1173,10 +1571,11 @@ def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_reade
     # Keep a valid prior generation while a changed revision is prepared.
     for _ in vibe_joint_preparation.VIBES:
         assert joint_commands.step(store)
-    heads = {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+    heads = {vibe: store.vibe_predictions.joint_state(vibe)[0]
              for vibe in vibe_joint_preparation.VIBES}
-    revision = int(store.settings.get_setting(vibe_model_files.REVISION) or 0)
-    store.settings.set_setting(vibe_model_files.REVISION, str(revision + 1))
+    revision = int(store.vibe_predictions.joint_revision())
+    with store.conn:
+        store.conn.execute('UPDATE rec_vibe_pending SET evidence_revision=? WHERE position=0', (revision + 1,))
     worker = Preparation(store)
     original = vibe_joint_preparation.prior_inputs
     clock, stopping, batches = [100.], [False], []
@@ -1186,9 +1585,13 @@ def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_reade
         batches.append([row['recording'] for row in rows])
         result = original(reader, rows, vibe)
         clock[0] += worker.budget.capture_seconds + worker.budget.fit_seconds + 1
-        if interruption == 'stale':
+        if interruption == 'source-update':
             with store.conn:
                 catalog.choose_field(store.conn, entry, 'genre', 'Detroit Techno')
+        if interruption == 'competing-head':
+            store.vibe_predictions.repository.save_joint_outcome(vibe, {})
+        if interruption == 'policy-change':
+            monkeypatch.setattr(audio_vibe_specialists, 'identity', lambda: 'replacement-policy')
         stopping[0] = interruption == 'shutdown'
         return result
 
@@ -1197,17 +1600,21 @@ def test_joint_input_batch_finishes_without_deadline_restarts_and_releases_reade
         with pytest.raises(activity.WorkClosing), activity.cancellable_work(lambda: stopping[0]):
             worker._joint_step()
     else:
-        assert worker._joint_step() is (interruption == 'complete')
+        with caplog.at_level('DEBUG', logger='yt_playlist.library.vibe_composition'):
+            assert worker._joint_step() is (interruption in ('complete', 'source-update'))
     assert batches and len([key for batch in batches for key in batch]) == len(
         {key for batch in batches for key in batch})
     assert worker._capturing is None and worker._capturing_kind is None
-    current = {vibe: store.settings.get_setting(vibe_model_files.HEAD_PREFIX + vibe)
+    current = {vibe: store.vibe_predictions.joint_state(vibe)[0]
                for vibe in vibe_joint_preparation.VIBES}
-    if interruption == 'complete':
+    if interruption in ('complete', 'source-update'):
         outcome = vibe_joint_preparation.state(store, vibe_joint_preparation.VIBES[0])
         assert outcome['revision'] == str(revision + 1) and outcome['outcome'] == 'ready'
     else:
         assert heads == current
+        rejection = {'competing-head': 'changed-vibe-head', 'policy-change': 'changed-vibe-policy'}.get(interruption)
+        if rejection:
+            assert 'reason=' + rejection in caplog.text
     with file_collection.collector(vibe_models.directory(store.conn)) as admitted:
         assert admitted
     assert vibe_joint_preparation.due(store)
@@ -1231,7 +1638,7 @@ def test_joint_score_batch_finishes_channels_once_and_preserves_publication_guar
         'SELECT * FROM recording_vibes WHERE recording_id='
         '(SELECT id FROM recordings WHERE identity_key=?) ORDER BY vibe', (target,))]
     with store.conn:
-        store.conn.execute('INSERT INTO rec_content_pending(identity_key) VALUES (?)', (target,))
+        content_work.enqueue(store.conn, (target,))
     worker = Preparation(store)
     posteriors, channels, original = [], [], vibe_joint_preparation.posterior
     clock, stopping = [100.], [False]

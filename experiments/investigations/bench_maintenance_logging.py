@@ -24,7 +24,7 @@ def measure(directory):
     limit_native_threads()
     store = Store(directory / 'library.db')
     store.init_schema()
-    identity = store.accounts.upsert_account('Logging probe', 'fixture', None, True)
+    identity = store.accounts.upsert_account('Logging probe', None, True)
     tracks = []
     # Mode discovery requires at least 80 content vectors. Include enough real
     # library members to exercise populated bundles rather than the cold path.

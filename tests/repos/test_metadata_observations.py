@@ -16,9 +16,9 @@ def observation(**changes):
 def test_competing_evidence_is_idempotent_per_delivery_and_does_not_change_choices(store):
     tid = store.tracks.upsert_track('video', 'Song', 'Artist', '', 200)
     with store.conn:
-        catalog.choose_field(store.conn, tid, 'energy', None)
+        catalog.choose_field(store.conn, tid, 'danceability', None)
     repo = store.enrichment_state
-    first = observation(field='energy', value=0.8)
+    first = observation(field='danceability', value=0.8)
     repo.record_metadata_observations(tid, 'source-a', [first], run_id='run-1', now=10)
     repo.record_metadata_observations(tid, 'source-a', [first], run_id='run-1', now=11)
     repo.record_metadata_observations(tid, 'source-b', [replace(first, value=0.2)], run_id='run-1', now=12)
@@ -28,9 +28,9 @@ def test_competing_evidence_is_idempotent_per_delivery_and_does_not_change_choic
         ('source-a', 0.8, 10), ('source-b', 0.2, 12), ('source-a', 0.8, 13)]
     assert [r['provenance']['delivery_id'] for r in rows] == ['run-1', 'run-1', 'run-2']
     assert store.tracks.get_track_audio(tid)[1] is None
-    assert metadata_provenance(store, tid)['fields']['energy'] == {
+    assert metadata_provenance(store, tid)['fields']['danceability'] == {
         'value': None, 'override': True, 'source': 'user'}
-    assert store.conn.execute('SELECT energy FROM recordings').fetchone()[0] is None
+    assert store.conn.execute('SELECT danceability FROM recordings').fetchone()[0] is None
 
 
 def test_scopes_tags_and_caller_owned_values_are_retained_without_reinterpretation(store):

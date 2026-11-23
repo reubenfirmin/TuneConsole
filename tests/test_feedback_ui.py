@@ -1,11 +1,13 @@
 from fastapi.testclient import TestClient
 import pytest
 
+from yt_playlist.core.rec_model_policy import SESSION_IDLE_S
 from yt_playlist.web.app import create_app
 from tests.conftest import FakeClient
 from tests.home_fixture_support import (
-    home_routes_only, publish_menu, returning_listener, without_metadata_providers,
+    home_routes_only, returning_listener, without_metadata_providers,
 )
+from tests.onboarding_support import publish_live_mix_inputs
 from tests.store_fixture_support import (
     bounded_consumer_schema, native_sql_calls,
     uncontended_file_consumer_store as store, without_query_timing,
@@ -25,18 +27,18 @@ def _pristine_current_schema():
 @pytest.fixture
 def feedback_routes(monkeypatch, home_routes_only):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import app_update, audio_preview, home_board, suggest
+    from yt_playlist.web.routes import app_update, audio_vibes, home_board, suggest
     from yt_playlist.web.routes.home_views import HomeViews
 
     def build(ctx):
-        return [app_update.build(ctx), audio_preview.build(ctx),
+        return [app_update.build(ctx), audio_vibes.build(ctx),
                 home_board.build(ctx, HomeViews(ctx)), suggest.build(ctx)]
 
     monkeypatch.setattr(webapp, 'build_all', build)
 
 
 def _seed(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
+    iid = store.accounts.upsert_account("main", None, True)
     store.tracks.upsert_track("v1", "Hit", "Fav", None, None)
     store.tracks.upsert_track("v2", "Bench", "Fav", None, None)   # deep cut -> appears in for_you
     now = 1000.0
@@ -53,7 +55,7 @@ def test_home_proto_curation_not_pre_listen_taste_chips(store):
     # "remove from this playlist", NOT taste feedback that only makes sense after hearing a track.
     # Cards are now lazy-loaded; assert against /home/cards instead of /.
     _, c = _seed(store)
-    publish_menu(store, now=1000)
+    publish_live_mix_inputs(store, now=1000)
     returning_listener(store, 'mixes', now=1000)
     response = c.get("/home/cards")
     assert response.status_code == 200
@@ -86,27 +88,19 @@ def test_mute_artist_via_chip(store):
     assert "Fav" in store.rec_model.muted_artists()
 
 
-def test_feedback_axis_routes_through_graduation_and_eventually_moves_weight(store):
-    iid = store.accounts.upsert_account("main", "cred", None, True)
-    from fastapi.testclient import TestClient
-    from yt_playlist.web.app import create_app
-    from tests.conftest import FakeClient
-    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: 1.0),
+def test_feedback_axis_steers_immediately_and_expires_with_the_session(store):
+    iid = store.accounts.upsert_account("main", None, True)
+    now = 1000.
+    store.history.record_play_event(iid, 'playing|artist', 'playing', now, source_timezone='UTC')
+    c = TestClient(create_app(store, lambda: {iid: FakeClient()}, now_fn=lambda: now),
                    base_url="http://127.0.0.1")
 
-    # Why-chip steering goes through the graduation ledger now (#43 / §4b), not a direct nudge: a single
-    # event moves the ledger but leaves the permanent weight neutral (it is below theme_threshold).
-    c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    assert store.rec_model.get_weights(now=1.0).get("era:1990", 1.0) == 1.0     # one event: ledger only, weight untouched
-    assert (store.rec_signals.get_theme("era:1990") or 0) < 0
-
-    # Sustained feedback crosses the threshold and graduates the weight.
-    for _ in range(3):
-        c.post("/recs/feedback", data={"item": "a|b", "kind": "less", "axis": "era:1990"})
-    # #85 the route's now_fn is fixed at 1.0; read at the same `now` so reversion (vs real wall-clock
-    # time) doesn't erase the graduation before the assertion runs.
-    assert store.rec_model.get_weights(now=1.0)["era:1990"] < 1.0               # 'less' graduates it down
-
-    for _ in range(4):
-        c.post("/recs/feedback", data={"item": "c|d", "kind": "more", "axis": "artist:Foo"})
-    assert store.rec_model.get_weights(now=1.0)["artist:Foo"] > 1.0            # 'more' graduates it up
+    for item, kind, axis, factor in (('a|b', 'less', 'era:1990', .85),
+                                      ('c|d', 'more', 'artist:Foo', 1.15)):
+        for presses in (1, 2, 3, 4):
+            response = c.post('/recs/feedback', data={'item': item, 'kind': kind, 'axis': axis})
+            assert response.status_code == 200
+            assert store.rec_model.get_weights(now=now)[axis] == pytest.approx(factor ** presses)
+            assert axis not in store.rec_model.baseline_weights(now=now)
+    assert store.rec_model.get_weights(now=now + SESSION_IDLE_S - 1)
+    assert store.rec_model.get_weights(now=now + SESSION_IDLE_S) == {}

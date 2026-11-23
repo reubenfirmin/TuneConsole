@@ -20,7 +20,7 @@ from yt_playlist.repos.trends import TrendsRepo
 @pytest.fixture(params=["memory", "file"])
 def database(request, tmp_path, consumer_store):
     store = consumer_store(":memory:" if request.param == "memory" else tmp_path / "state.db")
-    store.accounts.upsert_account("me", "c", None, True)
+    store.accounts.upsert_account("me", None, True)
     seed_catalog_track(store, "song", "Song", "Artist", video_id="video")
     store.history.record_history_plays(1, 5 * 86400, ["song"], source_timezone="UTC")
     yield store
@@ -29,9 +29,8 @@ def database(request, tmp_path, consumer_store):
 
 def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, monkeypatch, consumer_store):
     store = consumer_store(tmp_path / "state.db")
-    store.accounts.upsert_account('Listener','c',None,True)
+    store.accounts.upsert_account('Listener',None,True)
     store.history.record_history_plays(1,86400,['saved'],source_timezone='UTC')
-    store.trends.refresh_first_play()
     store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     entered = threading.Event()
     reader_connections = []
@@ -39,13 +38,17 @@ def test_slow_rollup_sql_allows_ui_reads_and_writes_before_shutdown(tmp_path, mo
     worker = RecWorker(SimpleNamespace(store=store, work=work,
         logger=logging.getLogger(__name__), now_fn=lambda: 86400), debounce_s=0)
 
-    def slow_query(repo):
+    first_play_map = TrendsRepo.first_play_map
+
+    def slow_query(repo, kind):
+        if kind != 'artist':
+            return first_play_map(repo, kind)
         reader_connections.append(repo.conn)
         repo.conn.create_function("query_started", 0, lambda: (entered.set(), 0)[1])
         repo.conn.execute("WITH RECURSIVE slow(n) AS (VALUES(query_started()) UNION ALL "
                           "SELECT n+1 FROM slow WHERE n<1000000000) SELECT sum(n) FROM slow").fetchone()
 
-    monkeypatch.setattr(TrendsRepo, "prepare_first_play", slow_query)
+    monkeypatch.setattr(TrendsRepo, "first_play_map", slow_query)
     monkeypatch.setattr(worker, "_rebuild", worker._refresh_trends)
 
     async def ui_interaction():
@@ -99,12 +102,11 @@ def test_source_reset_during_calculation_cannot_publish_stale_rollup(database, m
 
 def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(database):
     store = database
-    store.trends.refresh_first_play()
     store.rec_proposals.put_proposals("trend_rollups", {"saved": True})
     store.settings.set_setting("trend_spotlight_review_month", "saved")
     with store.conn:
-        store.conn.execute("CREATE TRIGGER reject_rollup BEFORE INSERT ON home_display_publications "
-                           "WHEN NEW.surface='trend_rollups' "
+        store.conn.execute("CREATE TEMP TRIGGER reject_rollup BEFORE UPDATE OF display_key ON collection_file_writes "
+                           "WHEN NEW.display_key='prepared_home:trend_rollups' "
                            "BEGIN SELECT RAISE(ABORT,'rejected publication'); END")
     with pytest.raises(sqlite3.IntegrityError, match="rejected publication"):
         trend_rollups.build(store, 6 * 86400)
@@ -114,10 +116,9 @@ def test_failed_publication_keeps_previous_index_rollup_and_review_stamp(databas
     assert not store.conn.in_transaction
 
 
-@pytest.mark.parametrize('reset_after', ['reader_release', 'first_play'])
+@pytest.mark.parametrize('reset_after', ['reader_release', 'publication'])
 def test_reset_cannot_interleave_final_recap_publication(database, monkeypatch, reset_after):
     store = database
-    store.trends.refresh_first_play()
     store.rec_proposals.put_proposals('trend_rollups', {'saved': True})
     release = ReadSnapshot.release_reader
     reset, blocked = [], []
@@ -129,14 +130,14 @@ def test_reset_cannot_interleave_final_recap_publication(database, monkeypatch, 
             reset.append(True)
 
     monkeypatch.setattr(ReadSnapshot, 'release_reader', release_then_reset)
-    repository = store.trends.repository
-    publish = repository.publish_first_play
+    trends = store.trends
+    publish = trends.publish_rollup
 
     def publish_then_try_reset(*args, **kwargs):
         assert not store.conn.in_transaction
         publish(*args, **kwargs)
-        assert not store.conn.in_transaction  # Each repository commits independently.
-        if reset_after == 'first_play':
+        assert not store.conn.in_transaction
+        if reset_after == 'publication':
             def competing_reset():
                 if not store._lock.acquire(blocking=False):
                     blocked.append(True)
@@ -151,7 +152,7 @@ def test_reset_cannot_interleave_final_recap_publication(database, monkeypatch, 
             contender.join(5)
             assert not contender.is_alive()
 
-    monkeypatch.setattr(repository, 'publish_first_play', publish_then_try_reset)
+    monkeypatch.setattr(trends, 'publish_rollup', publish_then_try_reset)
     result = trend_rollups.build(store, 35 * 86400)
     if reset_after == 'reader_release':
         assert reset and result is None

@@ -12,7 +12,7 @@ import time
 import pytest
 
 from tests.group_benchmark_support import frozen_inputs, report_path
-from yt_playlist.core import prepared_inputs
+from yt_playlist.core import content_work, prepared_inputs
 from yt_playlist.rec import group_discovery, group_preparation
 
 
@@ -30,11 +30,16 @@ def test_production_preparation_and_update_budgets_retain_lineage(tmp_path, stor
                 store.conn.execute('INSERT INTO recordings(identity_key) VALUES (?) '
                     'ON CONFLICT(identity_key) DO NOTHING', (key,))
                 prepared_inputs.upsert(store.conn, key, payload, 'f' * 64, 1, i + 1)
-            store.conn.executemany('INSERT INTO rec_musical_profiles VALUES (?,?,?,?,?)',
-                [(key, json.dumps(profile), profile['version'], 'frozen', 1)
-                 for key, _payload, profile in frozen['rows'] if profile])
-            store.conn.execute("INSERT INTO rec_content_pending(identity_key) VALUES ('not-captured-yet')")
-            store.conn.execute("INSERT INTO rec_musical_sources VALUES ('unfinished-source','test','artist','artist','{}',1)")
+            content_work.enqueue(store.conn, ('not-captured-yet',))
+            store.conn.execute('INSERT INTO rec_musical_sources(source_key,provider,scope,entity_id) '
+                               "VALUES ('unfinished-source','test','artist','artist')")
+        profiles = []
+        for key, _payload, profile in frozen['rows']:
+            if profile:
+                raw = json.dumps(profile, sort_keys=True, separators=(',', ':'))
+                profiles.append((key, raw, profile['version'], hashlib.sha256(raw.encode()).hexdigest()))
+        for start in range(0, len(profiles), 128):
+            store.musical_profiles.publish_recordings(profiles[start:start + 128], 1)
         original = group_discovery.discover
 
         def continuing_metadata(*args, **kwargs):

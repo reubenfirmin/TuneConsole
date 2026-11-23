@@ -359,6 +359,7 @@ def test_relational_attempt_replay_cannot_replace_state_or_change_outcome(attemp
 @pytest.fixture
 def expiry_state(state):
     state.repository.expiry_state.return_value = {'gc_shard': 4, 'gc_cursor': 20, 'gc_after': 0}
+    state.repository.expiry_guard.side_effect = nullcontext
     state.repository.expiry_page.return_value = []
     state.files.collecting.side_effect = lambda: nullcontext(True)
     state.files.expire_alternatives.return_value = 2, 7

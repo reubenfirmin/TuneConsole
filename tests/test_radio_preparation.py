@@ -46,18 +46,12 @@ def poc(monkeypatch, file_consumer_store):
         yield state
 
 
-@pytest.mark.parametrize('paused,ready', [(True, True), (False, False), (True, False)])
-def test_heartbeat_preparation_waits_until_maintenance_finishes(poc, monkeypatch, paused, ready):
+def test_heartbeat_preparation_waits_until_maintenance_finishes(poc, monkeypatch):
     c, _, _, workers, _ = poc
-    gate = threading.Event()
-    if ready:
-        gate.set()
-    c.ctx.storage_maintenance = SimpleNamespace(ready=gate)
-    c.ctx.store.activity_paused = paused
+    c.ctx.store.activity_paused = True
     c.prepare()
     assert not workers and not c.preparing
     c.ctx.store.activity_paused = False
-    gate.set()
     c.prepare()
     assert len(workers) == 1 and c.preparing
     calls = []
@@ -84,7 +78,7 @@ def test_prepared_reader_retires_its_lease_before_database_close(file_backed_sto
     assert reader.generation == generation and reader._lifetime.alive
     pending = group_documents.directory(store.conn) / '.pending'
     assert len(list(pending.glob('*.lock'))) == 1
-    assert store.conn.execute("SELECT count(*) FROM group_evidence_owners WHERE kind='pending'").fetchone()[0] == 1
+    assert store.conn.execute("SELECT count(*) FROM group_evidence_contexts WHERE kind='pending'").fetchone()[0] == 1
     if reader_first:
         reader.close()
         assert not store.conn._before_close_callbacks
@@ -98,33 +92,29 @@ def test_prepared_reader_retires_its_lease_before_database_close(file_backed_sto
     assert not reader._lifetime.alive
     # Inspect the persisted rows before any startup repair can clean up leases.
     with closing(sqlite3.connect(store._db_path)) as reopened:
-        assert not reopened.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+        assert not reopened.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
 
 
-def prepare_radio_styles(controller, pool, monkeypatch):
+def prepare_radio_track_groups(controller, pool, monkeypatch):
     """Publish four real prepared regions after a session has already started cold."""
-    import numpy as np
-    from yt_playlist.rec import embedding_vectors as embed
+    from tests.group_support import publish_keyed
     from yt_playlist.rec.radio_candidates import RadioCandidates
     from tests.model_support import build_content_model
 
     store = controller.ctx.store
     ids = store.tracks.track_ids_for_videos([t["video_id"] for t in pool])
-    bundles, modes = {}, []
+    bundles = {}
     genres = ("Ambient", "Techno", "Jazz", "Rock")
     for index, track in enumerate(pool):
         seed_enrichment(store, ids[track["video_id"]], genres[index // 8], "2001")
     build_content_model(store)
-    keys = [pool[index * 8]["key"] for index in range(4)]
-    vectors = store.rec_model.content_vectors_by_keys(keys)
+    membership = publish_keyed(store, [
+        (genre, [track['key'] for track in pool[index * 8:(index + 1) * 8]], .1 + index * .25)
+        for index, genre in enumerate(genres)], now=1234)
     for index, genre in enumerate(genres):
-        mid = index + 1
         tracks = [{**t, "genre": genre, "year": "2001"} for t in pool[index * 8:(index + 1) * 8]]
-        bundles[str(mid)] = {"wheelhouse": tracks}
-        modes.append({"mode_id": mid, "label": genre, "families": [[genre.casefold(), 1]],
-            "centroid": np.frombuffer(vectors[keys[index]], dtype=np.float32), "size": 8,
-            "rep_keys": [keys[index]], "space": embed.content_space_id(store)})
-    store.modes.replace_modes(modes, retired_ids=[], now=1234)
+        for track in tracks:
+            bundles.setdefault(membership[track['key']], {'wheelhouse': []})['wheelhouse'].append(track)
     publish_bundles(store, bundles, 1234)
     monkeypatch.setattr(radio_session, "RadioCandidates", RadioCandidates)
 
@@ -139,7 +129,7 @@ def test_monitor_upgrades_fallback_to_distinct_prepared_streams_without_changing
     tracks, heard, choices = list(s.tracks), list(s.heard), dict(s.choices)
     active = s.directions.slots[s.directions.active]
     queue = list(active["tracks"])
-    prepare_radio_styles(c, pool, monkeypatch)
+    prepare_radio_track_groups(c, pool, monkeypatch)
 
     def forbidden(*args, **kwargs):
         pytest.fail("Radio recovery must reuse prepared pools without loading or fitting the full model")
@@ -177,7 +167,7 @@ def test_pool_recovery_waits_for_an_explicit_stream_switch_to_finish(poc, monkey
     branch = c.status()["directions"][2]
     c.select(branch["id"], c.status()["menu_id"])
     requested = s.requested_direction
-    prepare_radio_styles(c, pool, monkeypatch)
+    prepare_radio_track_groups(c, pool, monkeypatch)
     c._refresh_candidates(s)
     assert s.candidates is original and s.requested_direction is requested
     c.advance(s)
@@ -208,13 +198,51 @@ def test_missing_pools_keep_the_menu_stable_and_request_preparation_once(poc):
     assert remote.ids == ["v1", "v2", "v3"] and not remote.adds and not remote.removes
 
 
+def test_shared_publication_keeps_fallback_without_rebuilding_candidates(poc, monkeypatch):
+    c, remote, frames, _, pool = poc
+    assert c.start()['ok']
+    play(c, 'v2')
+    session = c.session
+    original = session.candidates
+    directions = c.status()['directions']
+    playlist = session.playlist
+    prepares = []
+    c.ctx.rec_worker = SimpleNamespace(busy=False, trigger_mode_refresh=lambda: prepares.append(True))
+
+    prepare_radio_track_groups(c, pool, monkeypatch)
+    store = c.ctx.store
+    grouped = store._fixture_bundle_payload
+    publish_bundles(store, {'all': {'wheelhouse': pool[:8]}}, 1235)
+    production = radio_session.RadioCandidates
+    builds = []
+
+    def build(*args, **kwargs):
+        builds.append(True)
+        return production(*args, **kwargs)
+
+    monkeypatch.setattr(radio_session, 'RadioCandidates', build)
+    for _ in range(3):
+        session.candidates_checked_at = 0
+        c._refresh_candidates(session)
+        assert session.candidates is original and c.status()['directions'] == directions
+    assert not builds and not prepares
+
+    publish_bundles(store, grouped, 1236)
+    session.candidates_checked_at = 0
+    c._refresh_candidates(session)
+    assert builds == [True] and len(session.candidates.modes) == 4
+    assert c.session is session and session.playlist == playlist
+    assert c.ctx.bridge.now_playing['video_id'] == 'v2'
+    assert remote.ids == ['v1', 'v2', 'v3'] and not remote.adds and not remote.removes and len(frames) == 1
+
+
 def test_failed_pool_upgrade_preserves_the_existing_streams_until_retry(poc, monkeypatch):
     c, remote, _, _, pool = poc
     c.start()
     play(c, "v2")
     s, candidates = c.session, c.session.candidates
     directions, menu = s.directions, c.status()["menu_id"]
-    prepare_radio_styles(c, pool, monkeypatch)
+    prepare_radio_track_groups(c, pool, monkeypatch)
     update = RadioDirections.update
 
     def fail(*args, **kwargs):
@@ -277,6 +305,7 @@ def test_radio_refreshes_metadata_for_current_and_played_table_rows(poc, monkeyp
     from yt_playlist.controllers.radio_inputs import inputs_for
     s.candidates.inputs = inputs_for(c.ctx.store)
     s.candidates.affinities = {}
+    s.candidates.prepared = SimpleNamespace(track_facts=lambda kind, keys, load: load(keys))
     monkeypatch.setattr(s.candidates, "_rotation_facts",
                         lambda tracks: RadioCandidates._rotation_facts(s.candidates, tracks), raising=False)
     monkeypatch.setattr(s.candidates, "_energy", lambda tracks: False, raising=False)

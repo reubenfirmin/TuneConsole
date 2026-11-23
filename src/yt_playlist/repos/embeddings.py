@@ -2,24 +2,18 @@
 from yt_playlist.core import artists, embedding_files, embeddings
 from yt_playlist.core.db_revisions import column_group_reads
 from yt_playlist.repos.base import Repo, synchronized, lookup_read
-from yt_playlist.repos import embedding_file_writes
 
 
 class EmbeddingRepo(Repo):
     @synchronized
     def delete_spaces(self, recording_spaces, artist_spaces):
         with self.conn.atomic():
-            for table, spaces in (('recording_embeddings', recording_spaces), ('artist_embeddings', artist_spaces)):
+            for table, spaces in (('recording_embedding_files', recording_spaces),
+                                  ('artist_embedding_files', artist_spaces)):
                 if spaces is None:
                     self.conn.execute(f'DELETE FROM {table}')
                 else:
                     self.conn.executemany(f'DELETE FROM {table} WHERE space=?', [(space,) for space in spaces])
-            if embedding_files.available(self.conn):
-                for table, spaces in (('recording_embedding_files', recording_spaces), ('artist_embedding_files', artist_spaces)):
-                    if spaces is None:
-                        self.conn.execute(f'DELETE FROM {table}')
-                    else:
-                        self.conn.executemany(f'DELETE FROM {table} WHERE space=?', [(space,) for space in spaces])
 
     @lookup_read
     def rows(self, name, keys=None):
@@ -35,15 +29,11 @@ class EmbeddingRepo(Repo):
         return embeddings.count(self.conn, name)
 
     @lookup_read
-    def file_owned(self):
-        return embedding_files.available(self.conn)
-
-    @lookup_read
     def subjects(self, kind, keys, *, retired=False):
         result = {}
         for key in keys:
             if kind == 'recording':
-                current = '' if retired else ' AND NOT EXISTS(SELECT 1 FROM recording_redirects d WHERE d.retired_id=r.id)'
+                current = '' if retired else ' AND r.redirect_recording_id IS NULL'
                 with column_group_reads(self._store, 'recordings', 'identity'):
                     row = self.conn.execute('SELECT r.id FROM recordings r WHERE r.identity_key=?' + current, (key,)).fetchone()
                 result[key] = row[0] if row else None
@@ -63,7 +53,7 @@ class EmbeddingRepo(Repo):
 
     @lookup_read
     def insertion_orders(self, kind, space, subjects, removed):
-        logical, column = embedding_files.relation(self.conn, kind), kind + '_id'
+        logical, column = embedding_files.relation(kind), kind + '_id'
         orders = {}
         for start in range(0, len(subjects), 500):
             batch = subjects[start:start + 500]
@@ -82,26 +72,10 @@ class EmbeddingRepo(Repo):
                 embeddings.publish_prepared(self.conn, publication)
 
     @synchronized
-    def reserve_files(self, records):
-        if not records:
-            return []
-        with self.conn.atomic():
-            return embedding_file_writes.reserve(self.conn, records)
-
-    @synchronized
     def file_required(self, kind, reference):
         if kind not in ('recording', 'artist'):
             raise ValueError('Invalid embedding owner')
-        if not embedding_files.available(self.conn):
-            return False
-        if type(reference) is int:
-            if not embedding_file_writes.native(self.conn):
-                return False
-            clause = 'file_id=?'
-        else:
-            clause = 'publication=?'
-            if embedding_file_writes.native(self.conn):
-                clause += ' AND file_id IS NULL'
+        clause = 'file_id=?' if type(reference) is int else 'publication=? AND file_id IS NULL'
         return self.conn.execute(f'SELECT 1 FROM {kind}_embedding_files WHERE {clause} LIMIT 1',
                                  (reference,)).fetchone() is not None
 

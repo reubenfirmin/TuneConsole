@@ -1,28 +1,20 @@
-"""Coordinate paid-description decisions, request SQL and immutable files."""
+"""Coordinate paid-description admission and completion."""
 import json
 import uuid
 
+from yt_playlist.core.album_description_files import MAX_BYTES
 from yt_playlist.rec import paid_description_policy as policy
-from yt_playlist.core.album_description_files import describe
 
 
 class AlbumDescriptions:
-    def __init__(self, repository, read_result, publish_result, policies, *, proposals=None, installed=True):
+    def __init__(self, repository, policies):
         self.repository = repository
-        self.read_result = read_result
-        self.publish_result = publish_result
         self.policies = policies
-        self.proposals = proposals
-        self.installed = installed
 
     policy_version = staticmethod(policy.policy_version)
 
     def summary(self):
-        if self.installed:
-            return self.repository.summary('ready', policy.PENDING_STATES)
-        notes = self.proposals.get_proposals('album_notes') or {}
-        completed = sum(bool((note.get('description') or {}).get('kind') == 'generated') for note in notes.values())
-        return completed, bool(self.proposals.get_proposals('album_note_requests'))
+        return self.repository.summary('ready', policy.PENDING_STATES)
 
     def album_id(self, album):
         explicit, browse = album.get('album_id'), album.get('browse_id')
@@ -36,17 +28,17 @@ class AlbumDescriptions:
 
     def result(self, request_id):
         row = self.repository.request(request_id)
-        if not row or row['outcome_filename'] is None:
+        if not row or row['outcome_json'] is None:
             return None
-        return json.loads(self.read_result(row['outcome_filename'], row['outcome_digest']))
+        return json.loads(row['outcome_json'])
 
     def cached(self, album_id, policy_version):
         request_id = self.repository.request_for(album_id, policy_version, policy.REQUEST_ORDER)
         return self.result(request_id) if request_id is not None else None
 
     def successful_result(self, album_id):
-        reference = self.repository.successful_reference(album_id)
-        return json.loads(self.read_result(*reference)) if reference else None
+        raw = self.repository.successful_result(album_id)
+        return json.loads(raw) if raw else None
 
     def legacy_result(self, identity):
         request_id = self.repository.legacy_request(identity)
@@ -58,75 +50,6 @@ class AlbumDescriptions:
     def availability(self, credential, now):
         policy.validate_time(now)
         return policy.availability(self.repository.access_rows(credential, now, 'auth'))
-
-    def legacy_availability(self, credential, now):
-        waits = ([self.repository.legacy_record('deepseek_host') or {},
-                  self.repository.legacy_record('deepseek_credential:' + credential) or {}] if credential else [])
-        usage = self.repository.legacy_record('album_description_usage') or {}
-        if usage.get('status') == 'unavailable' or (usage.get('credential') == credential
-                and usage.get('status') in ('auth', 'balance', 'rate_limit')):
-            waits.append({'status': usage['status'], 'retry_at': usage.get('retry_at', 0)})
-        return policy.availability([{'status': wait['status'], 'retry_at': wait.get('retry_at', 0)}
-            for wait in waits if wait.get('status') == 'auth' or wait.get('retry_at', 0) > now])
-
-    def legacy_claim(self, identity, credential, daily_limit, now):
-        """Keep the installed pre-request-table protocol in the description owner."""
-        with self.repository.transaction():
-            record = self.repository.legacy_record('album_description:' + identity) or {}
-            if record.get('description') or (record.get('status') in ('unknown', 'invalid_response')
-                    and record.get('retry_at', 0) > now):
-                return {'status': 'cached', 'record': record}
-            usage = self.repository.legacy_record('album_description_usage') or {}
-            if usage.get('lease_until', 0) > now:
-                return {'status': 'busy', 'retry_at': usage['lease_until']}
-            wait = self.legacy_availability(credential, now)
-            if wait:
-                return wait
-            day = policy.period(now)
-            count = usage.get('requests', 0) if usage.get('day') == day else 0
-            if count >= daily_limit:
-                return {'status': 'daily_limit', 'retry_at': (day + 1) * 86400}
-            records = []
-            if usage.get('credential') and usage.get('status') in ('auth', 'balance', 'rate_limit'):
-                records.append(('deepseek_credential:' + usage['credential'], {
-                    'status': usage['status'], 'retry_at': usage.get('retry_at', 0)}))
-            token = uuid.uuid4().hex
-            usage = {**usage, 'day': day, 'requests': count + 1, 'credential': credential,
-                'lease_until': now + policy.LEASE_SECONDS, 'token': token, 'status': 'pending',
-                'retry_at': 0, 'send_authorized': False}
-            self.repository.store_legacy_records([*records, ('album_description_usage', usage)], now)
-            return {'status': 'reserved', 'token': token}
-
-    def legacy_authorize(self, token, credential, daily_limit, now):
-        with self.repository.transaction():
-            usage = self.repository.legacy_record('album_description_usage') or {}
-            if (usage.get('token') != token or usage.get('credential') != credential
-                    or usage.get('day') != policy.period(now) or usage.get('lease_until', 0) <= now
-                    or usage.get('status') != 'pending' or usage.get('send_authorized')
-                    or not 0 < usage.get('requests', 0) <= daily_limit):
-                return False
-            usage.update(send_authorized=True, lease_until=max(usage['lease_until'], now + policy.LEASE_SECONDS))
-            self.repository.store_legacy_records([('album_description_usage', usage)], now)
-            return True
-
-    def legacy_finish(self, identity, token, record, now):
-        with self.repository.transaction():
-            current = self.repository.legacy_record('album_description:' + identity) or {}
-            usage = self.repository.legacy_record('album_description_usage') or {}
-            records = []
-            if not current.get('description') and (record.get('description') or usage.get('token') == token):
-                records.append(('album_description:' + identity, record))
-            if usage.get('token') == token:
-                status = record['status']
-                if status in ('auth', 'balance', 'rate_limit', 'unavailable'):
-                    surface = 'deepseek_host' if status == 'unavailable' else 'deepseek_credential:' + usage['credential']
-                    previous = self.repository.legacy_record(surface) or {}
-                    records.append((surface, {'status': status,
-                        'retry_at': max(record['retry_at'], previous.get('retry_at', 0))}))
-                usage.update(status=status, lease_until=0, token=None,
-                    retry_at=record.get('retry_at', 0) if status not in ('ready', 'unknown', 'invalid_response') else 0)
-                records.append(('album_description_usage', usage))
-            self.repository.store_legacy_records(records, now)
 
     def claim(self, album_id, configuration, credential, daily_limit, now):
         return self.claim_version(album_id, policy.policy_version(configuration), credential, daily_limit, now,
@@ -149,7 +72,7 @@ class AlbumDescriptions:
         row = self.repository.request(request_id) if request_id is not None else None
         if row and row['status'] == 'ready':
             return {'status': 'cached', 'request_id': row['id']}
-        blocked = policy.legacy_block(self.repository.legacy_usage(), now)
+        blocked = policy.unattributed_request_block(self.repository.access_state('unattributed_request', ''), now)
         if blocked:
             return blocked
         active = self.repository.active_request(policy.ACTIVE_STATES)
@@ -184,11 +107,8 @@ class AlbumDescriptions:
     def finish(self, request_id, token, record, now):
         policy.validate_time(now)
         raw, tokens = policy.record(record)
-        row = self.repository.request(request_id)
-        if not policy.can_finish(row, token, record, tokens):
-            return False
-        file_id = self.repository.reserve_result(request_id, row['attempt_count'], *describe(raw))
-        reference = self.publish_result(file_id, raw)
+        if len(raw.encode()) > MAX_BYTES:
+            raise ValueError('Paid description result exceeds its byte limit')
         with self.repository.transaction():
             row = self.repository.request(request_id)
             if not policy.can_finish(row, token, record, tokens):
@@ -199,6 +119,5 @@ class AlbumDescriptions:
                 decision['access'] = policy.merge_access(access,
                     self.repository.access_state(access['scope'], access['credential']), now)
             self.repository.complete(request_id, row['attempt_count'], token, decision,
-                reference, tokens, policy.period(now), now, file_id=file_id,
-                model=record['model'] if record['status'] == 'ready' else None)
+                raw, tokens, policy.period(now), now)
         return True

@@ -137,7 +137,8 @@ def test_generated_command_owns_effects_and_read_only_reconciliation():
         effect.assert_not_called()
 
 
-def test_song_metadata_resource_maps_a_controller_stub(monkeypatch):
+@pytest.mark.parametrize('proposed_genre', [None, 'house'])
+def test_song_metadata_resource_maps_a_controller_stub(monkeypatch, proposed_genre):
     from yt_playlist.web.context import Ctx
     from yt_playlist.web.routes import songs
     query = Mock(spec_set=['metadata'])
@@ -145,10 +146,13 @@ def test_song_metadata_resource_maps_a_controller_stub(monkeypatch):
     monkeypatch.setattr(Ctx, 'playlist_queries', lambda self: query)
     app = FastAPI()
     app.include_router(songs.build(NS(store=None)))
+    params = {'video_id': 'exact-upload'}
+    if proposed_genre is not None:
+        params['proposed_genre'] = proposed_genre
     with TestClient(app) as client:
-        response = client.get('/songs/metadata', params={'video_id': 'exact-upload'})
+        response = client.get('/songs/metadata', params=params)
     assert response.status_code == 200 and response.json()['metadata']['title'] == 'Detached'
-    query.metadata.assert_called_once_with('exact-upload')
+    query.metadata.assert_called_once_with('exact-upload', proposed_genre=proposed_genre)
 
 
 def test_transfer_rejects_a_stale_batch_before_moving_any_playlist():

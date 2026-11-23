@@ -11,7 +11,7 @@ from tests.legacy_recommendation_fixture_support import recommendations
 from tests.repos.test_typed_recommendation_publication import (
     publish, plan, collect,
 )
-from yt_playlist.core import group_documents, home_outputs, model_projections, mix_choices
+from yt_playlist.core import group_documents, home_outputs, mix_choices, recommendation_custody
 from yt_playlist.library import group_lifetimes
 from yt_playlist.rec import choice_evidence, group_roots, recommendation_roots
 from yt_playlist.rec.choice_capture import CaptureQueue
@@ -33,13 +33,13 @@ def issue(store, generation, identity='menu'):
 
 
 def roots(store, kind):
-    return [tuple(row) for row in store.conn.execute('SELECT external_key,generation_id '
-        'FROM recommendation_generation_refs WHERE kind=? ORDER BY external_key,generation_id', (kind,))]
+    return [tuple(row) for row in store.conn.execute(f'SELECT root.value->>1,g.id FROM {recommendation_custody.ROOTS} '
+        f'AND root.value->>0=:kind UNION SELECT home.value->>2,home.value->>3 FROM {recommendation_custody.HOME_ROOTS} '
+        'AND home.value->>1=:kind ORDER BY 1,2', {'kind': kind})]
 
 
 def display_root(store, surface, field='recommendations'):
-    identity = store.conn.execute('SELECT publication_id FROM home_display_heads WHERE surface=?',
-                                  (surface,)).fetchone()[0]
+    identity = store.home_cache.document(surface).publication_id
     return f'home-output:{identity}:{field}'
 
 
@@ -108,7 +108,7 @@ def test_reader_without_a_head_leaves_no_pending_sql_or_lifetime_file(recommenda
         store.conn.execute('PRAGMA query_only=OFF')
     assert not any(sql.startswith(('BEGIN', 'INSERT', 'UPDATE', 'DELETE')) for sql in statements)
     assert not roots(store, 'pending')
-    assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     assert not list(store._db_path.parent.glob(store._db_path.name + '.groups/.pending/*.lock'))
 
 
@@ -166,7 +166,7 @@ def test_sql_reader_during_evidence_publication_retains_its_head_until_reaped(re
         worker.result(2)
     group_roots.reap_pending(store)
     assert not roots(store, 'pending')
-    assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     assert not list(directory.glob('*.lock'))
     if close is not None:
         close()
@@ -197,7 +197,7 @@ def test_private_reader_selects_its_pinned_head_after_the_writer_switches_and_re
 
 
 @pytest.mark.parametrize('explicit_generation', [False, True])
-def test_radio_during_maintenance_defers_its_lease_until_worker_resume(recommendations, explicit_generation):
+def test_radio_during_maintenance_defers_its_lease_until_writes_resume(recommendations, explicit_generation):
     from yt_playlist.rec.stored_radio import PreparedRadio
 
     store = recommendations
@@ -217,7 +217,6 @@ def test_radio_during_maintenance_defers_its_lease_until_worker_resume(recommend
         store.conn.execute('PRAGMA query_only=OFF')
         store.activity_paused = False
     try:
-        # The app's existing resume callback does this before starting workers.
         prepared.retain(13)
         prepared.retain(13)
         assert [generation for _, generation in roots(store, 'pending')] == [first]
@@ -334,24 +333,6 @@ def test_prepared_menus_retain_track_generations_with_atomic_replacement_and_sql
     assert not roots(store, 'prepared')
 
 
-def test_comparison_context_retains_publication_until_its_owner_is_cleared(recommendations):
-    store = recommendations
-    first = publish(store, plan(store)).generation_id
-    data = {'run_id': 1, 'data': {'context': {'recommendation_generations': [first]}}}
-    surface = 'model_pair:1:incumbent:mixes'
-    store.rec_proposals.put_proposals(surface, data, 10)
-    identity = store.conn.execute('SELECT publication_id FROM model_pair_heads').fetchone()[0]
-    assert roots(store, 'comparison') == [(f'comparison-output:{identity}:context', first)]
-    publish(store, plan(store, 'second'))
-    collect(store)
-    assert exists(store, first)
-    with store.conn:
-        store.conn.execute('BEGIN IMMEDIATE')
-        model_projections.clear(store.conn)
-    collect(store)
-    assert not exists(store, first)
-
-
 def test_nonexistent_publication_is_rejected_for_readers_but_not_retained_by_mix_capture(recommendations):
     store = recommendations
     jobs = []
@@ -359,7 +340,7 @@ def test_nonexistent_publication_is_rejected_for_readers_but_not_retained_by_mix
     with pytest.raises(sqlite3.IntegrityError):
         group_roots.pending(store, {'recommendation_generations': [999999]}, 10)
     assert not jobs and not roots(store, 'pending')
-    assert not store.conn.execute("SELECT 1 FROM group_evidence_owners WHERE kind='pending'").fetchone()
+    assert not store.conn.execute("SELECT 1 FROM group_evidence_contexts WHERE kind='pending'").fetchone()
     assert issue(store, 999999) == 'menu'
     assert len(jobs) == 1 and not roots(store, 'pending')
     assert jobs[0].run() == 'menu'

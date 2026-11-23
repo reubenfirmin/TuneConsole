@@ -20,10 +20,10 @@ def _pristine_current_schema():
 @pytest.fixture(autouse=True)
 def action_routes(monkeypatch):
     from yt_playlist.web import app as webapp
-    from yt_playlist.web.routes import actions, app_update, audio_preview, playlists
+    from yt_playlist.web.routes import actions, app_update, audio_vibes, playlists
 
     monkeypatch.setattr(webapp, 'build_all', lambda ctx: [
-        module.build(ctx) for module in (actions, app_update, audio_preview, playlists)])
+        module.build(ctx) for module in (actions, app_update, audio_vibes, playlists)])
 
 
 @pytest.fixture

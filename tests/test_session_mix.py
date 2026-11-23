@@ -1,8 +1,6 @@
-"""#88 SESSION layer's legible companion: `session_mode_mix` mirrors `now_mode_mix`'s nearest-mode
-classification and confidence gate, but over a fixed 24h window with each played key's classification
-decay-weighted by `session_halflife_h` instead of counted flat. See layers.session_mode_mix's
-docstring for why this categorical mix exists alongside `session_tilt` (a direction that can't be
-honestly labeled)."""
+"""TODAY mode shares apply time decay within the listening calendar day."""
+from unittest.mock import Mock
+
 import numpy as np
 import pytest
 
@@ -16,7 +14,8 @@ def session_store(no_database):
     return repository_store(
         settings={'get_setting': None},
         rec_model={'content_generation': {'model': None, 'library': []}},
-        history={'play_events_since': []},
+        history={'play_events_since': [], 'listening_calendars': {None: 'UTC'}, 'live_play_activity': []},
+        player_events={'playback_activity': []},
         rec_eligibility={'generated_only_keys': set()},
         playlists={'radio_playlist_ids': []},
         genres={'feature_axes': {}},
@@ -24,7 +23,8 @@ def session_store(no_database):
             {'mode_id': 1, 'centroid': np.array([1., 0.], dtype=np.float32)},
             {'mode_id': 2, 'centroid': np.array([0., 1.], dtype=np.float32)},
         ]},
-        values={'transient_radio_playlists': set()},
+        values={'transient_radio_playlists': set(),
+                'memoized_read': Mock(side_effect=lambda key, calculate: calculate())},
     )
 
 
@@ -42,7 +42,7 @@ def _recent_plays(store, keys, now):
 
 
 def _identity(store):
-    return store.accounts.upsert_account("main", "cred", None, True)
+    return store.accounts.upsert_account("main", None, True)
 
 
 def _install_modes(store):
@@ -74,12 +74,12 @@ def test_decay_weighted_shares_hand_verified(session_store, monkeypatch):
     keys = ["a1", "b1"]
     V = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
-    now = 100_000.0
+    now = 150_000.0
     store.history.play_events_since.return_value = [
         {'identity_key': 'a1', 'played_at': now},
         {'identity_key': 'b1', 'played_at': now - 12 * 3600.0},
     ]
-    _parameters(store, now_min_events=2, now_window_h=24, session_halflife_h=12.)
+    _parameters(store, now_min_events=2, session_halflife_h=12.)
 
     evidence = layers.recent_evidence(store, now)
 
@@ -96,10 +96,9 @@ def test_decay_weighted_shares_hand_verified(session_store, monkeypatch):
     assert {m["mode_id"] for m in modes} == {1, 2}
     assert modes is evidence.modes
     flat, count, active = layers.now_mode_mix(store, now, evidence=evidence)
-    assert flat == {1: pytest.approx(.5), 2: pytest.approx(.5)}
-    assert count == 2 and active is evidence.modes
+    assert flat is None and count == 0 and active is evidence.modes
     store.history.play_events_since.assert_called_once_with(
-        now - 24 * 3600, exclude_list_ids=[], taste_only=True)
+        86400, exclude_list_ids=[], taste_only=True)
 
 
 def test_below_min_events_returns_none(session_store, monkeypatch):
@@ -116,20 +115,20 @@ def test_below_min_events_returns_none(session_store, monkeypatch):
     assert n == 0
 
 
-def test_30h_old_play_excluded_by_24h_window(store, monkeypatch):
-    # 2 fresh plays (inside the 24h window) + 1 play 30h old (outside it). Gate is 3, so if the old
-    # play counted we'd clear the gate; since it's excluded, only 2 contribute and the read stays None.
+def test_yesterday_excluded_even_within_24h(store, monkeypatch):
+    # The prior day's play would clear the confidence gate if TODAY were rolling.
     _install_modes(store)
     keys = ["a1", "a2", "a3"]
     V = np.array([[1.0, 0.02], [1.0, 0.03], [1.0, 0.01]], dtype=np.float32)
     _install_content_vectors(store, monkeypatch, keys, V)
     iid = _identity(store)
     now = 100_000.0
-    store.history.import_play_events(iid, [
+    for key, video, at in [
         ("a1", "va1", now - 3600.0),
         ("a2", "va2", now - 7200.0),
-        ("a3", "va3", now - 30 * 3600.0),  # 30h old -> outside the fixed 24h session window
-    ])
+        ("a3", "va3", now - 6 * 3600.0),
+    ]:
+        store.history.record_play_event(iid, key, video, at, source_timezone='UTC')
     rec_params.set_param(store, "now_min_events", 3)
 
     shares, n, modes = layers.session_mode_mix(store, now)
@@ -147,11 +146,12 @@ def test_dedup_latest_per_key(store, monkeypatch):
     iid = _identity(store)
     now = 100_000.0
     # rows must arrive oldest-first for the dedup-latest-wins convention (mirrors test_now_layer.py).
-    store.history.import_play_events(iid, [
-        ("a1", "va1", now - 20 * 3600.0),  # a1 played long ago...
+    for key, video, at in [
+        ("a1", "va1", now - 2 * 3600.0),  # a1 played earlier today...
         ("a1", "va1", now),                # ...and again just now (this timestamp should win)
         ("b1", "vb1", now - 3600.0),
-    ])
+    ]:
+        store.history.record_play_event(iid, key, video, at, source_timezone='UTC')
     rec_params.set_param(store, "now_min_events", 2)
     rec_params.set_param(store, "session_halflife_h", 4.0)
 
@@ -201,7 +201,7 @@ def test_session_mode_mix_passes_radio_exclusion_to_play_events_since(session_st
     layers.session_mode_mix(store, 1000.0)
 
     store.history.play_events_since.assert_called_once_with(
-        1000. - 24 * 3600, exclude_list_ids=['PLRADIO', 'PLRADIO_B'], taste_only=True)
+        0., exclude_list_ids=['PLRADIO', 'PLRADIO_B'], taste_only=True)
     store.playlists.radio_playlist_ids.assert_called_once_with()
 
 

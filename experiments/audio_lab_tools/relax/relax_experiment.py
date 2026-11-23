@@ -13,7 +13,8 @@ from threadpoolctl import threadpool_limits
 
 from ..studies import individual_protocol as protocol
 from . import relax_consensus as models
-from ..support.external_experiment import LAB, digest, save, stamp
+from ..legacy import audio_vibe_model
+from ..support.external_experiment import LAB, ROOT, digest, save, stamp
 from ..focus.focus_experiment import arrays, check_receipt, head_predictions, inside, load, runtime
 from ..studies.individual_experiment import compact, receipt
 from ..studies.mapped_vibe_rules import apply, labels
@@ -176,7 +177,10 @@ def validate(directory, execution=False):
         if execution and digest(EXPERIMENTS / name) != checksum:
             raise ValueError('Execution code changed; preserve this attempt: ' + name)
     for name, checksum in plan['references'].items():
-        if digest(name) != checksum:
+        path = Path(name)
+        if path == ROOT / 'src/yt_playlist/rec/data/emotify-vibes.json' and not path.exists():
+            path = audio_vibe_model.DEFAULT_PATH
+        if digest(path) != checksum:
             raise ValueError('Referenced artifact changed: ' + name)
     return plan
 

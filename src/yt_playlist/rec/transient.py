@@ -3,7 +3,7 @@
 Inputs are signed track-key events at a point in recency: mood feedback (mood_events), recent plays
 (history), recent ACTION-provenance likes (rec_feedback kind='like' observed live through the
 extension; sync-discovered likes carry no true action timestamp and are excluded at the repo level,
-see recent_liked_with_ts), recent dislikes (rec_feedback kind='dislike'), recent skips (#84,
+see recent_liked_with_ts), and recent skips (#84,
 player_events track_exit/bye rows classified at read time). Two derived views: facet leans
 (genre/era/artist tokens) and an embedding centroid tilt.
 
@@ -12,15 +12,85 @@ Lifecycle (#85): every event decays on the wall clock with a per-source half-lif
 fades the same way whether or not anything newer arrived.
 """
 import json
+from dataclasses import dataclass
+from datetime import date, timedelta
 
 import numpy as np
 
 from yt_playlist.rec import embedding_vectors as vectors, rec_params
 from yt_playlist.rec.transient_math import decay_weight, facet_multiplier
+from yt_playlist.core.listening_calendar import day_at
 
 # Historical generated radio playlist IDs remain provenance after the deck controller's removal.
 _RADIO_SETTING_KEYS = ("radio_playlist_ytm", "radio_playlist_a_ytm", "radio_playlist_b_ytm")
 PREPARED_LEANS_INTERVAL_S = 300
+
+
+def recent_cutoff(store, now):
+    # Coarse listening days enter through history at day precision. A source's
+    # half-life controls its strength inside this bounded horizon.
+    return now - rec_params.get_param(store, 'recent_horizon_days') * 86400
+
+
+@dataclass(frozen=True)
+class DatedPlay:
+    day: str
+    timezone: str
+    source: str
+    confidence: float = .5
+
+    def age(self, now):
+        return (date.fromisoformat(day_at(now, self.timezone)) - date.fromisoformat(self.day)).days * 86400
+
+
+def source_age(now, observed):
+    return observed.age(now) if isinstance(observed, DatedPlay) else now - observed
+
+
+def source_confidence(observed):
+    return observed.confidence if isinstance(observed, DatedPlay) else 1.
+
+
+def recent_play_evidence(store, now, *, limit, cutoff):
+    excluded = radio_list_ids(store)
+    quarantined = store.rec_eligibility.generated_only_keys()
+    plays = {}
+    for row in store.history.play_events_since(cutoff, excluded, taste_only=True):
+        if row['played_at'] <= now and row['identity_key'] not in quarantined:
+            plays[row['identity_key']] = row['played_at']
+    # Coarse observations have a local day, without a defensible time of day.
+    first = date.fromisoformat(day_at(cutoff, None)) - timedelta(days=1)
+    last = date.fromisoformat(day_at(now, None)) + timedelta(days=1)
+    for row in store.history.recent_calendar_evidence(first.isoformat(), last.isoformat(), now, excluded):
+        key = row['identity_key']
+        if key in quarantined:
+            continue
+        observed = DatedPlay(row['day'], row['timezone'], row['source'])
+        age = observed.age(now)
+        if 0 <= age <= now - cutoff and (key not in plays or age < source_age(now, plays[key])):
+            plays[key] = observed
+    return sorted(plays.items(), key=lambda item: (source_age(now, item[1]), item[0]))[:limit]
+
+
+def recent_sources(store, now):
+    limit = rec_params.get_param(store, 'recent_play_limit')
+    cutoff = recent_cutoff(store, now)
+    events = [(at, direction, keys) for at, direction, keys in store.rec_signals.recent_mood_events()
+              if cutoff <= at <= now]
+    plays = store.memoized_read(('recent-listener-plays', now, cutoff, limit),
+                                lambda: recent_play_evidence(store, now, limit=limit, cutoff=cutoff))
+    likes = [(key, at) for key, at in store.rec_model.recent_liked_with_ts(limit=limit) if cutoff <= at <= now]
+    skips = [(key, at) for key, at in store.player_events.recent_skips_with_ts(cutoff) if at <= now]
+    return events, plays, likes, skips
+
+
+def recent_feedback(store, now):
+    def collect():
+        rows = store.rec_model.recent_recommendation_feedback(recent_cutoff(store, now), now)
+        # Retain the newest directed response for a recording within a scope.
+        return list({(row['surface'], row['scope'], row['item_key']): row for row in reversed(rows)}.values())
+
+    return store.memoized_read(('recent-recommendation-feedback', now), collect)
 
 
 def radio_list_ids(store) -> list[str]:
@@ -116,35 +186,36 @@ def facet_leans(store, now) -> dict:
     # This is an arbitrary tuning range: 0 disables the extra signal; 1 is not neutral.
     # Defaults are 0.30 (plays) / 0.45 (likes). Taste Model displays 0–100% of the range;
     # keep stored values and scoring unchanged unless a future cleanup migrates them together.
-    play_w, like_w, dislike_w = (gp(store, "play_transient_w"), gp(store, "like_transient_w"),
-                                 gp(store, "dislike_transient_w"))
+    play_w, like_w = gp(store, "play_transient_w"), gp(store, "like_transient_w")
     play_hl, mood_hl = gp(store, "play_halflife_d"), gp(store, "mood_halflife_d")
-    like_hl, dislike_hl = gp(store, "like_halflife_d"), gp(store, "dislike_halflife_d")
+    like_hl = gp(store, "like_halflife_d")
     skip_w, skip_hl = gp(store, "skip_transient_w"), gp(store, "skip_halflife_d")
-    limit = gp(store, "recent_play_limit")
-    events = store.rec_signals.recent_mood_events()
-    plays = evidence_plays(store, limit)
-    likes = store.rec_model.recent_liked_with_ts(limit=limit)
-    dislikes = store.rec_model.disliked_with_ts()
-    skips = store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400)
-    contributions = signed_contributions(now, events, plays, likes, dislikes, skips,
-        play_w=play_w, like_w=like_w, dislike_w=dislike_w, skip_w=skip_w,
-        play_hl=play_hl, mood_hl=mood_hl, like_hl=like_hl, dislike_hl=dislike_hl, skip_hl=skip_hl)
+    events, plays, likes, skips = recent_sources(store, now)
+    contributions = signed_contributions(now, events, plays, likes, skips,
+        play_w=play_w, like_w=like_w, skip_w=skip_w,
+        play_hl=play_hl, mood_hl=mood_hl, like_hl=like_hl, skip_hl=skip_hl)
+    contributions.extend(([row['item_key']], .5 * decay_weight(now - row['created_at'], like_hl), False)
+                         for row in recent_feedback(store, now) if row['kind'] == 'more')
     facets = facets_for(store, [key for keys, _, _ in contributions for key in keys])
     from yt_playlist.rec import choice_learning
     choices = []
+    cutoff = recent_cutoff(store, now)
     for interest in choice_learning.contexts(store, now):
         if interest['format'] != 'mixes' or interest.get('descriptor_id') is None:
             continue
+        weight = interest['layer_weights']['recent']
+        if not weight or interest['at'] < cutoff:
+            continue
         descriptor = store.rec_ledger.mix_descriptor(interest['descriptor_id'])
+        if descriptor is None:
+            continue
         families = {value[0] for value in store.genres.feature_axes(descriptor['genres']).values()}
-        choices.append((families, interest['weight']))
+        choices.append((families, weight))
     return facet_leans_from_inputs(contributions, facets, choices)
 
 
-def signed_contributions(now, events, plays, likes, dislikes, skips, *,
-                         play_w, like_w, dislike_w, skip_w,
-                         play_hl, mood_hl, like_hl, dislike_hl, skip_hl):
+def signed_contributions(now, events, plays, likes, skips, *,
+                         play_w, like_w, skip_w, play_hl, mood_hl, like_hl, skip_hl):
     """Decay detached event facts while preserving source polarity and artist suppression."""
     contributions = []
 
@@ -156,23 +227,14 @@ def signed_contributions(now, events, plays, likes, dislikes, skips, *,
     for ts, direction, keys in events:
         add(keys, direction * decay_weight(now - ts, mood_hl))
     for k, ts in plays:
-        add([k], play_w * decay_weight(now - ts, play_hl))
+        add([k], play_w * source_confidence(ts) * decay_weight(source_age(now, ts), play_hl))
     # Likes here are ACTION-provenance only (recent_liked_with_ts filters at the repo): a like
     # observed live has a real event time and belongs at the top of the model stack. A like the
     # library sync merely discovered has no reliable time (its created_at is first-sight), so it
     # never reaches the transient model; it shapes the permanent model only, via graduation.
     for k, ts in likes:
         add([k], like_w * decay_weight(now - ts, like_hl))
-    # #54: a dislike is a verdict on THAT track, not the artist (the track itself is hard-suppressed
-    # via suppressed_keys). Genre/era leans stay, but #85 they now FADE by age instead of pressing at
-    # full strength forever.
-    for k, ts in dislikes:
-        add([k], -dislike_w * decay_weight(now - ts, dislike_hl), drop_artist=True)
-    # #84: extends #54's rationale one step further. A skip is a verdict on THAT track in THAT
-    # moment (could be mood, could be context, could just be an accident of the queue), even weaker
-    # evidence against the artist than a dislike is, so the artist axis never sees it either
-    # (drop_artist=True). Lookback is a generous 4 half-lives (mirrors the mood-prune rationale) so
-    # the read only asks the store for skips that could still matter, not the whole history.
+    # A skip is specific to the track and moment. It supplies no artist signal.
     for k, ts in skips:
         add([k], -skip_w * decay_weight(now - ts, skip_hl), drop_artist=True)
     return contributions
@@ -210,7 +272,7 @@ def facet_leans_from_inputs(contributions, facets, choices):
 def play_facet_leans(store, now) -> dict:
     """The recent-plays slice of `facet_leans`, in isolation.
 
-    `facet_leans` blends every transient source (mood, plays, likes, dislikes). The play-exposure
+    `facet_leans` blends every transient source (mood, plays, likes and skips). The play-exposure
     graduation funnel (graduation.graduate_play_exposure) must graduate plays SPECIFICALLY, because
     likes / positive vibe taps already graduate at event time; negative signals must not graduate. So
     this returns only the positive, wall-clock-decayed push from recent plays (#85: per-event age, no
@@ -240,7 +302,7 @@ def play_leans_from_inputs(plays, facets, now, *, weight, half_life_d):
     return leans
 
 
-def centroid_tilt(store, now, V, idx):
+def centroid_tilt(store, now, V, idx, *, consumed_plays=None):
     """Bounded embedding tilt from the unified transient stream: mood events, recent plays,
     recent likes (action provenance only, see recent_liked_with_ts), and recent skips (#84,
     negative), each wall-clock decayed by its own half-life (#85). None if quiet.
@@ -252,13 +314,13 @@ def centroid_tilt(store, now, V, idx):
     Callers use this magnitude directly, without another normalization or freshness factor.
     """
     gp = rec_params.get_param
-    limit = gp(store, "recent_play_limit")
     skip_hl, skip_w = gp(store, "skip_halflife_d"), gp(store, "skip_transient_w")
-    events = store.rec_signals.recent_mood_events()
-    plays = evidence_plays(store, limit)
-    likes = store.rec_model.recent_liked_with_ts(limit=limit)
-    skips = store.player_events.recent_skips_with_ts(now - 4 * skip_hl * 86400)     # #84: same lookback as facet_leans
-    if not events and not plays and not likes and not skips:
+    events, plays, likes, skips = recent_sources(store, now)
+    if consumed_plays:
+        plays = [(key, stamp) for key, stamp in plays if (key, stamp) not in consumed_plays]
+    events = list(events) + [(row['created_at'], .5 if row['kind'] == 'more' else -.5, [row['item_key']])
+                             for row in recent_feedback(store, now)]
+    if not any((events, plays, likes, skips)):
         return None
     mood_hl = gp(store, "mood_halflife_d")
     play_hl, play_w = gp(store, "play_halflife_d"), gp(store, "play_transient_w")
@@ -296,7 +358,7 @@ def tilt_from_inputs(now, V, idx, events, plays, likes, skips, *,
             nrm = np.linalg.norm(v)
             if nrm == 0:
                 continue
-            tilt = tilt + w_base * decay_weight(now - ts, half_life_d) * (v / nrm)
+            tilt = tilt + w_base * source_confidence(ts) * decay_weight(source_age(now, ts), half_life_d) * (v / nrm)
             weight += abs(w_base)
 
     _add_dir(plays, play_w, play_hl)
@@ -307,7 +369,7 @@ def tilt_from_inputs(now, V, idx, events, plays, likes, skips, *,
     return tilt / weight if weight > 0 and np.any(tilt) else None
 
 
-def audio_centroid_tilt(store, now, *, content_vecs=None):
+def audio_centroid_tilt(store, now, *, content_vecs=None, consumed_plays=None):
     """Bounded tilt in the audio-aware CONTENT vector space toward recent listening, so ranking can
     lean to the SOUND of what you have been playing (tempo / energy / mood), not just its genre/era/
     artist facets or its co-occurrence neighbours. The content-space sibling of `centroid_tilt`: same
@@ -328,4 +390,6 @@ def audio_centroid_tilt(store, now, *, content_vecs=None):
     _ckeys, CV, cidx = vectors.load_content_vectors(store) if content_vecs is None else content_vecs
     if CV is None:
         return None
+    if consumed_plays:
+        return centroid_tilt(store, now, CV, cidx, consumed_plays=consumed_plays)
     return centroid_tilt(store, now, CV, cidx)

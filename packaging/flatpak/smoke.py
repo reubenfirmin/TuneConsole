@@ -16,7 +16,8 @@ APP = "com.tuneconsole.TuneConsole"
 IDENTITY_PROBE = """
 import importlib.metadata as m, json, os
 from yt_playlist.web.routes.bridge import EXTENSION_ORIGIN
-from yt_playlist.core import destination_schema, schema_definition, updatecheck
+from yt_playlist.core import destination_schema, updatecheck
+from yt_playlist.core.migrations import schema_definition
 from yt_playlist.core.migrations import regular
 from yt_playlist.core.migrations.registry import MIGRATIONS
 assert os.environ.get('FLATPAK_ID') == 'com.tuneconsole.TuneConsole'
@@ -86,13 +87,14 @@ print(ET.parse('/app/share/metainfo/com.tuneconsole.TuneConsole.metainfo.xml').f
         headers["Origin"] = "https://example.com"
         assert request("/bridge/ws", headers)[0] == 403
         inside("""
-from yt_playlist.core import destination_schema, paths, vibe_versions
+from contextlib import closing
+from yt_playlist.core import paths, vibe_versions
 from yt_playlist.core.store import Store
-store=Store(paths.db_path()); store.init_schema()
-assert destination_schema.complete(store.conn)
-assert vibe_versions.normalized(store.conn)
-store.settings.set_setting('flatpak_smoke','persisted')
-assert paths.app_log_path().is_file()
+store = Store.open_current(paths.db_path())
+with closing(store.conn):
+    assert vibe_versions.normalized(store.conn)
+    store.settings.set_setting('flatpak_smoke', 'persisted')
+    assert paths.app_log_path().is_file()
 """)
     finally:
         # flatpak build can exit without forwarding a signal to its sandbox child.
@@ -106,10 +108,12 @@ assert paths.app_log_path().is_file()
     # Flatpak's wrapper may retain SIGTERM's status after closing the sandbox.
     assert process.returncode in (0, -signal.SIGTERM, 128 + signal.SIGTERM), process.returncode
     inside("""
+from contextlib import closing
 from yt_playlist.core import paths
 from yt_playlist.core.store import Store
-store=Store(paths.db_path()); store.init_schema()
-assert store.settings.get_setting('flatpak_smoke')=='persisted'
+store = Store.open_current(paths.db_path())
+with closing(store.conn):
+    assert store.settings.get_setting('flatpak_smoke') == 'persisted'
 """)
 
 
